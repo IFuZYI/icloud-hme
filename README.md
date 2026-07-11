@@ -464,6 +464,9 @@ GOOS=linux GOARCH=amd64 go build -o icloud-hme .
 MIT License
 
 ---
+## 社区
+
+友情链接：[LINUX DO](https://linux.do)
 
 ## English
 
