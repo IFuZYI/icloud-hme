@@ -38,10 +38,11 @@ type Account struct {
 
 // Manager 管理多个 iCloud 账号,线程安全。
 type Manager struct {
-	mu        sync.Mutex
-	accounts  map[string]*Account
-	dataDir   string
-	dataFile  string
+	mu       sync.Mutex
+	accounts map[string]*Account
+	dataDir  string
+	dataFile string
+	imapPool *mail.Pool // IMAP 长连接池
 }
 
 // NewManager 创建管理器。dataDir 用于存放 accounts.json。
@@ -53,11 +54,19 @@ func NewManager(dataDir string) (*Manager, error) {
 		accounts: make(map[string]*Account),
 		dataDir:  dataDir,
 		dataFile: filepath.Join(dataDir, "accounts.json"),
+		imapPool: mail.NewPool(),
 	}
 	if err := m.load(); err != nil {
 		return nil, err
 	}
 	return m, nil
+}
+
+// Close 释放 IMAP 连接池等资源。
+func (m *Manager) Close() {
+	if m.imapPool != nil {
+		m.imapPool.Close()
+	}
 }
 
 // Reload 重新加载 accounts.json 配置文件。
@@ -304,26 +313,48 @@ func (m *Manager) HMEClientWithPassword(id, password string, otpProvider hme.OTP
 	return client, nil
 }
 
-// MailClient 为指定账号创建 IMAP 邮件客户端。
+// MailClient 为指定账号创建 IMAP 邮件客户端(每次新建, 不走连接池)。
 // 需要事先设置 iCloud 邮箱和 App 专用密码。
+// 高频读信请用 WithMailClient 复用长连接。
 func (m *Manager) MailClient(id string) (*mail.Client, error) {
+	imapEmail, appPassword, err := m.imapCreds(id)
+	if err != nil {
+		return nil, err
+	}
+	return mail.NewClient(imapEmail, appPassword), nil
+}
+
+// WithMailClient 使用连接池中的长连接执行 fn(串行/账号级)。
+// fn 返回后连接保留在池中, 不会 Logout。
+func (m *Manager) WithMailClient(id string, fn func(*mail.Client) error) error {
+	imapEmail, appPassword, err := m.imapCreds(id)
+	if err != nil {
+		return err
+	}
+	if m.imapPool == nil {
+		m.imapPool = mail.NewPool()
+	}
+	return m.imapPool.Do(imapEmail, appPassword, fn)
+}
+
+func (m *Manager) imapCreds(id string) (imapEmail, appPassword string, err error) {
 	m.mu.Lock()
 	acc, ok := m.accounts[id]
 	m.mu.Unlock()
 	if !ok {
-		return nil, fmt.Errorf("账号不存在: %s", id)
+		return "", "", fmt.Errorf("账号不存在: %s", id)
 	}
-	imapEmail := acc.ICloudEmail
+	imapEmail = acc.ICloudEmail
 	if imapEmail == "" {
 		imapEmail = acc.RealEmail
 	}
 	if !isICloudDomain(imapEmail) {
-		return nil, fmt.Errorf("账号未设置 iCloud 邮箱 (当前: %s)", imapEmail)
+		return "", "", fmt.Errorf("账号未设置 iCloud 邮箱 (当前: %s)", imapEmail)
 	}
 	if acc.AppPassword == "" {
-		return nil, fmt.Errorf("账号未设置 App 专用密码")
+		return "", "", fmt.Errorf("账号未设置 App 专用密码")
 	}
-	return mail.NewClient(imapEmail, acc.AppPassword), nil
+	return imapEmail, acc.AppPassword, nil
 }
 
 // WebMailClient 为指定账号创建 Web 邮件客户端。

@@ -158,30 +158,28 @@ func (s *Server) listInbox(c *gin.Context) {
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
 	days, _ := strconv.Atoi(c.DefaultQuery("days", "7"))
 
-	// 优先使用 IMAP (App Password 认证)
-	mc, err := s.mgr.MailClient(accountID)
-	if err == nil {
-		if connErr := mc.Connect(); connErr == nil {
-			defer mc.Disconnect()
-			var messages []mail.Message
-			if alias != "" {
-				messages, err = mc.FindByRecipient(alias, limit, days)
-			} else {
-				messages, err = mc.ListInbox(limit, days)
-			}
-			if err == nil {
-				ok(c, gin.H{
-					"account_id": accountID,
-					"alias":      alias,
-					"count":      len(messages),
-					"messages":   messages,
-					"method":     "imap",
-				})
-				return
-			}
-			// IMAP 失败，继续尝试 Web API
+	// 优先使用 IMAP 连接池 (App Password 认证)
+	var messages []mail.Message
+	err := s.mgr.WithMailClient(accountID, func(mc *mail.Client) error {
+		var e error
+		if alias != "" {
+			messages, e = mc.FindByRecipient(alias, limit, days)
+		} else {
+			messages, e = mc.ListInbox(limit, days)
 		}
+		return e
+	})
+	if err == nil {
+		ok(c, gin.H{
+			"account_id": accountID,
+			"alias":      alias,
+			"count":      len(messages),
+			"messages":   messages,
+			"method":     "imap",
+		})
+		return
 	}
+	// IMAP 失败，继续尝试 Web API
 
 	// 回退到 Web API (Cookie 认证，无需 App Password)
 	wmc, err := s.mgr.WebMailClient(accountID)
