@@ -6,6 +6,7 @@ interface ConfirmDialogProps {
   message: string
   confirmLabel?: string
   requireText?: string
+  requireLabel?: string
   open: boolean
   onClose: () => void
   onConfirm: () => void
@@ -18,6 +19,7 @@ export default function ConfirmDialog({
   message,
   confirmLabel = '确认删除',
   requireText,
+  requireLabel = '输入账号名称',
   open,
   onClose,
   onConfirm,
@@ -38,7 +40,7 @@ export default function ConfirmDialog({
       <p>{message}</p>
       {requireText && (
         <div className="form-field">
-          <label htmlFor="confirm-text">输入账号名称</label>
+          <label htmlFor="confirm-text">{requireLabel}</label>
           <input
             id="confirm-text"
             value={input}
