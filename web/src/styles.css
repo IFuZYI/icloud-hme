@@ -1,0 +1,360 @@
+/* iCloud HME 管理台设计系统:白/浅灰背景、蓝色主色、红色危险色、系统字体 */
+
+:root {
+  --color-bg: #ffffff;
+  --color-bg-subtle: #f5f6f8;
+  --color-text: #1d2129;
+  --color-text-secondary: #6b7280;
+  --color-primary: #0a6cff;
+  --color-primary-hover: #095edb;
+  --color-danger: #d93026;
+  --color-danger-hover: #c22b21;
+  --color-border: #dcdfe4;
+  --color-focus: #0a6cff;
+  --radius: 8px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei', 'Helvetica Neue', Arial, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+/* 可见 focus ring */
+:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+
+/* skip link */
+.skip-link {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  background: var(--color-primary);
+  color: #fff;
+  padding: var(--space-2) var(--space-4);
+  z-index: 100;
+}
+
+.skip-link:focus {
+  left: 0;
+}
+
+/* 布局 */
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+.app-shell header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-5);
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-bg);
+  flex-wrap: wrap;
+}
+
+.app-shell header h1 {
+  font-size: 16px;
+  margin: 0;
+}
+
+.app-shell nav {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.app-shell nav a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: var(--space-1) var(--space-3);
+  border-radius: var(--radius);
+  color: var(--color-text);
+  text-decoration: none;
+}
+
+.app-shell nav a:hover {
+  background: var(--color-bg-subtle);
+}
+
+.app-shell nav a[aria-current='page'] {
+  background: var(--color-bg-subtle);
+  color: var(--color-primary);
+  font-weight: 600;
+}
+
+.app-shell .spacer {
+  flex: 1;
+}
+
+.app-shell main {
+  flex: 1;
+  padding: var(--space-5);
+  width: 100%;
+  max-width: 1100px;
+  margin: 0 auto;
+}
+
+/* 按钮 */
+button {
+  font: inherit;
+  min-height: 44px;
+  padding: var(--space-2) var(--space-4);
+  border-radius: var(--radius);
+  border: 1px solid var(--color-border);
+  background: var(--color-bg);
+  color: var(--color-text);
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  background: var(--color-bg-subtle);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+button.primary {
+  background: var(--color-primary);
+  border-color: var(--color-primary);
+  color: #fff;
+}
+
+button.primary:hover:not(:disabled) {
+  background: var(--color-primary-hover);
+}
+
+button.danger {
+  background: var(--color-danger);
+  border-color: var(--color-danger);
+  color: #fff;
+}
+
+button.danger:hover:not(:disabled) {
+  background: var(--color-danger-hover);
+}
+
+/* 表单 */
+label {
+  display: block;
+  margin-bottom: var(--space-1);
+  font-weight: 500;
+}
+
+input,
+select,
+textarea {
+  font: inherit;
+  width: 100%;
+  min-height: 44px;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  background: var(--color-bg);
+  color: var(--color-text);
+}
+
+textarea {
+  min-height: 88px;
+  resize: vertical;
+}
+
+.form-field {
+  margin-bottom: var(--space-4);
+}
+
+.form-actions {
+  display: flex;
+  gap: var(--space-3);
+  justify-content: flex-end;
+}
+
+/* 表格:窄屏横向滚动 */
+.table-wrap {
+  overflow-x: auto;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th,
+td {
+  text-align: left;
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+  vertical-align: top;
+}
+
+th {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* 状态 */
+.status-active {
+  color: #1a7f37;
+  font-weight: 600;
+}
+
+.status-pending {
+  color: #9a6700;
+  font-weight: 600;
+}
+
+.status-error {
+  color: var(--color-danger);
+  font-weight: 600;
+}
+
+/* 反馈 */
+.alert-error {
+  border: 1px solid #f3c1be;
+  background: #fdf0ef;
+  color: var(--color-danger);
+  border-radius: var(--radius);
+  padding: var(--space-3) var(--space-4);
+  margin-bottom: var(--space-4);
+}
+
+.alert-info {
+  border: 1px solid #cfe1ff;
+  background: #f0f6ff;
+  color: #0a58c4;
+  border-radius: var(--radius);
+  padding: var(--space-3) var(--space-4);
+  margin-bottom: var(--space-4);
+}
+
+/* Toast */
+.toast-region {
+  position: fixed;
+  bottom: var(--space-5);
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  z-index: 200;
+}
+
+.toast {
+  background: var(--color-text);
+  color: #fff;
+  border-radius: var(--radius);
+  padding: var(--space-3) var(--space-4);
+  box-shadow: 0 4px 16px rgb(0 0 0 / 0.2);
+  min-width: 240px;
+  max-width: 480px;
+}
+
+/* 页面标题与操作区 */
+.page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-bottom: var(--space-5);
+  flex-wrap: wrap;
+}
+
+.page-header h2 {
+  margin: 0;
+  font-size: 20px;
+}
+
+/* 卡片 */
+.card {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: var(--space-4);
+  background: var(--color-bg);
+}
+
+/* Dialog */
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgb(0 0 0 / 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-4);
+  z-index: 150;
+}
+
+.dialog {
+  background: var(--color-bg);
+  border-radius: var(--radius);
+  padding: var(--space-5);
+  width: 100%;
+  max-width: 480px;
+  max-height: 90vh;
+  overflow-y: auto;
+}
+
+.dialog h3 {
+  margin: 0 0 var(--space-4);
+  font-size: 18px;
+}
+
+/* 空状态 */
+.empty-state {
+  text-align: center;
+  padding: var(--space-6);
+  color: var(--color-text-secondary);
+}
+
+/* 表单提示文字 */
+.hint {
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  margin-top: var(--space-1);
+}
+
+/* 数据行操作按钮(表格内,紧凑) */
+.row-actions {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.row-actions button {
+  min-height: 36px;
+  padding: var(--space-1) var(--space-3);
+  font-size: 13px;
+}
+
+/* 减少动效偏好 */
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition: none !important;
+    animation: none !important;
+  }
+}
