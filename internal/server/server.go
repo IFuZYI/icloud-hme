@@ -13,6 +13,7 @@ package server
 
 import (
 	"errors"
+	"io/fs"
 	"net/http"
 	"strconv"
 	"strings"
@@ -21,6 +22,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"icloud-hme/internal/account"
 	"icloud-hme/internal/auth"
+	"icloud-hme/internal/webui"
 )
 
 // Config 是 Server 的启动配置。
@@ -123,9 +125,27 @@ func (s *Server) register() {
 	}
 	// API 404 返回 JSON,绝不让 NoRoute 把拼错的 API 路径变成 HTML
 	s.r.NoRoute(func(c *gin.Context) {
-		failCode(c, http.StatusNotFound, "VALIDATION_ERROR", "接口不存在")
+		if strings.HasPrefix(c.Request.URL.Path, "/api/") {
+			failCode(c, http.StatusNotFound, "VALIDATION_ERROR", "接口不存在")
+			return
+		}
+		// 其余路径交给 webui(SPA fallback)
+		if c.Request.Method != http.MethodGet && c.Request.Method != http.MethodHead {
+			c.String(http.StatusMethodNotAllowed, "方法不允许")
+			return
+		}
+		webui.Handler(webuiFS).ServeHTTP(c.Writer, c.Request)
 	})
 }
+
+// webuiFS 是内嵌前端资源(可被测试替换)。
+var webuiFS = func() fs.FS {
+	f, err := webui.Embedded()
+	if err != nil {
+		return nil
+	}
+	return f
+}()
 
 // ====================================================================
 // 核心接口 1: 创建邮箱
