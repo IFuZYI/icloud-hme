@@ -2,16 +2,18 @@
 
 [English](#english) | 中文
 
-通过逆向 iCloud Web 接口和 IMAP 邮件协议，实现 Apple iCloud 隐藏邮箱别名的创建、列出和邮件收取功能。
+通过逆向 iCloud Web 接口和 IMAP 邮件协议，实现 Apple iCloud 隐藏邮箱别名的创建、列出和邮件收取功能。内置中文管理界面（React 单页应用，随二进制内嵌分发）。
 
 ## 功能特性
 
+- ✅ **中文管理界面** — 浏览器访问 `http://localhost:8081` 即开即用
 - ✅ **创建 HME 别名** — 自动生成 iCloud 隐藏邮箱地址
 - ✅ **列出所有别名** — 查看账号下的所有 HME 别名
 - ✅ **收取邮件** — 通过 IMAP 或 Web API 读取发到 HME 别名的邮件
 - ✅ **双路径读信** — 邮件读取优先走 IMAP (App Password),无 App Password 时回退 Web API (Cookie)
 - ✅ **多账号管理** — 支持多个 iCloud 账号并行管理
 - ✅ **双认证模式** — Cookie (创建别名 + 读邮件回退) 和 App Password (IMAP 优先)
+- ✅ **安全模型** — 单管理员会话、CSRF 校验、登录限流、响应脱敏
 
 ## 快速开始
 
@@ -30,7 +32,8 @@
 | Windows x86_64 | `icloud-hme_windows_amd64.exe` |
 
 ```bash
-# 示例：Linux 下直接运行
+# 示例：Linux 下直接运行（必须先设置管理员密码）
+export ICLOUD_HME_ADMIN_PASSWORD='change-this-before-running-2026'
 chmod +x icloud-hme_linux_amd64
 ./icloud-hme_linux_amd64
 ```
@@ -46,55 +49,75 @@ docker run -d \
   --name icloud-hme \
   -p 8081:8081 \
   -v /path/to/data:/app/data \
+  -e ICLOUD_HME_ADMIN_PASSWORD='change-this-before-running-2026' \
   ghcr.io/xiaozhou26/icloud-hme:latest
 ```
 
+> ⚠️ 上面的密码仅为示例，**不可照抄**，请务必更换为至少 12 字符的强密码。
+
 镜像支持 `linux/amd64` 和 `linux/arm64` 双架构，自动适配。
 
-#### 方式三：源码编译
+#### 方式三：源码编译（需要 Go 1.26+ 与 Node.js 22.12+ 双工具链）
 
 ```bash
-# 前置要求: Go 1.26+
+# 前置要求: Go 1.26+、Node.js 22.12+
 git clone https://github.com/xiaozhou26/icloud-hme.git
 cd icloud-hme
 
-# 编译
-go build -o icloud-hme.exe .
+# 一键构建（安装前端依赖 → 前端测试 → 前端构建 → Go 测试 → 编译）
+./build.sh
 
-# 调试模式（启用 Gin 请求日志）
-./icloud-hme.exe -debug
+# 或者手动分步构建
+npm --prefix web ci
+npm --prefix web run build
+go build -o icloud-hme .
 ```
 
-### 2. 配置账号
+### 2. 安全配置（必读）
 
-在程序 `data/` 目录下创建 `accounts.json`:
+管理界面与 API 均需要管理员登录，升级后所有 API 都必须先通过 `POST /api/auth/login` 获取会话：
+
+| 环境变量 | 说明 | 默认 |
+|---|---|---|
+| `ICLOUD_HME_ADMIN_PASSWORD` | 管理员密码，**必填**，至少 12 字符 | 无（缺失时拒绝启动） |
+| `ICLOUD_HME_SESSION_TTL` | 会话有效期 | `12h`（范围 `15m`–`168h`） |
+| `ICLOUD_HME_SECURE_COOKIE` | 通过 TLS 反向代理部署时设为 `true` | `false` |
+
+> **Breaking Change（v0.3+）**：升级后未设置 `ICLOUD_HME_ADMIN_PASSWORD` 将拒绝启动；
+> 原有匿名 API 调用将收到 `401 AUTH_REQUIRED`。管理员会话只存内存，进程重启即失效。
+
+### 3. 配置账号
+
+在程序 `data/` 目录下创建 `accounts.json`（参考仓库内 `accounts.json.template`）：
 
 ```json
 {
-  "accounts": [
-    {
+  "accounts": {
+    "acc_1": {
       "id": "acc_1",
       "name": "主号",
-      "host": "icloud.com",
+      "real_email": "owner@example.com",
+      "icloud_email": "owner@icloud.com",
       "cookies": {
         "X-APPLE-WEBAUTH-TOKEN": "token_value",
-        "X-APPLE-WEBAUTH-USER": "v=1:s=1:d=22789132008",
-        "X-APPLE-WEBAUTH-HSA-TRUST": "trust_value",
-        "X-APPLE-DS-WEB-SESSION-TOKEN": "session_token"
+        "X-APPLE-WEBAUTH-USER": "v=1:s=1:d=22789132008"
       },
+      "host": "icloud.com",
+      "proxy": "http://user:pass@host:port",
       "app_password": "xxxx-xxxx-xxxx-xxxx",
-      "proxy": "http://user:pass@host:port"
+      "status": "active"
     }
-  ]
+  }
 }
 ```
 
-> **提示:** 也可以通过 API 动态添加账号，无需手动编辑 JSON 文件。`cookies` 和 `app_password` 都是可选的，`proxy` 也是可选的。
+> **提示:** 也可以通过管理界面的「账号」页面动态添加账号，无需手动编辑 JSON 文件。`cookies`、`app_password`、`proxy` 都是可选的。
 
-### 3. 启动服务
+### 4. 启动服务
 
 ```bash
 # 二进制方式（默认 data 目录）
+export ICLOUD_HME_ADMIN_PASSWORD='your-strong-password'
 ./icloud-hme_linux_amd64
 
 # 指定端口和数据目录
@@ -107,9 +130,11 @@ go build -o icloud-hme.exe .
 ./icloud-hme_linux_amd64 -h
 ```
 
-服务默认监听 `:8081`。
+服务默认监听 `:8081`。浏览器打开 `http://localhost:8081` 进入管理界面（账号 / 别名 / 收件箱）。完整 API 契约见 [API.md](API.md)。
 
 ## API 接口
+
+> **认证**：除 `POST /api/auth/login` 与 `GET /api/auth/session` 外，所有 `/api` 接口都需要管理员会话 Cookie（`hme_session`）；非 GET/HEAD/OPTIONS 请求还需携带 `X-CSRF-Token` 请求头。完整契约与 curl 示例见 [API.md](API.md)。
 
 ### 核心接口
 
@@ -427,20 +452,32 @@ App Password 用于 IMAP 读取邮件,是邮件读取的优先路径 (支持服�
 
 ```
 icloud-hme/
-├── main.go                 # 入口: 加载配置、初始化管理器、启动服务
+├── main.go                 # 入口: 读取安全配置、加载账号、启动服务
+├── web/                    # 前端工程 (React + TypeScript + Vite)
+│   └── src/                #   管理界面源码
 ├── accounts.json           # 账号配置文件 (自动生成)
 ├── go.mod
 └── internal/
     ├── account/
-    │   └── manager.go      # 多账号管理器 (持久化、客户端工厂)
+    │   ├── manager.go      # 多账号管理器 (持久化、客户端工厂)
+    │   └── public.go       # 公开 DTO (Summary) 与输入校验
+    ├── auth/
+    │   ├── manager.go      # 管理员会话 + CSRF
+    │   └── limiter.go      # 登录失败限流
     ├── hme/
     │   ├── client.go       # iCloud HME Web 客户端 (Cookie 认证)
     │   └── auth.go         # SRP 登录 (账号密码 + 2FA 获取 Cookie)
     ├── mail/
     │   ├── client.go       # IMAP 邮件客户端 (App Password 认证)
     │   └── web_client.go   # Web 邮件客户端 (Cookie 认证,无需 App Password)
-    └── server/
-        └── server.go       # HTTP API (Gin 路由 + 请求处理)
+    ├── server/
+    │   ├── server.go       # 路由分组 (认证 + CSRF)
+    │   ├── backend.go      # 业务接口与 Manager 适配器
+    │   ├── auth.go         # 登录/会话/退出 handler 与中间件
+    │   ├── account_handlers.go  # 账号管理 handler
+    │   └── middleware.go   # 安全响应头、请求上限
+    └── webui/
+        └── embed.go        # 内嵌前端资源 + SPA fallback
 ```
 
 ### 核心模块
@@ -450,12 +487,12 @@ icloud-hme/
 - **hme.auth**: SRP 协议登录,支持账号密码 + 可选 2FA
 - **mail.Client**: IMAP 邮件客户端 (App Password,优先读邮件)
 - **mail.WebClient**: 通过 iCloud Web API (mccgateway) 读取邮件,无需 App Password
-- **server.Server**: HTTP API 服务,提供 RESTful 接口
+- **server.Server**: HTTP API 服务 + 管理界面静态资源
 
 ## 技术栈
 
-- **Go 1.26+**
-- **Gin** — HTTP 框架
+- **Go 1.26+** / **Gin** — HTTP 框架
+- **React 19 + TypeScript + Vite 8** — 管理界面
 - **go-imap** — IMAP 协议实现
 - **tls-client** — TLS 指纹模拟 (绕过 iCloud 反爬)
 
@@ -482,14 +519,19 @@ icloud-hme/
 ### 本地开发
 
 ```bash
-# 安装依赖
-go mod download
+# 前端开发模式 (vite dev server, /api 代理到 :8081)
+npm --prefix web ci
+npm --prefix web run dev
 
-# 运行 (开发模式，默认 :8081，带 Gin 请求日志)
+# 后端开发模式
+export ICLOUD_HME_ADMIN_PASSWORD='your-strong-password'
 go run main.go -debug
 
-# 编译
-go build -o icloud-hme.exe .
+# 前端检查 (lint + test + build)
+npm --prefix web run check
+
+# 完整构建 (含前端)
+./build.sh
 
 # 交叉编译
 GOOS=linux GOARCH=amd64 go build -o icloud-hme .

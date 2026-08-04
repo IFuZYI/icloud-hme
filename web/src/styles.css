@@ -307,6 +307,10 @@ th {
   justify-content: center;
   padding: var(--space-4);
   z-index: 150;
+  border: none;
+  cursor: default;
+  font: inherit;
+  color: inherit;
 }
 
 .dialog {

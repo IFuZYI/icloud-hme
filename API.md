@@ -7,63 +7,257 @@ HTTP JSON API，所有接口返回统一格式：
 ```json
 {
   "success": true,
-  "data": {},
-  "message": ""
+  "data": {}
 }
 ```
 
-**错误响应:**
-- `400 Bad Request` — 参数错误
-- `401 Unauthorized` — 会话失效
-- `404 Not Found` — 账号不存在
-- `502 Bad Gateway` — iCloud 服务错误
+**失败响应：**
+
+```json
+{
+  "success": false,
+  "code": "VALIDATION_ERROR",
+  "message": "参数错误"
+}
+```
+
+**稳定错误码：** `AUTH_REQUIRED`、`INVALID_CREDENTIALS`、`RATE_LIMITED`、`CSRF_INVALID`、`VALIDATION_ERROR`、`ACCOUNT_NOT_FOUND`、`OTP_REQUIRED`、`OTP_INVALID`、`UPSTREAM_UNAUTHORIZED`、`UPSTREAM_FAILURE`、`INTERNAL_ERROR`
+
+**安全约定：**
+
+- 除 `POST /api/auth/login` 与 `GET /api/auth/session` 外，所有 `/api` 接口都需要管理员会话
+- 非 GET/HEAD/OPTIONS 请求必须携带 `X-CSRF-Token` 请求头
+- 会话 Cookie：`hme_session`，`Path=/`、`HttpOnly`、`SameSite=Strict`；TLS 部署时设置 `ICLOUD_HME_SECURE_COOKIE=true` 启用 `Secure`
+- 任何账号响应**绝不包含** `cookies`、`app_password`、`proxy` 字段（代理只暴露 `has_proxy` 布尔值）
+- 用户可见错误消息不拼接上游响应体或秘密
 
 ---
 
-## 核心接口
+## 认证端点
 
-### 1. 创建 HME 别名
+### 1. 登录
 
 ```http
-POST /api/create
+POST /api/auth/login
 Content-Type: application/json
 
+{"password": "管理员密码"}
+```
+
+**成功响应：** 设置 `hme_session` Cookie
+
+```json
 {
-  "account_id": "acc_1",
-  "label": "注册某网站"
+  "success": true,
+  "data": {
+    "csrf_token": "随机值",
+    "expires_at": "2026-08-05T22:00:00+08:00"
+  }
 }
 ```
 
-**响应:**
+**错误：**
+
+- `401 INVALID_CREDENTIALS` — 密码错误（不设置 Cookie）
+- `429 RATE_LIMITED` — 同一 IP 15 分钟内失败超过 5 次，响应带 `Retry-After` 头
+
+### 2. 查询会话
+
+```http
+GET /api/auth/session
+Cookie: hme_session=...
+```
+
+**成功响应：** 同上（csrf_token / expires_at）。会话无效返回 `401 AUTH_REQUIRED`。
+
+### 3. 退出
+
+```http
+POST /api/auth/logout
+Cookie: hme_session=...
+X-CSRF-Token: <token>
+
+{"success": true, "data": {"logged_out": true}}
+```
+
+---
+
+## 账号端点
+
+### 4. 列出账号
+
+```http
+GET /api/accounts
+```
+
+**响应：** `Summary[]`，排序为 active → pending → error，同状态按 name、id。
+
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "id": "acc_12345678",
+      "name": "主号",
+      "real_email": "owner@example.com",
+      "icloud_email": "owner@icloud.com",
+      "host": "icloud.com",
+      "status": "active",
+      "alias_total": 15,
+      "alias_active": 12,
+      "has_cookies": true,
+      "has_app_password": true,
+      "has_proxy": false,
+      "last_validated": "2026-08-04T09:00:00+08:00",
+      "status_message": "",
+      "created_at": "2026-08-01T09:00:00+08:00"
+    }
+  ]
+}
+```
+
+**禁止出现的字段：** `cookies`、`app_password`、`proxy`。`status_message` 只映射固定文案（pending → "等待配置或验证凭据"，error → "凭据验证失败"），不返回内部错误原文。
+
+### 5. 添加账号
+
+```http
+POST /api/accounts
+X-CSRF-Token: <token>
+
+{
+  "name": "新账号",
+  "icloud_email": "owner@icloud.com",
+  "host": "icloud.com",
+  "proxy": "http://user:pass@host:port",
+  "cookies": "X-APPLE-WEBAUTH-TOKEN=abc; X-APPLE-WEBAUTH-USER=def"
+}
+```
+
+- `name` 必填，去空白后 1–64 字符
+- `icloud_email` 必填，`net/mail` 校验且地址值必须等于输入
+- `host` 只能是 `icloud.com` 或 `icloud.com.cn`（默认 `icloud.com`）
+- `proxy` 可选，必须是 `http`/`https`/`socks5` URL
+- `cookies` 可选，支持 Cookie Header 字符串或 JSON 文本
+- 无 Cookie 时状态为 `pending`，不访问网络
+
+**成功响应：** `201`，返回 `Summary`。
+
+### 6. 编辑账号基本信息
+
+```http
+PATCH /api/accounts/:id
+X-CSRF-Token: <token>
+
+{"name": "新名称", "host": "icloud.com.cn"}
+```
+
+只接受可选的 `name`、`icloud_email`、`host`，至少一个字段存在。响应返回更新后的 `Summary`。账号不存在返回 `404 ACCOUNT_NOT_FOUND`。
+
+### 7. 更新代理
+
+```http
+PUT /api/accounts/:id/proxy
+X-CSRF-Token: <token>
+
+{"proxy": "http://user:pass@host:port"}
+```
+
+空字符串表示清除代理。响应只返回更新后的 `Summary`（代理值从不回显）。
+
+### 8. 更新 Cookie
+
+```http
+PUT /api/accounts/:id/cookies
+X-CSRF-Token: <token>
+
+{"cookies": "a=1; b=2"}
+```
+
+`cookies` 同时兼容字符串与对象：
+
+```json
+{"cookies": {"a": "1", "b": "2"}}
+```
+
+两种输入最终都交给 `account.ParseCookieInput`。响应只返回更新后的 `Summary`。
+
+### 9. 设置 App 专用密码
+
+```http
+POST /api/accounts/:id/password
+X-CSRF-Token: <token>
+
+{"icloud_email": "your_email@icloud.com", "app_password": "xxxx-xxxx-xxxx-xxxx"}
+```
+
+服务端会用 IMAP 连接验证凭据。成功返回 `Summary`；IMAP 验证失败返回 `502 UPSTREAM_FAILURE`。
+
+### 10. iCloud 密码登录（获取 Cookie）
+
+```http
+POST /api/accounts/:id/login
+X-CSRF-Token: <token>
+
+{"password": "用户的常规iCloud密码", "otp_code": "123456"}
+```
+
+- `otp_code` 可选，启用 2FA 时使用
+- 需要 OTP：`409 OTP_REQUIRED`
+- 验证码错误：`401 OTP_INVALID`
+- 成功：**只返回 `Summary`，绝不返回 Cookies**（Cookie 自动持久化到账号配置）
+
+### 11. 删除账号
+
+```http
+DELETE /api/accounts/:id
+X-CSRF-Token: <token>
+```
+
+**响应：** `{"id": "acc_3"}`。不存在返回 `404 ACCOUNT_NOT_FOUND`。
+
+---
+
+## 业务端点
+
+### 12. 创建 HME 别名
+
+```http
+POST /api/create
+X-CSRF-Token: <token>
+
+{"account_id": "acc_1", "label": "注册某网站"}
+```
+
+- `account_id` 必填
+- `label` 可选，最长 200 字符
+
+**响应：**
+
 ```json
 {
   "success": true,
   "data": {
     "email": "xyz123@icloud.com",
     "label": "注册某网站",
-    "created_at": "2024-01-15T10:30:00Z",
+    "created_at": "2026-01-15T10:30:00+08:00",
     "account_id": "acc_1"
   }
 }
 ```
 
-**参数说明:**
-- `account_id` (必填) — 账号 ID
-- `label` (可选) — 别名标签，默认为 "Created YYYY-MM-DD HH:mm"
-
-**错误情况:**
-- `401` — Cookie 过期，需更新
-- `502` — iCloud 服务错误，会自动重试 5 次
-
----
-
-### 2. 读取邮件
+### 13. 读取邮件
 
 ```http
 GET /api/inbox?account_id=acc_1&alias=xyz123@icloud.com&limit=20&days=7
 ```
 
-**响应 (走 IMAP,App Password):**
+- `account_id` 必填
+- `alias` 可选，只返回发给该别名的邮件
+- `limit` 1–100（默认 20）
+- `days` 1–90（默认 7）；非法整数直接 `400 VALIDATION_ERROR`
+
+**响应（IMAP 优先，Web API 回退）：**
+
 ```json
 {
   "success": true,
@@ -79,239 +273,23 @@ GET /api/inbox?account_id=acc_1&alias=xyz123@icloud.com&limit=20&days=7
         "to": "xyz123@icloud.com",
         "subject": "[GitHub] Please verify your email address",
         "date": "2026-07-09T14:32:10+08:00",
-        "preview": "Almost done! To finish setting up your account, we just need to verify.."
+        "preview": "Almost done! To finish setting up your account..."
       }
     ]
   }
 }
 ```
 
-**响应 (回退到 Web API,Cookie):** `method` 变为 `web_api`
-```json
-{
-  "success": true,
-  "data": {
-    "account_id": "acc_1",
-    "alias": "xyz123@icloud.com",
-    "count": 1,
-    "method": "web_api",
-    "messages": [
-      {
-        "id": "AQMkAD...",
-        "from": "GitHub <noreply@github.com>",
-        "to": "xyz123@icloud.com",
-        "subject": "[GitHub] Please verify your email address",
-        "date": "Wed, 09 Jul 2026 06:32:10 GMT",
-        "preview": "Almost done! To finish setting up your account.."
-      }
-    ]
-  }
-}
-```
+`method` 为 `imap` 或 `web_api`。IMAP 路径支持服务端按收件人搜索；Web API 路径拉取后本地过滤。
 
-**参数说明:**
-- `account_id` (必填) — 账号 ID
-- `alias` (可选) — 只返回发到该别名的邮件;不传返回收件箱最近邮件
-- `limit` (可选) — 返回邮件数量，默认 20
-- `days` (可选) — 查找最近几天的邮件，默认 7 (仅 IMAP 模式)
-
-**邮件读取双路径 (自动选择):**
-1. **优先: IMAP (App Password)** — 设置了 App Password 时使用,支持服务端按收件人搜索
-2. **回退: Web API (Cookie 认证)** — 无 App Password 或 IMAP 失败时,通过 iCloud mccgateway 端点读取
-
-响应中 `"method": "imap"` 或 `"method": "web_api"` 标识实际使用的读取方式。
-
-**别名过滤逻辑:**
-- **IMAP (`FindByRecipient`):** 先用原生 IMAP `TO` 头搜索 (配合 `days` 时间范围);无结果时拉取最近 `limit*3` 条本地按 `To` 兜底过滤
-- **Web API (`FindByAlias`):** iCloud Web API 不支持按收件人搜索,拉取 `limit*2` (至少 50) 条后本地对 `Subject`/`From`/`To` 做包含匹配
-
-**返回字段差异 (两条路径):**
-- `id` — IMAP 是 UID 数字串,Web API 是 iCloud GUID
-- `date` — IMAP 走 RFC3339,Web API 是原始邮件头 RFC1123 串
-- `preview` — 正文摘要,非完整正文
-
----
-
-## 账号管理接口
-
-### 3. 列出所有账号
-
-```http
-GET /api/accounts
-```
-
-**响应:**
-```json
-{
-  "success": true,
-  "data": [
-    {
-      "id": "acc_1",
-      "name": "主号",
-      "host": "imap.mail.me.com"
-    }
-  ]
-}
-```
-
-**注意:** 响应中不包含敏感信息（cookies、app_passwords）
-
----
-
-### 4. 添加账号
-
-**简化版（cookies 可选）:**
-```http
-POST /api/accounts
-Content-Type: application/json
-
-{
-  "name": "新账号",
-  "host": "icloud.com",
-  "proxy": "http://user:pass@host:port"
-}
-```
-
-**完整版（包含 Cookie）:**
-```http
-POST /api/accounts
-Content-Type: application/json
-
-{
-  "name": "新账号",
-  "cookies": "{\"x-apple-session-token\":\"token_value\"}",
-  "host": "icloud.com",
-  "proxy": "http://user:pass@host:port"
-}
-```
-
-**响应:**
-```json
-{
-  "success": true,
-  "data": {
-    "id": "acc_3",
-    "name": "新账号",
-    "host": "icloud.com",
-    "status": "pending"
-  }
-}
-```
-
-**参数说明:**
-- `name` (必填) — 账号名称
-- `cookies` (可选) — Cookie 字符串,支持两种格式:
-  - JSON: `"{\"name\":\"value\"}"`
-  - Header: `"name1=value1; name2=value2"`
-- `host` (可选) — iCloud 域名,默认 `icloud.com`
-- `proxy` (可选) — HTTP/SOCKS5 代理
-
-**注意:** 不传 cookies 时,账号状态为 `pending`,需通过 `/login` 接口登录获取 Cookie
-
----
-
-### 5. 账号密码登录（获取 Cookie）
-
-```http
-POST /api/accounts/:id/login
-Content-Type: application/json
-
-{
-  "password": "用户的常规iCloud密码",
-  "otp_code": "123456"  // 可选,2FA 验证码
-}
-```
-
-**参数说明:**
-- `:id` (路径参数) — 账号 ID
-- `password` (必填) — iCloud 账号的常规密码(**不是** App Password)
-- `otp_code` (可选) — 双重认证验证码
-
-**响应:**
-```json
-{
-  "success": true,
-  "data": {
-    "id": "acc_1",
-    "cookies": {
-      "x-apple-session-token": "...",
-      "X-APPLE-WEBAUTH-TOKEN": "...",
-      "X-APPLE-WEBAUTH-USER": "..."
-    }
-  }
-}
-```
-
-**注意事项:**
-- 密码是登录 appleid.apple.com 的**常规账号密码**,不是 App 专用密码
-- 登录前账号必须已设置 `icloud_email` 字段
-- 登录成功后 Cookie 会自动保存到 accounts.json
-- 启用 2FA 时,第一次请求会被拒绝,需要带 `otp_code` 重试
-
----
-
-### 6. 删除账号
-
-```http
-DELETE /api/accounts/:id
-```
-
-
-**响应:**
-```json
-{
-  "success": true,
-  "data": {
-    "id": "acc_3"
-  }
-}
-```
-
-**错误情况:**
-- `404` — 账号不存在
-
----
-
-### 7. 设置 App Password
-
-```http
-POST /api/accounts/:id/password
-Content-Type: application/json
-
-{
-  "icloud_email": "your_email@icloud.com",
-  "app_password": "xxxx-xxxx-xxxx-xxxx"
-}
-```
-
-**响应:**
-```json
-{
-  "success": true,
-  "data": {
-    "id": "acc_1",
-    "icloud_email": "your_email@icloud.com"
-  }
-}
-```
-
-**参数说明:**
-- `icloud_email` (必填) — iCloud 邮箱地址
-- `app_password` (必填) — App 专用密码
-
-**用途:** App Password 用于 IMAP 邮件读取，生成方式见 [appleid.apple.com](https://appleid.apple.com)
-
----
-
-## 别名管理接口
-
-### 8. 列出所有别名
+### 14. 列出别名
 
 ```http
 GET /api/aliases?account_id=acc_1
 ```
 
-**响应:**
+**响应：** alias 对象字段风格为 camelCase（兼容 iCloud 原始格式）：
+
 ```json
 {
   "success": true,
@@ -324,260 +302,114 @@ GET /api/aliases?account_id=acc_1
         "anonymousId": "abc123",
         "label": "注册某网站",
         "active": true,
-        "createdAt": "2024-01-15T10:30:00Z"
+        "createdAt": "2026-01-15T10:30:00Z"
       }
     ]
   }
 }
 ```
 
-**参数说明:**
-- `account_id` (必填) — 账号 ID
-
-**别名字段:**
-- `email` — HME 邮箱地址
-- `anonymousId` — 别名唯一标识（用于停用/激活/删除）
-- `label` — 用户定义的标签
-- `active` — 是否激活
-- `createdAt` — 创建时间
-
----
-
-### 9. 停用别名
+### 15. 停用/激活/删除别名
 
 ```http
 POST /api/aliases/:id/deactivate
-Content-Type: application/json
-
-{
-  "account_id": "acc_1"
-}
-```
-
-**响应:**
-```json
-{
-  "success": true,
-  "data": {
-    "anonymous_id": "abc123",
-    "success": true
-  }
-}
-```
-
-**参数说明:**
-- `:id` (路径参数) — 别名的 `anonymousId`
-- `account_id` (必填) — 账号 ID
-
-**说明:** 停用后别名不再接收邮件，但可随时激活恢复
-
----
-
-### 10. 激活别名
-
-```http
 POST /api/aliases/:id/reactivate
-Content-Type: application/json
+DELETE /api/aliases/:id
+X-CSRF-Token: <token>
 
-{
-  "account_id": "acc_1"
-}
+{"account_id": "acc_1"}
 ```
 
-**响应:**
-```json
-{
-  "success": true,
-  "data": {
-    "anonymous_id": "abc123",
-    "success": true
-  }
-}
-```
+- `:id` 为别名的 `anonymousId`，非空且 URL 解码后不超过 256 字符
+- `account_id` 必填
+- 删除不可恢复；直接删除失败时会先停用再删
 
-**参数说明:**
-- `:id` (路径参数) — 别名的 `anonymousId`
-- `account_id` (必填) — 账号 ID
-
-**说明:** 激活已停用的别名，恢复邮件接收
-
----
-
-### 11. 删除别名
+### 16. 重新加载配置
 
 ```http
-DELETE /api/aliases/:id
-Content-Type: application/json
-
-{
-  "account_id": "acc_1"
-}
+POST /api/reload
+X-CSRF-Token: <token>
 ```
 
-**响应:**
-```json
-{
-  "success": true,
-  "data": {
-    "anonymous_id": "abc123"
-  }
-}
-```
-
-**参数说明:**
-- `:id` (路径参数) — 别名的 `anonymousId`
-- `account_id` (必填) — 账号 ID
-
-**注意:** 删除不可恢复！如果直接删除失败，会先停用再删除
+重新读取 `accounts.json`。
 
 ---
 
-## 使用示例
-
-### curl 示例
+## curl 使用示例（Cookie Jar + CSRF）
 
 ```bash
-# 创建别名
-curl -X POST http://localhost:8081/api/create \
+BASE="http://localhost:8081"
+
+# 1. 登录,保存 Cookie 到 jar
+curl -c cookies.txt -X POST "$BASE/api/auth/login" \
   -H "Content-Type: application/json" \
-  -d '{"account_id": "acc_1", "label": "GitHub"}'
+  -d '{"password":"你的管理员密码"}'
 
-# 读取邮件
-curl "http://localhost:8081/api/inbox?account_id=acc_1&alias=xyz123@icloud.com&limit=10"
+# 2. 从响应中提取 csrf_token(可用 jq)
+CSRF=$(curl -b cookies.txt "$BASE/api/auth/session" | jq -r '.data.csrf_token')
 
-# 列出别名
-curl "http://localhost:8081/api/aliases?account_id=acc_1"
+# 3. 读取账号列表(GET 无需 CSRF)
+curl -b cookies.txt "$BASE/api/accounts"
 
-# 停用别名
-curl -X POST http://localhost:8081/api/aliases/abc123/deactivate \
+# 4. 添加账号(mutation 需要 CSRF 头)
+curl -b cookies.txt -X POST "$BASE/api/accounts" \
   -H "Content-Type: application/json" \
-  -d '{"account_id": "acc_1"}'
+  -H "X-CSRF-Token: $CSRF" \
+  -d '{"name":"新账号","icloud_email":"owner@icloud.com"}'
 
-# 删除别名
-curl -X DELETE http://localhost:8081/api/aliases/abc123 \
+# 5. 创建别名
+curl -b cookies.txt -X POST "$BASE/api/create" \
   -H "Content-Type: application/json" \
-  -d '{"account_id": "acc_1"}'
-```
+  -H "X-CSRF-Token: $CSRF" \
+  -d '{"account_id":"acc_1","label":"GitHub"}'
 
-### Python 示例
-
-```python
-import requests
-
-BASE_URL = "http://localhost:8081/api"
-
-# 创建别名
-resp = requests.post(f"{BASE_URL}/create", json={
-    "account_id": "acc_1",
-    "label": "Netflix"
-})
-print(resp.json())
-
-# 读取邮件
-resp = requests.get(f"{BASE_URL}/inbox", params={
-    "account_id": "acc_1",
-    "alias": "xyz123@icloud.com",
-    "limit": 10
-})
-print(resp.json())
-
-# 列出别名
-resp = requests.get(f"{BASE_URL}/aliases", params={"account_id": "acc_1"})
-for alias in resp.json()["data"]["aliases"]:
-    print(f"{alias['email']} - {alias['label']} (active: {alias['active']})")
+# 6. 读取邮件
+curl -b cookies.txt "$BASE/api/inbox?account_id=acc_1&limit=10"
 ```
 
 ---
 
-## 认证说明
+## 认证方式（iCloud 账号侧）
 
-### Cookie 认证 (推荐,功能最完整)
+### Cookie 认证（功能最完整）
 
-用于：创建别名、列出别名、停用/激活/删除别名、**读取邮件**
+用于创建/停用/激活/删除别名、读取邮件（Web API 回退）。
 
-**获取方式:**
+**获取方式：**
 1. 浏览器登录 [icloud.com](https://www.icloud.com) 或 [icloud.com.cn](https://www.icloud.com.cn) (国区)
 2. F12 → Application → Cookies
-3. 导出全部 Cookie 为 `{"key":"value"}` 格式 JSON
+3. 导出 Cookie 为 `{"key":"value"}` JSON，粘贴到管理界面「更新 Cookie」
 
-**关键 Cookie:**
-- `X-APPLE-WEBAUTH-TOKEN` — 认证 token
-- `X-APPLE-WEBAUTH-USER` — 含 dsid (`v=1:s=1:d=22789132008`)
-- `X-APPLE-WEBAUTH-HSA-TRUST` — 设备信任 token
-- `X-APPLE-DS-WEB-SESSION-TOKEN` — 会话 token
+**关键 Cookie：** `X-APPLE-WEBAUTH-TOKEN`（认证 token）、`X-APPLE-WEBAUTH-USER`（含 dsid）、`X-APPLE-WEBAUTH-HSA-TRUST`（设备信任）、`X-APPLE-DS-WEB-SESSION-TOKEN`（会话）
 
-**有效期:** 约 24 小时
+**有效期：** 约 24 小时
 
-### App Password 认证 (IMAP 回退)
+### App Password 认证（IMAP 优先读邮件）
 
-仅用于 Web API 失败时的邮件读取回退
-
-**获取方式:**
-1. 登录 [appleid.apple.com](https://appleid.apple.com)
-2. 登录和安全 → App 专用密码
-3. 生成新密码
+用于 IMAP 读取邮件（优先路径，支持服务端按收件人搜索）。在 [appleid.apple.com](https://appleid.apple.com) → 登录和安全 → App 专用密码 生成。
 
 ---
 
 ## 技术说明
 
-### 邮件读取实现
-
-**Web API 路径** (`internal/mail/web_client.go`):
+**Web API 路径** (`internal/mail/web_client.go`)：
 1. 调用 `setup.icloud.com.cn/setup/ws/1/validate` 获取 `mccgateway` URL
 2. 调用 `mccgateway/mailws2/v1/thread/search` 读取邮件
 
-**⚠️ 已知坑:**
-- `validate` 返回的 mccgateway URL 可能带 `:443` 端口 (如 `p217-mccgateway.icloud.com.cn:443`)
-- tls-client 的 cookie jar 按不带端口的 host 存储 cookie
-- 带端口请求时 cookie 无法附加,导致 403
-- **解决:** 解析 URL 后剥离端口号
+**⚠️ 已知坑：**
+- `validate` 返回的 mccgateway URL 可能带 `:443` 端口，tls-client 的 cookie jar 按不带端口的 host 存储 cookie，带端口请求时 cookie 无法附加导致 403；**解决：** 解析 URL 后剥离端口号
 
-**clientBuildNumber:** 与浏览器一致,当前 `2624Build22`
+**IMAP 路径** (`internal/mail/client.go`)：标准 IMAP 协议，连接 `imap.mail.me.com:993`，需要 App Password。
 
-**IMAP 路径** (`internal/mail/client.go`):
-- 标准 IMAP 协议,连接 `imap.mail.me.com:993`
-- 需要 App Password
-
----
-
-## 错误处理
-
-### 会话失效 (401)
-
-```json
-{
-  "success": false,
-  "message": "iCloud 会话失效，请更新 Cookie: HTTP 401"
-}
-```
-
-**解决:** 更新 `accounts.json` 中的 Cookie
-
-### iCloud 服务错误 (502)
-
-```json
-{
-  "success": false,
-  "message": "创建邮箱失败: HTTP 429"
-}
-```
-
-**说明:** 429 错误会自动重试最多 5 次
-
-### 参数错误 (400)
-
-```json
-{
-  "success": false,
-  "message": "参数错误: account_id 必填"
-}
-```
-
----
+**升级差异（相对旧版）：**
+- 全部 API 需要管理员登录（`401 AUTH_REQUIRED`）
+- 账号响应不再返回 Cookie/密码/代理原文，改用 `has_cookies`/`has_app_password`/`has_proxy`
+- `POST /api/accounts/:id/login` 成功响应不再返回 `cookies` 字段
+- `accounts.json` 使用 `{"accounts": {id: {...}}}` map wrapper 格式（参考 `accounts.json.template`）
 
 ## 限制
 
-- **创建频率**: iCloud 限制别名创建频率，过快会返回 429
-- **Cookie 有效期**: 约 24 小时，需定期更新
-- **邮件读取**: 依赖 IMAP 连接，超时默认 30 秒
+- **创建频率**：iCloud 限制别名创建频率，过快会返回 429（服务端自动重试最多 5 次）
+- **Cookie 有效期**：约 24 小时，需定期更新
+- **邮件读取**：依赖 IMAP 连接，超时默认 30 秒
+- **请求体上限**：1 MiB
