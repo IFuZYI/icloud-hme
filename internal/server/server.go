@@ -1,36 +1,74 @@
 // Package server 提供 HTTP API,基于 Gin。
 //
 // 两个核心接口:
-//   POST /api/create  — 在指定账号下创建一个 Hide My Email 别名
-//   GET  /api/inbox   — 读取指定账号(或指定别名)收到的邮件
+//
+//	POST /api/create  — 在指定账号下创建一个 Hide My Email 别名
+//	GET  /api/inbox   — 读取指定账号(或指定别名)收到的邮件
 //
 // 辅助接口(用于多账号管理):账号增删查、别名列表、设置 App 密码。
+//
+// 安全模型:除 /api/auth/login 与 /api/auth/session 外,所有 /api 路由都需要
+// 管理员会话;非 GET/HEAD/OPTIONS 请求还需校验 CSRF。
 package server
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"icloud-hme/internal/account"
-	"icloud-hme/internal/hme"
-	"icloud-hme/internal/mail"
+	"icloud-hme/internal/auth"
 )
 
-// Server 封装 Gin 引擎和账号管理器。
-type Server struct {
-	mgr *account.Manager
-	r   *gin.Engine
+// Config 是 Server 的启动配置。
+type Config struct {
+	Debug         bool
+	AdminPassword string
+	SessionTTL    time.Duration
+	SecureCookie  bool
 }
 
-// New 创建 Server。debug 为 true 时启用 Gin 调试日志。
-func New(mgr *account.Manager, debug bool) *Server {
-	if !debug {
+// Server 封装 Gin 引擎、账号后端与认证。
+type Server struct {
+	be      Backend
+	auth    *auth.Manager
+	limiter *auth.Limiter
+	cfg     Config
+	r       *gin.Engine
+}
+
+// New 创建 Server。mgr 为账号管理器,cfg 为安全配置。
+func New(mgr *account.Manager, cfg Config) (*Server, error) {
+	if _, err := auth.NewManager(auth.Options{
+		Password: cfg.AdminPassword,
+		TTL:      cfg.SessionTTL,
+	}); err != nil {
+		return nil, err
+	}
+	return newWithBackend(&managerBackend{mgr: mgr}, cfg), nil
+}
+
+// newWithBackend 创建 Server 并注入 Backend(测试使用内存 fake)。
+func newWithBackend(be Backend, cfg Config) *Server {
+	if !cfg.Debug {
 		gin.SetMode(gin.ReleaseMode)
 	}
-	s := &Server{mgr: mgr}
-	s.r = gin.Default() // 自带 Logger + Recovery 中间件
+	s := &Server{
+		be:      be,
+		limiter: auth.NewLimiter(nil, 15*time.Minute, 5, 10000),
+		cfg:     cfg,
+	}
+	s.auth, _ = auth.NewManager(auth.Options{
+		Password: cfg.AdminPassword,
+		TTL:      cfg.SessionTTL,
+	})
+	s.r = gin.New()
+	s.r.Use(gin.Logger(), gin.Recovery(), securityHeadersMiddleware())
+	// 不信任任意代理头,登录限流使用真实连接 IP
+	_ = s.r.SetTrustedProxies(nil)
 	s.register()
 	return s
 }
@@ -45,46 +83,48 @@ func (s *Server) Handler() http.Handler { return s.r }
 
 func (s *Server) register() {
 	api := s.r.Group("/api")
+	api.Use(apiCacheControlMiddleware())
 	{
-		// ===== 账号管理 =====
-		api.GET("/accounts", s.listAccounts)
-		api.POST("/accounts", s.addAccount)
-		api.DELETE("/accounts/:id", s.removeAccount)
-		api.POST("/accounts/:id/password", s.setAppPassword)
-		api.PUT("/accounts/:id/cookies", s.updateCookies)
-		api.POST("/accounts/:id/login", s.loginAccount)
+		// ===== 认证(公开) =====
+		api.POST("/auth/login", s.handleLogin)
+		api.GET("/auth/session", s.handleSession)
 
-		// ===== 核心接口 1: 创建邮箱 =====
-		api.POST("/create", s.createAlias)
+		// ===== 受保护路由:统一 requireSession =====
+		authed := api.Group("")
+		authed.Use(requireSession(s.auth))
+		{
+			authed.POST("/auth/logout", csrfCheck(s.auth), s.handleLogout)
 
-		// ===== 核心接口 2: 读取邮件 =====
-		api.GET("/inbox", s.listInbox)
+			// ===== 账号管理 =====
+			authed.GET("/accounts", s.listAccountsHandler)
+			authed.POST("/accounts", csrfCheck(s.auth), s.addAccountHandler)
+			authed.PATCH("/accounts/:id", csrfCheck(s.auth), s.updateAccountHandler)
+			authed.PUT("/accounts/:id/proxy", csrfCheck(s.auth), s.updateProxyHandler)
+			authed.PUT("/accounts/:id/cookies", csrfCheck(s.auth), s.updateCookiesHandler)
+			authed.POST("/accounts/:id/password", csrfCheck(s.auth), s.setAppPasswordHandler)
+			authed.POST("/accounts/:id/login", csrfCheck(s.auth), s.loginAccountHandler)
+			authed.DELETE("/accounts/:id", csrfCheck(s.auth), s.removeAccountHandler)
 
-		// ===== 别名管理 =====
-		api.GET("/aliases", s.listAliases)
-		api.POST("/aliases/:id/deactivate", s.deactivateAlias)
-		api.POST("/aliases/:id/reactivate", s.reactivateAlias)
-		api.DELETE("/aliases/:id", s.deleteAlias)
+			// ===== 核心接口 1: 创建邮箱 =====
+			authed.POST("/create", csrfCheck(s.auth), s.createAliasHandler)
 
-		// ===== 系统 =====
-		api.POST("/reload", s.reloadConfig)
+			// ===== 核心接口 2: 读取邮件 =====
+			authed.GET("/inbox", s.listInboxHandler)
+
+			// ===== 别名管理 =====
+			authed.GET("/aliases", s.listAliasesHandler)
+			authed.POST("/aliases/:id/deactivate", csrfCheck(s.auth), s.deactivateAliasHandler)
+			authed.POST("/aliases/:id/reactivate", csrfCheck(s.auth), s.reactivateAliasHandler)
+			authed.DELETE("/aliases/:id", csrfCheck(s.auth), s.deleteAliasHandler)
+
+			// ===== 系统 =====
+			authed.POST("/reload", csrfCheck(s.auth), s.reloadConfigHandler)
+		}
 	}
-}
-
-// ---- 统一响应 ----
-
-type apiResp struct {
-	Success bool        `json:"success"`
-	Message string      `json:"message,omitempty"`
-	Data    interface{} `json:"data,omitempty"`
-}
-
-func ok(c *gin.Context, data interface{}) {
-	c.JSON(http.StatusOK, apiResp{Success: true, Data: data})
-}
-
-func fail(c *gin.Context, code int, msg string) {
-	c.JSON(code, apiResp{Success: false, Message: msg})
+	// API 404 返回 JSON,绝不让 NoRoute 把拼错的 API 路径变成 HTML
+	s.r.NoRoute(func(c *gin.Context) {
+		failCode(c, http.StatusNotFound, "VALIDATION_ERROR", "接口不存在")
+	})
 }
 
 // ====================================================================
@@ -94,40 +134,27 @@ func fail(c *gin.Context, code int, msg string) {
 //   返回: 新创建的 HME 邮箱地址
 // ====================================================================
 
-type createReq struct {
-	AccountID string `json:"account_id" binding:"required"`
+type createAliasReq struct {
+	AccountID string `json:"account_id"`
 	Label     string `json:"label"`
 }
 
-func (s *Server) createAlias(c *gin.Context) {
-	var req createReq
-	if err := c.ShouldBindJSON(&req); err != nil {
-		fail(c, http.StatusBadRequest, "参数错误: account_id 必填 — "+err.Error())
+func (s *Server) createAliasHandler(c *gin.Context) {
+	var req createAliasReq
+	if err := c.ShouldBindJSON(&req); err != nil || req.AccountID == "" {
+		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "参数错误: account_id 必填")
+		return
+	}
+	if len([]rune(req.Label)) > 200 {
+		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "参数错误: label 最长 200 字符")
 		return
 	}
 
-	client, err := s.mgr.HMEClient(req.AccountID, false)
+	result, err := s.be.CreateAlias(req.AccountID, req.Label)
 	if err != nil {
-		fail(c, http.StatusNotFound, err.Error())
+		backendFail(c, err)
 		return
 	}
-
-	result, err := client.CreateAlias(req.Label, 5)
-
-	// 操作完成后,保存可能已刷新的 Cookie（validate 会轮换 token）
-	_ = s.mgr.SaveCookies(req.AccountID, client.Cookies)
-
-	if err != nil {
-		// 区分会话失效(需重新登录)与临时失败
-		msg := err.Error()
-		if isSessionError(msg) {
-			fail(c, http.StatusUnauthorized, "iCloud 会话失效,请更新 Cookie: "+msg)
-		} else {
-			fail(c, http.StatusBadGateway, "创建邮箱失败: "+msg)
-		}
-		return
-	}
-
 	ok(c, gin.H{
 		"email":      result.Email,
 		"label":      result.Label,
@@ -144,213 +171,64 @@ func (s *Server) createAlias(c *gin.Context) {
 //   - 传 alias:   只返回发给该 HME 别名的邮件
 //
 //   认证优先级: IMAP (App Password) 优先 > Web API (Cookie) 回退
-//   - IMAP: 支持服务端按收件人搜索 (FindByRecipient)
-//   - Web API: 不支持收件人搜索,拉取收件箱后本地按别名过滤 (FindByAlias)
 // ====================================================================
 
-func (s *Server) listInbox(c *gin.Context) {
+func (s *Server) listInboxHandler(c *gin.Context) {
 	accountID := c.Query("account_id")
 	if accountID == "" {
-		fail(c, http.StatusBadRequest, "参数缺失: account_id")
+		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "参数缺失: account_id")
 		return
 	}
 	alias := strings.TrimSpace(c.Query("alias"))
-	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
-	days, _ := strconv.Atoi(c.DefaultQuery("days", "7"))
-
-	// 优先使用 IMAP (App Password 认证)
-	mc, err := s.mgr.MailClient(accountID)
-	if err == nil {
-		if connErr := mc.Connect(); connErr == nil {
-			defer mc.Disconnect()
-			var messages []mail.Message
-			if alias != "" {
-				messages, err = mc.FindByRecipient(alias, limit, days)
-			} else {
-				messages, err = mc.ListInbox(limit, days)
-			}
-			if err == nil {
-				ok(c, gin.H{
-					"account_id": accountID,
-					"alias":      alias,
-					"count":      len(messages),
-					"messages":   messages,
-					"method":     "imap",
-				})
-				return
-			}
-			// IMAP 失败，继续尝试 Web API
-		}
-	}
-
-	// 回退到 Web API (Cookie 认证，无需 App Password)
-	wmc, err := s.mgr.WebMailClient(accountID)
+	limit, err := parseInboxInt(c.DefaultQuery("limit", "20"), 1, 100)
 	if err != nil {
-		fail(c, http.StatusBadRequest, "无可用邮件客户端: 需要 App Password 或 Cookie")
+		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "参数错误: limit 需为 1-100 的整数")
 		return
 	}
-
-	if alias != "" {
-		messages, err := wmc.FindByAlias(alias, limit)
-		if err != nil {
-			fail(c, http.StatusBadGateway, "读取邮件失败: "+err.Error())
-			return
-		}
-		ok(c, gin.H{
-			"account_id": accountID,
-			"alias":      alias,
-			"count":      len(messages),
-			"messages":   messages,
-			"method":     "web_api",
-		})
-	} else {
-		messages, err := wmc.ListInbox(limit)
-		if err != nil {
-			fail(c, http.StatusBadGateway, "读取邮件失败: "+err.Error())
-			return
-		}
-		ok(c, gin.H{
-			"account_id": accountID,
-			"count":      len(messages),
-			"messages":   messages,
-			"method":     "web_api",
-		})
-	}
-}
-
-// ====================================================================
-// 辅助接口
-// ====================================================================
-
-func (s *Server) listAccounts(c *gin.Context) {
-	ok(c, s.mgr.ListAccounts())
-}
-
-type addAccountReq struct {
-	Name     string `json:"name" binding:"required"`
-	Cookies  string `json:"cookies"` // 可选,后续可通过 /login 获取
-	Host     string `json:"host"`
-	Proxy    string `json:"proxy"` // HTTP/SOCKS5 代理
-}
-
-func (s *Server) addAccount(c *gin.Context) {
-	var req addAccountReq
-	if err := c.ShouldBindJSON(&req); err != nil {
-		fail(c, http.StatusBadRequest, "参数错误: name 必填 — "+err.Error())
-		return
-	}
-	acc, err := s.mgr.AddAccount(req.Name, req.Cookies, req.Host, req.Proxy)
+	days, err := parseInboxInt(c.DefaultQuery("days", "7"), 1, 90)
 	if err != nil {
-		fail(c, http.StatusBadRequest, err.Error())
-		return
-	}
-	// 返回时脱敏
-	acc.Cookies = nil
-	c.JSON(http.StatusCreated, apiResp{Success: true, Data: acc})
-}
-
-func (s *Server) removeAccount(c *gin.Context) {
-	id := c.Param("id")
-	if !s.mgr.RemoveAccount(id) {
-		fail(c, http.StatusNotFound, "账号不存在")
-		return
-	}
-	ok(c, gin.H{"id": id})
-}
-
-type setPwdReq struct {
-	ICloudEmail string `json:"icloud_email" binding:"required"`
-	AppPassword string `json:"app_password" binding:"required"`
-}
-
-func (s *Server) setAppPassword(c *gin.Context) {
-	id := c.Param("id")
-	var req setPwdReq
-	if err := c.ShouldBindJSON(&req); err != nil {
-		fail(c, http.StatusBadRequest, "参数错误: icloud_email, app_password 必填 — "+err.Error())
-		return
-	}
-	if err := s.mgr.SetAppPassword(id, req.ICloudEmail, req.AppPassword); err != nil {
-		fail(c, http.StatusBadRequest, err.Error())
-		return
-	}
-	ok(c, gin.H{"id": id, "icloud_email": req.ICloudEmail})
-}
-
-type updateCookiesReq struct {
-	Cookies map[string]string `json:"cookies" binding:"required"`
-}
-
-func (s *Server) updateCookies(c *gin.Context) {
-	id := c.Param("id")
-	var req updateCookiesReq
-	if err := c.ShouldBindJSON(&req); err != nil {
-		fail(c, http.StatusBadRequest, "参数错误: cookies 必填 — "+err.Error())
-		return
-	}
-	if err := s.mgr.UpdateCookies(id, req.Cookies); err != nil {
-		fail(c, http.StatusBadRequest, err.Error())
-		return
-	}
-	ok(c, gin.H{"id": id, "cookies_count": len(req.Cookies)})
-}
-
-type loginReq struct {
-	Password string `json:"password" binding:"required"`
-	OTPCode  string `json:"otp_code"` // 可选 2FA 验证码
-}
-
-func (s *Server) loginAccount(c *gin.Context) {
-	id := c.Param("id")
-	var req loginReq
-	if err := c.ShouldBindJSON(&req); err != nil {
-		fail(c, http.StatusBadRequest, "参数错误: password 必填 — "+err.Error())
+		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "参数错误: days 需为 1-90 的整数")
 		return
 	}
 
-	var otpProvider hme.OTPProvider
-	if req.OTPCode != "" {
-		otp := req.OTPCode
-		otpProvider = func() (string, error) {
-			return otp, nil
-		}
-	}
-
-	client, err := s.mgr.HMEClientWithPassword(id, req.Password, otpProvider)
-	if err != nil {
-		if isSessionError(err.Error()) {
-			fail(c, http.StatusUnauthorized, err.Error())
-		} else {
-			fail(c, http.StatusBadGateway, "登录失败: "+err.Error())
-		}
-		return
-	}
-
-	ok(c, gin.H{
-		"id":      id,
-		"cookies": client.Cookies,
+	result, err := s.be.ListInbox(InboxQuery{
+		AccountID: accountID,
+		Alias:     alias,
+		Limit:     limit,
+		Days:      days,
 	})
+	if err != nil {
+		backendFail(c, err)
+		return
+	}
+	ok(c, result)
 }
 
-func (s *Server) listAliases(c *gin.Context) {
+// parseInboxInt 解析整数参数,非法或越界返回错误(不再静默变成 0)。
+func parseInboxInt(raw string, min, max int) (int, error) {
+	v, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil {
+		return 0, errors.New("invalid integer")
+	}
+	if v < min || v > max {
+		return 0, errors.New("out of range")
+	}
+	return v, nil
+}
+
+// ====================================================================
+// 辅助接口:别名
+// ====================================================================
+
+func (s *Server) listAliasesHandler(c *gin.Context) {
 	accountID := c.Query("account_id")
 	if accountID == "" {
-		fail(c, http.StatusBadRequest, "参数缺失: account_id")
+		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "参数缺失: account_id")
 		return
 	}
-	client, err := s.mgr.HMEClient(accountID, false)
+	aliases, err := s.be.ListAliases(accountID)
 	if err != nil {
-		fail(c, http.StatusNotFound, err.Error())
-		return
-	}
-	aliases, err := client.ListAliases()
-	_ = s.mgr.SaveCookies(accountID, client.Cookies)
-	if err != nil {
-		if isSessionError(err.Error()) {
-			fail(c, http.StatusUnauthorized, "iCloud 会话失效,请更新 Cookie: "+err.Error())
-		} else {
-			fail(c, http.StatusBadGateway, err.Error())
-		}
+		backendFail(c, err)
 		return
 	}
 	ok(c, gin.H{
@@ -361,95 +239,70 @@ func (s *Server) listAliases(c *gin.Context) {
 }
 
 type aliasActionReq struct {
-	AccountID string `json:"account_id" binding:"required"`
+	AccountID string `json:"account_id"`
 }
 
-func (s *Server) deactivateAlias(c *gin.Context) {
-	anonymousID := c.Param("id")
+// validateAliasAction 校验别名操作的匿名 ID 与请求体。
+func validateAliasAction(c *gin.Context) (accountID, anonymousID string, valid bool) {
+	anonymousID = c.Param("id")
 	var req aliasActionReq
-	if err := c.ShouldBindJSON(&req); err != nil {
-		fail(c, http.StatusBadRequest, "参数错误: account_id 必填 — "+err.Error())
+	if err := c.ShouldBindJSON(&req); err != nil || req.AccountID == "" {
+		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "参数错误: account_id 必填")
+		return "", "", false
+	}
+	if anonymousID == "" || len(anonymousID) > 256 {
+		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "参数错误: anonymous id 无效")
+		return "", "", false
+	}
+	return req.AccountID, anonymousID, true
+}
+
+func (s *Server) deactivateAliasHandler(c *gin.Context) {
+	accountID, anonymousID, valid := validateAliasAction(c)
+	if !valid {
 		return
 	}
-
-	client, err := s.mgr.HMEClient(req.AccountID, false)
+	success, err := s.be.SetAliasActive(accountID, anonymousID, false)
 	if err != nil {
-		fail(c, http.StatusNotFound, err.Error())
-		return
-	}
-
-	success, err := client.DeactivateHME(anonymousID)
-	_ = s.mgr.SaveCookies(req.AccountID, client.Cookies)
-	if err != nil {
-		fail(c, http.StatusBadGateway, "停用失败: "+err.Error())
+		backendFail(c, err)
 		return
 	}
 	ok(c, gin.H{"anonymous_id": anonymousID, "success": success})
 }
 
-func (s *Server) reactivateAlias(c *gin.Context) {
-	anonymousID := c.Param("id")
-	var req aliasActionReq
-	if err := c.ShouldBindJSON(&req); err != nil {
-		fail(c, http.StatusBadRequest, "参数错误: account_id 必填 — "+err.Error())
+func (s *Server) reactivateAliasHandler(c *gin.Context) {
+	accountID, anonymousID, valid := validateAliasAction(c)
+	if !valid {
 		return
 	}
-
-	client, err := s.mgr.HMEClient(req.AccountID, false)
+	success, err := s.be.SetAliasActive(accountID, anonymousID, true)
 	if err != nil {
-		fail(c, http.StatusNotFound, err.Error())
-		return
-	}
-
-	success, err := client.ReactivateHME(anonymousID)
-	_ = s.mgr.SaveCookies(req.AccountID, client.Cookies)
-	if err != nil {
-		fail(c, http.StatusBadGateway, "激活失败: "+err.Error())
+		backendFail(c, err)
 		return
 	}
 	ok(c, gin.H{"anonymous_id": anonymousID, "success": success})
 }
 
-func (s *Server) deleteAlias(c *gin.Context) {
-	anonymousID := c.Param("id")
-	var req aliasActionReq
-	if err := c.ShouldBindJSON(&req); err != nil {
-		fail(c, http.StatusBadRequest, "参数错误: account_id 必填 — "+err.Error())
+func (s *Server) deleteAliasHandler(c *gin.Context) {
+	accountID, anonymousID, valid := validateAliasAction(c)
+	if !valid {
 		return
 	}
-
-	client, err := s.mgr.HMEClient(req.AccountID, false)
-	if err != nil {
-		fail(c, http.StatusNotFound, err.Error())
+	if err := s.be.DeleteAlias(accountID, anonymousID); err != nil {
+		backendFail(c, err)
 		return
 	}
-
-	if err := client.Delete(anonymousID); err != nil {
-		_ = s.mgr.SaveCookies(req.AccountID, client.Cookies)
-		fail(c, http.StatusBadGateway, "删除失败: "+err.Error())
-		return
-	}
-	_ = s.mgr.SaveCookies(req.AccountID, client.Cookies)
 	ok(c, gin.H{"anonymous_id": anonymousID})
 }
 
-// isSessionError 判断错误是否由会话失效引起。
-func isSessionError(msg string) bool {
-	m := strings.ToLower(msg)
-	return strings.Contains(m, "401") || strings.Contains(m, "403") ||
-		strings.Contains(m, "session") || strings.Contains(m, "cookie") ||
-		strings.Contains(m, "unauthorized") || strings.Contains(m, "认证") ||
-		strings.Contains(m, "会话校验失败")
-}
+// ====================================================================
+// 系统
+// ====================================================================
 
-// reloadConfig 重新加载 accounts.json 配置文件。
-func (s *Server) reloadConfig(c *gin.Context) {
-	if err := s.mgr.Reload(); err != nil {
-		fail(c, http.StatusInternalServerError, "重新加载配置失败: "+err.Error())
+func (s *Server) reloadConfigHandler(c *gin.Context) {
+	if err := s.be.Reload(); err != nil {
+		backendFail(c, err)
 		return
 	}
 	ok(c, gin.H{"message": "配置已重新加载"})
 }
-
-// 确保 hme 包被引用(类型在 handler 中使用)
-var _ = hme.Alias{}
