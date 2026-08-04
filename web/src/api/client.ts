@@ -3,6 +3,14 @@ import type { ApiResponse } from './types'
 /** CSRF token,仅存 React 内存状态 */
 let csrfToken: string | null = null
 
+/** 全局 401 回调(由 AuthProvider 注册,避免循环 import) */
+let unauthorizedHandler: (() => void) | null = null
+
+/** 注册全局 401 回调 */
+export function registerUnauthorizedHandler(handler: (() => void) | null): void {
+  unauthorizedHandler = handler
+}
+
 /** 设置内存 CSRF token(由 AuthProvider 管理) */
 export function setCSRFToken(token: string | null): void {
   csrfToken = token
@@ -36,8 +44,7 @@ export async function request<T>(
   path: string,
   init?: RequestOptions,
   onUnauthorized?: () => void,
-): Promise<T> {
-  const headers = new Headers(init?.headers)
+): Promise<T> {  const headers = new Headers(init?.headers)
   headers.set('Accept', 'application/json')
   headers.set('Content-Type', 'application/json')
 
@@ -64,8 +71,9 @@ export async function request<T>(
     throw new ApiError(0, 'NETWORK_ERROR', '网络连接失败，请检查服务状态')
   }
 
-  if (resp.status === 401 && onUnauthorized) {
-    onUnauthorized()
+  if (resp.status === 401) {
+    onUnauthorized?.()
+    unauthorizedHandler?.()
   }
 
   let payload: ApiResponse<T>
