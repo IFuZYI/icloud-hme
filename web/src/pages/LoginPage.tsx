@@ -2,6 +2,7 @@ import { useState, type FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../auth/AuthProvider'
 import { ApiError } from '../api/client'
+import { IconLock, IconShield } from '../components/icons'
 
 export default function LoginPage() {
   const { login } = useAuth()
@@ -29,7 +30,13 @@ export default function LoginPage() {
 
   return (
     <div className="login-page">
-      <h1>iCloud HME 管理台</h1>
+      <div className="login-brand">
+        <span className="logo" aria-hidden="true">
+          <IconShield size={28} />
+        </span>
+        <h1>iCloud HME 管理台</h1>
+        <p>管理你的 iCloud 隐藏邮箱别名与邮件</p>
+      </div>
       <form onSubmit={handleSubmit} className="card login-form">
         {error && (
           <div className="alert-error" role="alert">
@@ -38,14 +45,31 @@ export default function LoginPage() {
         )}
         <div className="form-field">
           <label htmlFor="admin-password">管理员密码</label>
-          <input
-            id="admin-password"
-            type="password"
-            autoComplete="current-password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            required
-          />
+          <div style={{ position: 'relative' }}>
+            <input
+              id="admin-password"
+              type="password"
+              autoComplete="current-password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              required
+              placeholder="请输入管理员密码"
+              style={{ paddingRight: 40 }}
+            />
+            <span
+              aria-hidden="true"
+              style={{
+                position: 'absolute',
+                right: 12,
+                top: '50%',
+                transform: 'translateY(-50%)',
+                color: 'var(--color-text-tertiary)',
+                display: 'flex',
+              }}
+            >
+              <IconLock size={18} />
+            </span>
+          </div>
         </div>
         <div className="form-actions">
           <button type="submit" className="primary" disabled={submitting}>

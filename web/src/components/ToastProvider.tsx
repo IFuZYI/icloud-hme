@@ -7,6 +7,7 @@ import {
   useState,
   type ReactNode,
 } from 'react'
+import { IconCheck } from './icons'
 
 interface ToastContextValue {
   show: (message: string) => void
@@ -42,6 +43,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       <div className="toast-region" aria-live="polite">
         {toasts.map((t) => (
           <div key={t.id} className="toast" role="status">
+            <IconCheck size={16} aria-hidden="true" />
             {t.message}
           </div>
         ))}

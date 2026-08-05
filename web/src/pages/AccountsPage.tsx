@@ -10,17 +10,36 @@ import AppPasswordDialog from '../components/AppPasswordDialog'
 import ProxyDialog from '../components/ProxyDialog'
 import ConfirmDialog from '../components/ConfirmDialog'
 import { useToast } from '../components/ToastProvider'
+import {
+  IconCheck,
+  IconClock,
+  IconAlert,
+  IconPlus,
+  IconEdit,
+  IconTrash,
+  IconKey,
+  IconMail,
+} from '../components/icons'
 
-const statusText: Record<string, string> = {
-  active: '正常',
-  pending: '待配置',
-  error: '异常',
+const statusMeta: Record<string, { text: string; badge: string; icon: typeof IconCheck }> = {
+  active: { text: '正常', badge: 'badge badge-active', icon: IconCheck },
+  pending: { text: '待配置', badge: 'badge badge-pending', icon: IconClock },
+  error: { text: '异常', badge: 'badge badge-error', icon: IconAlert },
 }
 
-function statusClass(status: string): string {
-  if (status === 'active') return 'status-active'
-  if (status === 'pending') return 'status-pending'
-  return 'status-error'
+function StatusBadge({ status }: { status: string }) {
+  const meta = statusMeta[status] ?? {
+    text: status,
+    badge: 'badge badge-neutral',
+    icon: IconClock,
+  }
+  const Icon = meta.icon
+  return (
+    <span className={meta.badge}>
+      <Icon />
+      {meta.text}
+    </span>
+  )
 }
 
 function credText(acc: AccountSummary): string {
@@ -105,7 +124,10 @@ export default function AccountsPage() {
   return (
     <section>
       <div className="page-header">
-        <h2>账号管理</h2>
+        <div className="page-title">
+          <h2>账号管理</h2>
+          <p>管理 iCloud 账号、Cookie 与登录凭据</p>
+        </div>
         <button
           className="primary"
           onClick={() => {
@@ -113,6 +135,7 @@ export default function AccountsPage() {
             setFormOpen(true)
           }}
         >
+          <IconPlus size={16} />
           添加账号
         </button>
       </div>
@@ -150,32 +173,38 @@ export default function AccountsPage() {
                   </td>
                   <td>
                     {acc.icloud_email || acc.real_email || '—'}
-                    <span className="hint" style={{ display: 'block' }}>
-                      {acc.id}
-                    </span>
+                    <span className="cell-secondary">{acc.id}</span>
                   </td>
                   <td>
-                    <span className={statusClass(acc.status)}>
-                      {statusText[acc.status] ?? acc.status}
-                    </span>
+                    <StatusBadge status={acc.status} />
                   </td>
                   <td>
-                    {acc.alias_active} / {acc.alias_total}
+                    <span className="cell-strong">
+                      {acc.alias_active} / {acc.alias_total}
+                    </span>
                   </td>
                   <td>{credText(acc)}</td>
                   <td>{acc.last_validated ? acc.last_validated : '—'}</td>
                   <td>
                     <div className="row-actions">
                       <button onClick={() => { setEditing(acc); setFormOpen(true) }}>
+                        <IconEdit size={14} />
                         编辑
                       </button>
                       <button onClick={() => setCookieFor(acc)}>更新 Cookie</button>
-                      <button onClick={() => setLoginFor(acc)}>iCloud 登录</button>
+                      <button onClick={() => setLoginFor(acc)}>
+                        <IconKey size={14} />
+                        iCloud 登录
+                      </button>
                       <button onClick={() => setAppPwdFor(acc)}>设置 App 密码</button>
                       <button onClick={() => setProxyFor(acc)}>设置代理</button>
                       <Link to={`/aliases?account_id=${acc.id}`}>别名</Link>
-                      <Link to={`/inbox?account_id=${acc.id}`}>收件箱</Link>
+                      <Link to={`/inbox?account_id=${acc.id}`}>
+                        <IconMail size={14} />
+                        收件箱
+                      </Link>
                       <button className="danger" onClick={() => setDeleteFor(acc)}>
+                        <IconTrash size={14} />
                         删除
                       </button>
                     </div>

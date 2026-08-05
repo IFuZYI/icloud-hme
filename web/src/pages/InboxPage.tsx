@@ -3,6 +3,7 @@ import { useSearchParams } from 'react-router-dom'
 import { request, ApiError } from '../api/client'
 import type { AccountSummary, Alias, InboxResult } from '../api/types'
 import AsyncState from '../components/AsyncState'
+import { IconKey, IconMail } from '../components/icons'
 
 function formatDate(raw: string): string {
   const d = new Date(raw)
@@ -143,7 +144,10 @@ export default function InboxPage() {
   return (
     <section>
       <div className="page-header">
-        <h2>收件箱摘要</h2>
+        <div className="page-title">
+          <h2>收件箱摘要</h2>
+          <p>查看发往隐私别名的邮件（仅显示纯文本摘要）</p>
+        </div>
       </div>
 
       <div className="card" style={{ marginBottom: 16 }}>
@@ -222,8 +226,12 @@ export default function InboxPage() {
       >
         {result && result.messages.length > 0 && (
           <>
-            <p className="hint" style={{ marginBottom: 8 }}>
-              共 {result.count} 封，读取方式：{methodText}
+            <p className="hint" style={{ marginBottom: 8, display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span>共 {result.count} 封</span>
+              <span className={result.method === 'imap' ? 'badge badge-info' : 'badge badge-neutral'}>
+                {result.method === 'imap' ? <IconKey size={12} /> : <IconMail size={12} />}
+                读取方式：{methodText}
+              </span>
             </p>
             <div className="table-wrap">
               <table>

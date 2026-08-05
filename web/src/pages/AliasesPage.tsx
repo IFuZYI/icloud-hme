@@ -6,6 +6,7 @@ import AsyncState from '../components/AsyncState'
 import CreateAliasDialog from '../components/CreateAliasDialog'
 import ConfirmDialog from '../components/ConfirmDialog'
 import { useToast } from '../components/ToastProvider'
+import { IconCheck, IconClock, IconPlus, IconSearch, IconTrash } from '../components/icons'
 
 function formatDate(raw: string): string {
   const d = new Date(raw)
@@ -173,7 +174,10 @@ export default function AliasesPage() {
   return (
     <section>
       <div className="page-header">
-        <h2>别名管理</h2>
+        <div className="page-title">
+          <h2>别名管理</h2>
+          <p>创建、停用、激活或删除 Hide My Email 别名</p>
+        </div>
         <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
           <label htmlFor="alias-account">账号</label>
           <select
@@ -192,6 +196,7 @@ export default function AliasesPage() {
             ))}
           </select>
           <button className="primary" onClick={() => setCreateOpen(true)} disabled={!accountId}>
+            <IconPlus size={16} />
             创建别名
           </button>
         </div>
@@ -200,13 +205,30 @@ export default function AliasesPage() {
       <div style={{ display: 'flex', gap: 12, marginBottom: 16, flexWrap: 'wrap' }}>
         <div style={{ flex: 1, minWidth: 200 }}>
           <label htmlFor="alias-search">搜索</label>
-          <input
-            id="alias-search"
-            type="search"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="按邮箱或标签搜索"
-          />
+          <div style={{ position: 'relative' }}>
+            <input
+              id="alias-search"
+              type="search"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="按邮箱或标签搜索"
+              style={{ paddingRight: 36 }}
+            />
+            <span
+              aria-hidden="true"
+              style={{
+                position: 'absolute',
+                right: 10,
+                top: '50%',
+                transform: 'translateY(-50%)',
+                color: 'var(--color-text-tertiary)',
+                display: 'flex',
+                pointerEvents: 'none',
+              }}
+            >
+              <IconSearch size={16} />
+            </span>
+          </div>
         </div>
         <div>
           <label htmlFor="alias-filter">状态</label>
@@ -256,7 +278,8 @@ export default function AliasesPage() {
                   </td>
                   <td>{alias.label || '—'}</td>
                   <td>
-                    <span className={alias.active ? 'status-active' : 'status-error'}>
+                    <span className={alias.active ? 'badge badge-active' : 'badge badge-neutral'}>
+                      {alias.active ? <IconCheck size={12} /> : <IconClock size={12} />}
                       {alias.active ? '已启用' : '已停用'}
                     </span>
                   </td>
@@ -283,6 +306,7 @@ export default function AliasesPage() {
                         disabled={busy}
                         onClick={() => setConfirm({ type: 'delete', alias })}
                       >
+                        <IconTrash size={14} />
                         删除
                       </button>
                     </div>
