@@ -53,7 +53,7 @@ docker run -d \
   ghcr.io/xiaozhou26/icloud-hme:latest
 ```
 
-> ⚠️ 上面的密码仅为示例，**不可照抄**，请务必更换为至少 12 字符的强密码。
+> ⚠️ 上面的密码仅为示例，**不可照抄**，请务必更换为至少 8 字符的强密码。
 
 镜像支持 `linux/amd64` 和 `linux/arm64` 双架构，自动适配。
 
@@ -79,7 +79,7 @@ go build -o icloud-hme .
 
 | 环境变量 | 说明 | 默认 |
 |---|---|---|
-| `ICLOUD_HME_ADMIN_PASSWORD` | 管理员密码，**必填**，至少 12 字符 | 无（缺失时拒绝启动） |
+| `ICLOUD_HME_ADMIN_PASSWORD` | 管理员密码，**必填**，至少 8 字符 | 无（缺失时拒绝启动） |
 | `ICLOUD_HME_SESSION_TTL` | 会话有效期 | `12h`（范围 `15m`–`168h`） |
 | `ICLOUD_HME_SECURE_COOKIE` | 通过 TLS 反向代理部署时设为 `true` | `false` |
 
@@ -592,7 +592,7 @@ Download the latest binary from [GitHub Releases](https://github.com/xiaozhou26/
 | Windows x86_64 | `icloud-hme_windows_amd64.exe` |
 
 ```bash
-# Linux example (admin password is REQUIRED, min 12 chars)
+# Linux example (admin password is REQUIRED, min 8 chars)
 export ICLOUD_HME_ADMIN_PASSWORD='change-this-before-running-2026'
 chmod +x icloud-hme_linux_amd64
 ./icloud-hme_linux_amd64
@@ -611,7 +611,7 @@ docker run -d \
   ghcr.io/xiaozhou26/icloud-hme:latest
 ```
 
-> The password above is only an example — do NOT copy it. Use a strong password with at least 12 characters.
+> The password above is only an example — do NOT copy it. Use a strong password with at least 8 characters.
 
 #### Option 3: Build from source (Go 1.26+ and Node.js 22.12+)
 
@@ -632,7 +632,7 @@ go build -o icloud-hme .
 
 | Env var | Description | Default |
 |---|---|---|
-| `ICLOUD_HME_ADMIN_PASSWORD` | Admin password, **required**, min 12 chars | none (refuses to start) |
+| `ICLOUD_HME_ADMIN_PASSWORD` | Admin password, **required**, min 8 chars | none (refuses to start) |
 | `ICLOUD_HME_SESSION_TTL` | Session TTL | `12h` (range `15m`–`168h`) |
 | `ICLOUD_HME_SECURE_COOKIE` | Set `true` when deployed behind TLS | `false` |
 

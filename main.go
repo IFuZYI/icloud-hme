@@ -15,7 +15,7 @@
 //
 // 安全配置(必填):
 //
-//	ICLOUD_HME_ADMIN_PASSWORD      管理员密码,至少 12 字符(进程启动后从环境清除)
+//	ICLOUD_HME_ADMIN_PASSWORD      管理员密码,至少 8 字符(进程启动后从环境清除)
 //	ICLOUD_HME_SESSION_TTL         会话有效期,默认 12h,范围 15m-168h
 //	ICLOUD_HME_SECURE_COOKIE       TLS 反向代理部署时设为 true
 package main
@@ -38,8 +38,8 @@ func main() {
 	flag.Parse()
 
 	adminPassword := os.Getenv("ICLOUD_HME_ADMIN_PASSWORD")
-	if len(adminPassword) < 12 {
-		log.Fatal("请通过环境变量 ICLOUD_HME_ADMIN_PASSWORD 设置管理员密码(至少 12 个字符)")
+	if len(adminPassword) < 8 {
+		log.Fatal("请通过环境变量 ICLOUD_HME_ADMIN_PASSWORD 设置管理员密码(至少 8 个字符)")
 	}
 	sessionTTL, err := parseSessionTTL(os.Getenv("ICLOUD_HME_SESSION_TTL"))
 	if err != nil {

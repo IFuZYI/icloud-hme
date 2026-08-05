@@ -160,7 +160,7 @@ func TestManagerStoresHashedKeys(t *testing.T) {
 	}
 }
 
-// TestManagerRejectsWeakPassword 验证构造器拒绝短密码。
+// TestManagerRejectsWeakPassword 验证构造器拒绝短于 8 字符的密码。
 func TestManagerRejectsWeakPassword(t *testing.T) {
 	opts := Options{
 		Password: "short",
@@ -173,6 +173,16 @@ func TestManagerRejectsWeakPassword(t *testing.T) {
 	}
 	if _, err := NewManager(Options{}); err == nil {
 		t.Fatal("空密码应被拒绝")
+	}
+	// 7 字符仍拒绝
+	opts.Password = "1234567"
+	if _, err := NewManager(opts); err == nil {
+		t.Fatal("7 字符密码应被拒绝")
+	}
+	// 8 字符接受
+	opts.Password = "12345678"
+	if _, err := NewManager(opts); err != nil {
+		t.Fatalf("8 字符密码应被接受: %v", err)
 	}
 }
 

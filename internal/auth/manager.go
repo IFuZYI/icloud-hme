@@ -59,11 +59,11 @@ type Manager struct {
 
 // NewManager 创建会话管理器。
 //
-// 拒绝空密码与短于 12 字符的密码;启动时用随机 salt + argon2.IDKey
+// 拒绝空密码与短于 8 字符的密码;启动时用随机 salt + argon2.IDKey
 // 派生密码,登录时使用常量时间比较。
 func NewManager(opts Options) (*Manager, error) {
-	if len(opts.Password) < 12 {
-		return nil, errors.New("管理员密码长度不能少于 12 个字符")
+	if len(opts.Password) < 8 {
+		return nil, errors.New("管理员密码长度不能少于 8 个字符")
 	}
 	if opts.TTL <= 0 {
 		opts.TTL = DefaultTTL
