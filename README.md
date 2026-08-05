@@ -565,15 +565,17 @@ MIT License
 
 ## English
 
-A local management tool for Apple iCloud Hide My Email (HME) aliases, supporting creation, listing, and email reading through reverse-engineered iCloud Web API and IMAP protocol.
+A local management tool for Apple iCloud Hide My Email (HME) aliases, supporting creation, listing, and email reading through reverse-engineered iCloud Web API and IMAP protocol. Ships with a built-in Chinese management UI (React SPA embedded in the single binary).
 
 ### Features
 
+- Built-in management UI at `http://localhost:8081`
 - Create HME aliases automatically
 - List all aliases for an account
-- Read emails sent to HME aliases via IMAP
+- Read emails sent to HME aliases via IMAP or Web API
 - Manage multiple iCloud accounts
 - Dual authentication: Cookie and App Password
+- Security: single-admin session, CSRF checks, login rate limiting, redacted API responses
 
 ### Quick Start
 
@@ -590,7 +592,8 @@ Download the latest binary from [GitHub Releases](https://github.com/xiaozhou26/
 | Windows x86_64 | `icloud-hme_windows_amd64.exe` |
 
 ```bash
-# Linux example
+# Linux example (admin password is REQUIRED, min 12 chars)
+export ICLOUD_HME_ADMIN_PASSWORD='change-this-before-running-2026'
 chmod +x icloud-hme_linux_amd64
 ./icloud-hme_linux_amd64
 ```
@@ -604,16 +607,35 @@ docker run -d \
   --name icloud-hme \
   -p 8081:8081 \
   -v /path/to/data:/app/data \
+  -e ICLOUD_HME_ADMIN_PASSWORD='change-this-before-running-2026' \
   ghcr.io/xiaozhou26/icloud-hme:latest
 ```
 
-#### Option 3: Build from source
+> The password above is only an example — do NOT copy it. Use a strong password with at least 12 characters.
+
+#### Option 3: Build from source (Go 1.26+ and Node.js 22.12+)
 
 ```bash
 git clone https://github.com/xiaozhou26/icloud-hme.git
 cd icloud-hme
+
+# One-shot build (frontend deps → frontend test → frontend build → Go test → binary)
+./build.sh
+
+# Or step by step
+npm --prefix web ci
+npm --prefix web run build
 go build -o icloud-hme .
-./icloud-hme -debug     # enable request logging
 ```
 
-Create `data/accounts.json` and start the server (default port `:8081`).
+### Configuration
+
+| Env var | Description | Default |
+|---|---|---|
+| `ICLOUD_HME_ADMIN_PASSWORD` | Admin password, **required**, min 12 chars | none (refuses to start) |
+| `ICLOUD_HME_SESSION_TTL` | Session TTL | `12h` (range `15m`–`168h`) |
+| `ICLOUD_HME_SECURE_COOKIE` | Set `true` when deployed behind TLS | `false` |
+
+> **Breaking change (v0.3+)**: without `ICLOUD_HME_ADMIN_PASSWORD` the server refuses to start; all API endpoints now require login (`401 AUTH_REQUIRED`). Admin sessions are in-memory only and are lost on restart.
+
+Create `data/accounts.json` (see `accounts.json.template`) and start the server (default port `:8081`). Open `http://localhost:8081` to use the management UI. Full API contract: [API.md](API.md).
