@@ -43,6 +43,7 @@ type Manager struct {
 	accounts map[string]*Account
 	dataDir  string
 	dataFile string
+	imapPool *mail.Pool // IMAP 长连接池
 }
 
 // copyAccount 返回账号的深拷贝(含 Cookies map),必须在持锁时调用。
@@ -69,11 +70,19 @@ func NewManager(dataDir string) (*Manager, error) {
 		accounts: make(map[string]*Account),
 		dataDir:  dataDir,
 		dataFile: filepath.Join(dataDir, "accounts.json"),
+		imapPool: mail.NewPool(),
 	}
 	if err := m.load(); err != nil {
 		return nil, err
 	}
 	return m, nil
+}
+
+// Close 释放 IMAP 连接池等资源。
+func (m *Manager) Close() {
+	if m.imapPool != nil {
+		m.imapPool.Close()
+	}
 }
 
 // Reload 重新加载 accounts.json 配置文件。
@@ -493,8 +502,9 @@ func (m *Manager) HMEClientWithPassword(id, password string, otpProvider hme.OTP
 	return client, nil
 }
 
-// MailClient 为指定账号创建 IMAP 邮件客户端。
+// MailClient 为指定账号创建 IMAP 邮件客户端(每次新建, 不走连接池)。
 // 需要事先设置 iCloud 邮箱和 App 专用密码。
+// 高频读信请用 WithMailClient 复用长连接。
 func (m *Manager) MailClient(id string) (*mail.Client, error) {
 	m.mu.RLock()
 	acc, ok := m.accounts[id]
@@ -517,6 +527,43 @@ func (m *Manager) MailClient(id string) (*mail.Client, error) {
 		return nil, fmt.Errorf("账号未设置 App 专用密码")
 	}
 	return mail.NewClient(imapEmail, snap.AppPassword), nil
+}
+
+// WithMailClient 使用连接池中的长连接执行 fn(串行/账号级)。
+// fn 返回后连接保留在池中, 不会 Logout。
+func (m *Manager) WithMailClient(id string, fn func(*mail.Client) error) error {
+	imapEmail, appPassword, err := m.imapCreds(id)
+	if err != nil {
+		return err
+	}
+	if m.imapPool == nil {
+		m.imapPool = mail.NewPool()
+	}
+	return m.imapPool.Do(imapEmail, appPassword, fn)
+}
+
+func (m *Manager) imapCreds(id string) (imapEmail, appPassword string, err error) {
+	m.mu.RLock()
+	acc, ok := m.accounts[id]
+	var snap *Account
+	if ok {
+		snap = copyAccount(acc)
+	}
+	m.mu.RUnlock()
+	if !ok {
+		return "", "", fmt.Errorf("账号不存在: %s", id)
+	}
+	imapEmail = snap.ICloudEmail
+	if imapEmail == "" {
+		imapEmail = snap.RealEmail
+	}
+	if !isICloudDomain(imapEmail) {
+		return "", "", fmt.Errorf("账号未设置 iCloud 邮箱 (当前: %s)", imapEmail)
+	}
+	if snap.AppPassword == "" {
+		return "", "", fmt.Errorf("账号未设置 App 专用密码")
+	}
+	return imapEmail, snap.AppPassword, nil
 }
 
 // WebMailClient 为指定账号创建 Web 邮件客户端。

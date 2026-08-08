@@ -58,6 +58,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("初始化账号管理器失败: %v", err)
 	}
+	defer mgr.Close()
 	count := len(mgr.ListAccounts())
 	log.Printf("账号加载完成 count=%d data_dir=%s", count, abs)
 

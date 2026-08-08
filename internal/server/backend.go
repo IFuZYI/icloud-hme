@@ -243,28 +243,27 @@ func (b *managerBackend) DeleteAlias(accountID, anonymousID string) error {
 
 // ListInbox 读取收件箱摘要:IMAP (App Password) 优先,Web API (Cookie) 回退。
 func (b *managerBackend) ListInbox(q InboxQuery) (InboxResult, error) {
-	// 优先使用 IMAP (App Password 认证)
-	if mc, err := b.mgr.MailClient(q.AccountID); err == nil {
-		if connErr := mc.Connect(); connErr == nil {
-			defer mc.Disconnect()
-			var messages []mail.Message
-			if q.Alias != "" {
-				messages, err = mc.FindByRecipient(q.Alias, q.Limit, q.Days)
-			} else {
-				messages, err = mc.ListInbox(q.Limit, q.Days)
-			}
-			if err == nil {
-				return InboxResult{
-					AccountID: q.AccountID,
-					Alias:     q.Alias,
-					Count:     len(messages),
-					Messages:  messages,
-					Method:    "imap",
-				}, nil
-			}
-			// IMAP 失败,继续尝试 Web API
+	// 优先使用 IMAP 连接池 (App Password 认证,复用长连接)
+	var imapMessages []mail.Message
+	poolErr := b.mgr.WithMailClient(q.AccountID, func(mc *mail.Client) error {
+		var e error
+		if q.Alias != "" {
+			imapMessages, e = mc.FindByRecipient(q.Alias, q.Limit, q.Days)
+		} else {
+			imapMessages, e = mc.ListInbox(q.Limit, q.Days)
 		}
+		return e
+	})
+	if poolErr == nil {
+		return InboxResult{
+			AccountID: q.AccountID,
+			Alias:     q.Alias,
+			Count:     len(imapMessages),
+			Messages:  imapMessages,
+			Method:    "imap",
+		}, nil
 	}
+	// IMAP 失败,继续尝试 Web API
 
 	// 回退到 Web API (Cookie 认证,无需 App Password)
 	wmc, err := b.mgr.WebMailClient(q.AccountID)
