@@ -12,6 +12,7 @@ CLAUDE.md
 # Claude sessions
 /.claude/
 docs/
+.ccg/
 .superpowers/
 # Web frontend build output & deps
 /web/node_modules/
