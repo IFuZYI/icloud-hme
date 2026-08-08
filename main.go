@@ -12,12 +12,20 @@
 //	./icloud-hme -data ./data       # 指定数据目录
 //	./icloud-hme -debug             # 调试模式
 //	./icloud-hme -log-level debug   # 日志级别 (debug/info/warn/error)
+//
+// 安全配置(必填):
+//
+//	ICLOUD_HME_ADMIN_PASSWORD      管理员密码,至少 8 字符(进程启动后从环境清除)
+//	ICLOUD_HME_SESSION_TTL         会话有效期,默认 12h,范围 15m-168h
+//	ICLOUD_HME_SECURE_COOKIE       TLS 反向代理部署时设为 true
 package main
 
 import (
 	"flag"
 	"log"
+	"os"
 	"path/filepath"
+	"time"
 
 	"icloud-hme/internal/account"
 	"icloud-hme/internal/server"
@@ -28,6 +36,16 @@ func main() {
 	dataDir := flag.String("data", "./data", "数据目录 (accounts.json 存放位置)")
 	debug := flag.Bool("debug", false, "调试模式 (启用 Gin 调试日志)")
 	flag.Parse()
+
+	adminPassword := os.Getenv("ICLOUD_HME_ADMIN_PASSWORD")
+	if len(adminPassword) < 8 {
+		log.Fatal("请通过环境变量 ICLOUD_HME_ADMIN_PASSWORD 设置管理员密码(至少 8 个字符)")
+	}
+	sessionTTL, err := parseSessionTTL(os.Getenv("ICLOUD_HME_SESSION_TTL"))
+	if err != nil {
+		log.Fatalf("ICLOUD_HME_SESSION_TTL 无效: %v", err)
+	}
+	secureCookie := os.Getenv("ICLOUD_HME_SECURE_COOKIE") == "true"
 
 	log.Printf("iCloud Hide My Email 服务启动 addr=%s", *addr)
 
@@ -43,10 +61,36 @@ func main() {
 	count := len(mgr.ListAccounts())
 	log.Printf("账号加载完成 count=%d data_dir=%s", count, abs)
 
-	srv := server.New(mgr, *debug)
+	srv, err := server.New(mgr, server.Config{
+		Debug:         *debug,
+		AdminPassword: adminPassword,
+		SessionTTL:    sessionTTL,
+		SecureCookie:  secureCookie,
+	})
+	if err != nil {
+		log.Fatalf("初始化服务失败: %v", err)
+	}
+
+	// 密码只用于初始化认证,随后立即从进程环境清除
+	_ = os.Unsetenv("ICLOUD_HME_ADMIN_PASSWORD")
 
 	log.Printf("HTTP 服务就绪 addr=%s", *addr)
 	if err := srv.Run(*addr); err != nil {
 		log.Fatalf("服务启动失败: %v", err)
 	}
+}
+
+// parseSessionTTL 解析会话有效期,默认 12h,范围 15m-168h。
+func parseSessionTTL(raw string) (time.Duration, error) {
+	if raw == "" {
+		return 12 * time.Hour, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, err
+	}
+	if d < 15*time.Minute || d > 168*time.Hour {
+		return 0, err
+	}
+	return d, nil
 }

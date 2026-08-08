@@ -1,0 +1,14 @@
+{"path":"main.go","reason":"程序入口、监听参数、Manager 与 Server 组装位置"}
+{"path":"internal/server/server.go","reason":"全部现有 HTTP 路由、响应结构与 handler"}
+{"path":"internal/account/manager.go","reason":"账号持久化、敏感字段、客户端工厂与并发边界"}
+{"path":"internal/hme/auth.go","reason":"iCloud 密码登录与 OTP 错误语义"}
+{"path":"internal/hme/client.go","reason":"Alias、CreateResult 与 HME 操作契约"}
+{"path":"internal/mail/client.go","reason":"邮件摘要结构与 IMAP 查询"}
+{"path":"internal/mail/web_client.go","reason":"Web API 邮件回退路径"}
+{"path":"Dockerfile","reason":"当前仅 Go 的镜像构建流程"}
+{"path":"build.sh","reason":"当前本地单二进制构建流程"}
+{"path":".github/workflows/release.yml","reason":"多平台二进制与容器发布流程"}
+{"path":"README.md","reason":"部署、配置和现有功能说明"}
+{"path":"API.md","reason":"现有 API 请求响应约定"}
+{"path":"accounts.json.template","reason":"已与当前 Manager JSON 结构不一致的模板"}
+{"path":".gitignore","reason":"当前忽略 docs 与 JavaScript，影响计划和前端文件"}

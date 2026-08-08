@@ -1,0 +1,13 @@
+{
+  "id": "add-management-ui-plan",
+  "title": "制定管理界面实施计划，供 DeepSeek 后续执行",
+  "status": "completed",
+  "complexity": "L+",
+  "risk": "high",
+  "domain": "fullstack",
+  "currentPhase": "completed",
+  "nextAction": "将 docs/superpowers/plans/2026-08-04-add-management-ui.md 交给 DeepSeek 顺序执行",
+  "createdAt": "2026-08-04T00:00:00Z",
+  "completedAt": "2026-08-04T00:00:00Z",
+  "branch": "main"
+}

@@ -11,9 +11,12 @@
 CLAUDE.md
 # Claude sessions
 /.claude/
-*.js
 docs/
 .superpowers/
+# Web frontend build output & deps
+/web/node_modules/
+/internal/webui/dist/*
+!/internal/webui/dist/placeholder.txt
 !capture_statsig_pair.js
 !capture_statsig_pair_v5.js
 # Temp / test files
