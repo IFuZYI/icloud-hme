@@ -95,6 +95,40 @@ describe('InboxPage', () => {
     })
   })
 
+  it('从 URL 的 alias 参数初始化筛选,支持别名页直达收件箱', async () => {
+    const inboxUrls: string[] = []
+    server.use(
+      http.get('/api/accounts', () => HttpResponse.json({ success: true, data: accounts })),
+      http.get('/api/aliases', () =>
+        HttpResponse.json({
+          success: true,
+          data: {
+            account_id: 'acc_1',
+            count: 1,
+            aliases: [
+              {
+                email: 'alpha@icloud.com',
+                anonymousId: 'anon_alpha',
+                label: 'Alpha',
+                active: true,
+              },
+            ],
+          },
+        }),
+      ),
+      http.get('/api/inbox', ({ request }) => {
+        inboxUrls.push(request.url)
+        return HttpResponse.json({ success: true, data: inboxResult })
+      }),
+    )
+    renderPage('/inbox?account_id=acc_1&alias=alpha%40icloud.com')
+    await screen.findByText('主题一')
+    await waitFor(() => {
+      expect(inboxUrls.some((url) => new URL(url).searchParams.get('alias') === 'alpha@icloud.com')).toBe(true)
+    })
+    expect(screen.getByLabelText(/别名/)).toHaveValue('alpha@icloud.com')
+  })
+
   it('展示 method=imap 或 web_api', async () => {
     server.use(
       http.get('/api/accounts', () => HttpResponse.json({ success: true, data: accounts })),

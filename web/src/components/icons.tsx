@@ -122,6 +122,22 @@ export function IconClock(props: IconProps) {
   )
 }
 
+export function IconChevronUp(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <path d="M6 14l6-6 6 6" />
+    </svg>
+  )
+}
+
+export function IconChevronDown(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <path d="M6 10l6 6 6-6" />
+    </svg>
+  )
+}
+
 export function IconAlert(props: IconProps) {
   return (
     <svg {...base(props)}>

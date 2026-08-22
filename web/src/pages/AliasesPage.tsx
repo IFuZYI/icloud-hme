@@ -1,23 +1,60 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { request, ApiError } from '../api/client'
 import type { AccountSummary, Alias } from '../api/types'
 import AsyncState from '../components/AsyncState'
 import CreateAliasDialog from '../components/CreateAliasDialog'
 import ConfirmDialog from '../components/ConfirmDialog'
 import { useToast } from '../components/ToastProvider'
-import { IconCheck, IconClock, IconPlus, IconSearch, IconTrash } from '../components/icons'
+import { copyText } from '../utils/clipboard'
+import {
+  IconCheck,
+  IconChevronDown,
+  IconChevronUp,
+  IconClock,
+  IconInbox,
+  IconPlus,
+  IconSearch,
+  IconTrash,
+} from '../components/icons'
 
-function formatDate(raw: string): string {
-  const d = new Date(raw)
-  if (Number.isNaN(d.getTime())) return raw
-  return new Intl.DateTimeFormat('zh-CN', {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-  }).format(d)
+type SortDirection = 'asc' | 'desc'
+
+function parseAliasDate(raw?: string): Date | null {
+  const value = raw?.trim()
+  if (!value) return null
+
+  // iCloud 可能返回 ISO 字符串，也可能返回秒、毫秒或微秒时间戳。
+  if (/^[+-]?\d+(?:\.\d+)?$/.test(value)) {
+    const numeric = Number(value)
+    if (Number.isFinite(numeric)) {
+      const magnitude = Math.abs(numeric)
+      const milliseconds =
+        magnitude < 1e11
+          ? numeric * 1000
+          : magnitude < 1e14
+            ? numeric
+            : magnitude < 1e17
+              ? numeric / 1000
+              : numeric / 1e6
+      const timestampDate = new Date(milliseconds)
+      if (!Number.isNaN(timestampDate.getTime())) return timestampDate
+    }
+  }
+
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? null : date
+}
+
+function formatDate(raw?: string): string {
+  const date = parseAliasDate(raw)
+  if (!date) return raw?.trim() || '—'
+  const pad = (value: number) => String(value).padStart(2, '0')
+  return `${date.getFullYear()}/${pad(date.getMonth() + 1)}/${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
+function dateTimestamp(raw?: string): number | null {
+  return parseAliasDate(raw)?.getTime() ?? null
 }
 
 export default function AliasesPage() {
@@ -29,6 +66,7 @@ export default function AliasesPage() {
   const [retryKey, setRetryKey] = useState(0)
   const [search, setSearch] = useState('')
   const [filter, setFilter] = useState<'all' | 'active' | 'inactive'>('all')
+  const [sortDirection, setSortDirection] = useState<SortDirection>('asc')
   const [createOpen, setCreateOpen] = useState(false)
   const [confirm, setConfirm] = useState<{
     type: 'deactivate' | 'reactivate' | 'delete'
@@ -38,7 +76,7 @@ export default function AliasesPage() {
   const [actionError, setActionError] = useState('')
 
   const [searchParams, setSearchParams] = useSearchParams()
-  const { show } = useToast()
+  const { show, showCopyable } = useToast()
 
   // 加载账号列表
   useEffect(() => {
@@ -94,15 +132,30 @@ export default function AliasesPage() {
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase()
-    return aliases.filter((a) => {
-      if (filter === 'active' && !a.active) return false
-      if (filter === 'inactive' && a.active) return false
-      if (!q) return true
-      return (
-        a.email.toLowerCase().includes(q) || a.label.toLowerCase().includes(q)
-      )
-    })
-  }, [aliases, search, filter])
+    return aliases
+      .map((alias, index) => ({ alias, index }))
+      .filter(({ alias }) => {
+        if (filter === 'active' && !alias.active) return false
+        if (filter === 'inactive' && alias.active) return false
+        if (!q) return true
+        return (
+          alias.email.toLowerCase().includes(q) || alias.label.toLowerCase().includes(q)
+        )
+      })
+      .sort((left, right) => {
+        const leftTime = dateTimestamp(left.alias.createdAt)
+        const rightTime = dateTimestamp(right.alias.createdAt)
+
+        // 没有有效时间的记录始终放在末尾，避免倒序时跳到列表顶部。
+        if (leftTime === null || rightTime === null) {
+          if (leftTime === rightTime) return left.index - right.index
+          return leftTime === null ? 1 : -1
+        }
+        if (leftTime === rightTime) return left.index - right.index
+        return sortDirection === 'asc' ? leftTime - rightTime : rightTime - leftTime
+      })
+      .map(({ alias }) => alias)
+  }, [aliases, search, filter, sortDirection])
 
   function handleRetry() {
     setLoading(true)
@@ -111,14 +164,13 @@ export default function AliasesPage() {
 
   const copyEmail = useCallback(
     async (email: string) => {
-      try {
-        await navigator.clipboard.writeText(email)
+      if (await copyText(email)) {
         show('邮箱已复制')
-      } catch {
-        show(`复制失败，请手动复制：${email}`)
+      } else {
+        showCopyable(email, '复制失败，请手动复制')
       }
     },
-    [show],
+    [show, showCopyable],
   )
 
   async function runAction(type: 'deactivate' | 'reactivate' | 'delete') {
@@ -153,7 +205,7 @@ export default function AliasesPage() {
 
   function handleCreated(email: string) {
     setCreateOpen(false)
-    show(`别名已创建：${email}`)
+    showCopyable(email)
     setRetryKey((k) => k + 1)
   }
 
@@ -259,7 +311,18 @@ export default function AliasesPage() {
                 <th>邮箱</th>
                 <th>标签</th>
                 <th>状态</th>
-                <th>创建时间</th>
+                <th aria-sort={sortDirection === 'asc' ? 'ascending' : 'descending'}>
+                  <button
+                    type="button"
+                    className="table-sort-button"
+                    onClick={() => setSortDirection((direction) => (direction === 'asc' ? 'desc' : 'asc'))}
+                    aria-label={`创建时间排序：当前${sortDirection === 'asc' ? '正序' : '倒序'}，点击切换为${sortDirection === 'asc' ? '倒序' : '正序'}`}
+                    title="点击切换创建时间排序"
+                  >
+                    <span>创建时间</span>
+                    {sortDirection === 'asc' ? <IconChevronUp size={14} /> : <IconChevronDown size={14} />}
+                  </button>
+                </th>
                 <th>操作</th>
               </tr>
             </thead>
@@ -283,7 +346,7 @@ export default function AliasesPage() {
                       {alias.active ? '已启用' : '已停用'}
                     </span>
                   </td>
-                  <td>{alias.createdAt ? formatDate(alias.createdAt) : '—'}</td>
+                  <td>{formatDate(alias.createdAt)}</td>
                   <td>
                     <div className="row-actions">
                       {alias.active ? (
@@ -309,6 +372,13 @@ export default function AliasesPage() {
                         <IconTrash size={14} />
                         删除
                       </button>
+                      <Link
+                        to={`/inbox?account_id=${encodeURIComponent(accountId)}&alias=${encodeURIComponent(alias.email)}`}
+                        title="查看此别名的收件箱"
+                      >
+                        <IconInbox size={14} />
+                        收件箱
+                      </Link>
                     </div>
                   </td>
                 </tr>

@@ -47,7 +47,10 @@ export default function InboxPage() {
         if (target) {
           const next: Record<string, string> = { account_id: target }
           const qAlias = searchParams.get('alias')
-          if (qAlias) next.alias = qAlias
+          if (qAlias) {
+            setAlias(qAlias)
+            next.alias = qAlias
+          }
           const qLimit = searchParams.get('limit')
           if (qLimit) next.limit = qLimit
           const qDays = searchParams.get('days')
