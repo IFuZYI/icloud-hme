@@ -254,4 +254,21 @@ describe('InboxPage', () => {
     renderPage()
     expect(await screen.findByText(/（无主题）/)).toBeInTheDocument()
   })
+
+  it('空摘要显示占位符', async () => {
+    server.use(
+      http.get('/api/accounts', () => HttpResponse.json({ success: true, data: accounts })),
+      http.get('/api/inbox', () =>
+        HttpResponse.json({
+          success: true,
+          data: {
+            ...inboxResult,
+            messages: [{ ...inboxResult.messages[0], preview: '' }],
+          },
+        }),
+      ),
+    )
+    renderPage()
+    expect(await screen.findByText('—')).toBeInTheDocument()
+  })
 })

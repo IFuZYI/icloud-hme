@@ -10,7 +10,6 @@ import (
 	"mime"
 	"mime/quotedprintable"
 	"net/mail"
-	"regexp"
 	"strings"
 	"time"
 
@@ -472,8 +471,6 @@ func decodeHeader(s string) string {
 	return out
 }
 
-var htmlTag = regexp.MustCompile(`<[^>]+>`)
-
 // readBody 读取邮件正文,优先 text/plain,其次从 HTML 提取纯文本。
 func readBody(msg *mail.Message) (string, error) {
 	ct := msg.Header.Get("Content-Type")
@@ -484,7 +481,7 @@ func readBody(msg *mail.Message) (string, error) {
 			r := quotedprintable.NewReader(strings.NewReader(string(raw)))
 			raw, _ = io.ReadAll(r)
 		}
-		return stripHTML(string(raw)), nil
+		return sanitizePreview(string(raw)), nil
 	}
 	// 默认当 text/plain
 	raw, err := io.ReadAll(msg.Body)
@@ -495,30 +492,5 @@ func readBody(msg *mail.Message) (string, error) {
 		r := quotedprintable.NewReader(strings.NewReader(string(raw)))
 		raw, _ = io.ReadAll(r)
 	}
-	return string(raw), nil
-}
-
-// stripHTML 粗略剥离 HTML 标签,保留可读文本。
-func stripHTML(html string) string {
-	// 换行标签转换行
-	html = strings.ReplaceAll(html, "<br>", "\n")
-	html = strings.ReplaceAll(html, "<br/>", "\n")
-	html = strings.ReplaceAll(html, "<br />", "\n")
-	html = strings.ReplaceAll(html, "</p>", "\n")
-	html = strings.ReplaceAll(html, "</div>", "\n")
-	html = strings.ReplaceAll(html, "</tr>", "\n")
-	html = strings.ReplaceAll(html, "<li>", "\n- ")
-	// 去掉所有标签
-	html = htmlTag.ReplaceAllString(html, "")
-	// 反转义常见实体
-	html = strings.ReplaceAll(html, "&nbsp;", " ")
-	html = strings.ReplaceAll(html, "&amp;", "&")
-	html = strings.ReplaceAll(html, "&lt;", "<")
-	html = strings.ReplaceAll(html, "&gt;", ">")
-	// 压缩多余空白
-	lines := strings.Split(html, "\n")
-	for i, l := range lines {
-		lines[i] = strings.TrimSpace(l)
-	}
-	return strings.TrimSpace(strings.Join(lines, "\n"))
+	return sanitizePlainPreview(string(raw)), nil
 }

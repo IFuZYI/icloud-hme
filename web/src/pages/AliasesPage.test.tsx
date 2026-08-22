@@ -156,7 +156,7 @@ describe('AliasesPage', () => {
     expect(screen.queryByText('beta@icloud.com')).toBeNull()
   })
 
-  it('创建时间可切换正序/倒序,兼容时间戳并按收件箱格式显示', async () => {
+  it('创建时间默认倒序且可切换正序,兼容时间戳并按收件箱格式显示', async () => {
     const timestampAliases: Alias[] = [
       { ...aliases[0], createdAt: '1787406420000' },
       { ...aliases[1], createdAt: '1787406360000' },
@@ -175,20 +175,20 @@ describe('AliasesPage', () => {
     const table = screen.getByRole('table')
     const emailButtons = () => within(table).getAllByRole('button', { name: /@icloud\.com/ })
     expect(emailButtons().map((button) => button.textContent)).toEqual([
-      'beta@icloud.com',
       'alpha@icloud.com',
+      'beta@icloud.com',
     ])
     expect(screen.getAllByText(/^\d{4}\/\d{2}\/\d{2} \d{2}:\d{2}$/)).toHaveLength(2)
 
     const user = userEvent.setup()
     await user.click(screen.getByRole('button', { name: /创建时间排序/ }))
     expect(emailButtons().map((button) => button.textContent)).toEqual([
-      'alpha@icloud.com',
       'beta@icloud.com',
+      'alpha@icloud.com',
     ])
 
-    const inboxLinks = within(table).getAllByRole('link', { name: /收件箱/ })
-    expect(inboxLinks[0]).toHaveAttribute(
+    const alphaRow = within(table).getByRole('row', { name: /alpha@icloud\.com/ })
+    expect(within(alphaRow).getByRole('link', { name: /收件箱/ })).toHaveAttribute(
       'href',
       '/inbox?account_id=acc_1&alias=alpha%40icloud.com',
     )
@@ -293,7 +293,8 @@ describe('AliasesPage', () => {
     renderPage()
     await screen.findByText('alpha@icloud.com')
     const user = userEvent.setup()
-    await user.click(screen.getAllByRole('button', { name: /删除/ })[0])
+    const alphaRow = within(screen.getByRole('table')).getByRole('row', { name: /alpha@icloud\.com/ })
+    await user.click(within(alphaRow).getByRole('button', { name: /删除/ }))
     expect(screen.getByRole('dialog')).toHaveTextContent('alpha@icloud.com')
     // 输入不完整邮箱时按钮禁用
     await user.type(screen.getByLabelText(/输入完整邮箱/), 'alpha@icloud')

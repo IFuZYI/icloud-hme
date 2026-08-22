@@ -66,7 +66,7 @@ export default function AliasesPage() {
   const [retryKey, setRetryKey] = useState(0)
   const [search, setSearch] = useState('')
   const [filter, setFilter] = useState<'all' | 'active' | 'inactive'>('all')
-  const [sortDirection, setSortDirection] = useState<SortDirection>('asc')
+  const [sortDirection, setSortDirection] = useState<SortDirection>('desc')
   const [createOpen, setCreateOpen] = useState(false)
   const [confirm, setConfirm] = useState<{
     type: 'deactivate' | 'reactivate' | 'delete'

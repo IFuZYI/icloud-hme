@@ -254,7 +254,7 @@ export default function InboxPage() {
                       <td>{m.from}</td>
                       <td>{m.to}</td>
                       <td>{formatDate(m.date)}</td>
-                      <td>{m.preview}</td>
+                      <td>{m.preview || '—'}</td>
                     </tr>
                   ))}
                 </tbody>
