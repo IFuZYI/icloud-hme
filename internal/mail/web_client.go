@@ -221,7 +221,7 @@ func (c *WebClient) search(payload string) ([]Message, error) {
 			ID:      t.ThreadID,
 			From:    from,
 			Subject: t.Subject,
-			Preview: t.Preview,
+			Preview: sanitizePreview(t.Preview),
 			Date:    date,
 		})
 	}

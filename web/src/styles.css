@@ -462,6 +462,32 @@ th {
   white-space: nowrap;
 }
 
+.table-sort-button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-weight: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+}
+
+.table-sort-button:hover:not(:disabled) {
+  border-color: transparent;
+  background: transparent;
+  color: var(--color-primary);
+}
+
+.table-sort-button svg {
+  flex-shrink: 0;
+}
+
 tbody tr {
   transition: background var(--dur-fast) var(--ease-out);
 }
@@ -545,6 +571,8 @@ td .cell-secondary {
   align-items: center;
   gap: var(--space-2);
   z-index: var(--z-toast);
+  max-width: calc(100vw - var(--space-6));
+  pointer-events: none;
 }
 
 .toast {
@@ -556,10 +584,45 @@ td .cell-secondary {
   border-radius: var(--radius-lg);
   padding: var(--space-3) var(--space-4);
   box-shadow: var(--shadow-lg);
-  min-width: 240px;
+  min-width: min(240px, 100%);
   max-width: 480px;
   font-size: var(--text-sm);
   animation: toast-in var(--dur-base) var(--ease-out);
+  pointer-events: auto;
+}
+
+.toast-content {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.toast-copy-value {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  color: inherit;
+  font-family: var(--font-mono);
+  user-select: text;
+}
+
+.toast-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  min-height: 32px;
+  padding: var(--space-1) var(--space-2);
+  border-color: color-mix(in srgb, currentColor 35%, transparent);
+  background: transparent;
+  color: inherit;
+  font-size: var(--text-sm);
+}
+
+.toast-copy:hover:not(:disabled) {
+  border-color: currentColor;
+  background: color-mix(in srgb, currentColor 12%, transparent);
 }
 
 @keyframes toast-in {
