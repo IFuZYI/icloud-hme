@@ -104,6 +104,7 @@ func (s *Server) register() {
 			authed.PUT("/accounts/:id/proxy", csrfCheck(s.auth), s.updateProxyHandler)
 			authed.PUT("/accounts/:id/cookies", csrfCheck(s.auth), s.updateCookiesHandler)
 			authed.POST("/accounts/:id/password", csrfCheck(s.auth), s.setAppPasswordHandler)
+			authed.PUT("/accounts/:id/mailbox", csrfCheck(s.auth), s.setMailboxHandler)
 			authed.POST("/accounts/:id/login", csrfCheck(s.auth), s.loginAccountHandler)
 			authed.DELETE("/accounts/:id", csrfCheck(s.auth), s.removeAccountHandler)
 
@@ -112,6 +113,8 @@ func (s *Server) register() {
 
 			// ===== 核心接口 2: 读取邮件 =====
 			authed.GET("/inbox", s.listInboxHandler)
+			authed.GET("/inbox/:message_id", s.getMessageHandler)
+			authed.DELETE("/inbox/:message_id", csrfCheck(s.auth), s.deleteMessageHandler)
 
 			// ===== 别名管理 =====
 			authed.GET("/aliases", s.listAliasesHandler)
@@ -222,6 +225,35 @@ func (s *Server) listInboxHandler(c *gin.Context) {
 		return
 	}
 	ok(c, result)
+}
+
+func (s *Server) getMessageHandler(c *gin.Context) {
+	accountID := c.Query("account_id")
+	uid, err := strconv.ParseUint(c.Param("message_id"), 10, 32)
+	if accountID == "" || err != nil {
+		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "account_id 或邮件 ID 无效")
+		return
+	}
+	message, err := s.be.GetMessage(accountID, uint32(uid))
+	if err != nil {
+		backendFail(c, err)
+		return
+	}
+	ok(c, message)
+}
+
+func (s *Server) deleteMessageHandler(c *gin.Context) {
+	accountID := c.Query("account_id")
+	uid, err := strconv.ParseUint(c.Param("message_id"), 10, 32)
+	if accountID == "" || err != nil {
+		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "account_id 或邮件 ID 无效")
+		return
+	}
+	if err := s.be.DeleteMessage(accountID, uint32(uid)); err != nil {
+		backendFail(c, err)
+		return
+	}
+	ok(c, gin.H{"id": c.Param("message_id")})
 }
 
 // parseInboxInt 解析整数参数,非法或越界返回错误(不再静默变成 0)。

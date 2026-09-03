@@ -8,6 +8,7 @@ import CookieDialog from '../components/CookieDialog'
 import ICloudLoginDialog from '../components/ICloudLoginDialog'
 import AppPasswordDialog from '../components/AppPasswordDialog'
 import ProxyDialog from '../components/ProxyDialog'
+import MailboxDialog from '../components/MailboxDialog'
 import ConfirmDialog from '../components/ConfirmDialog'
 import { useToast } from '../components/ToastProvider'
 import {
@@ -46,6 +47,7 @@ function credText(acc: AccountSummary): string {
   const parts: string[] = []
   if (acc.has_cookies) parts.push('Cookie')
   if (acc.has_app_password) parts.push('App密码')
+  if (acc.mailbox) parts.push(`收件箱:${acc.mailbox.email}`)
   if (acc.has_proxy) parts.push('代理')
   return parts.length > 0 ? `已配置（${parts.join('·')}）` : '未配置'
 }
@@ -63,6 +65,7 @@ export default function AccountsPage() {
   const [loginFor, setLoginFor] = useState<AccountSummary | null>(null)
   const [appPwdFor, setAppPwdFor] = useState<AccountSummary | null>(null)
   const [proxyFor, setProxyFor] = useState<AccountSummary | null>(null)
+  const [mailboxFor, setMailboxFor] = useState<AccountSummary | null>(null)
   const [deleteFor, setDeleteFor] = useState<AccountSummary | null>(null)
   const [deleting, setDeleting] = useState(false)
 
@@ -197,6 +200,7 @@ export default function AccountsPage() {
                         iCloud 登录
                       </button>
                       <button onClick={() => setAppPwdFor(acc)}>设置 App 密码</button>
+                      <button onClick={() => setMailboxFor(acc)}>接入收件邮箱</button>
                       <button onClick={() => setProxyFor(acc)}>设置代理</button>
                       <Link to={`/aliases?account_id=${acc.id}`}>别名</Link>
                       <Link to={`/inbox?account_id=${acc.id}`}>
@@ -268,6 +272,15 @@ export default function AccountsPage() {
             show('代理已更新')
             void load()
           }}
+        />
+      )}
+      {mailboxFor && (
+        <MailboxDialog
+          accountId={mailboxFor.id}
+          current={mailboxFor.mailbox}
+          open
+          onClose={() => setMailboxFor(null)}
+          onSaved={() => { setMailboxFor(null); show('收件邮箱已接入'); void load() }}
         />
       )}
       {deleteFor && (

@@ -13,20 +13,21 @@ import (
 
 // Summary 是账号的安全公开表示,不含任何秘密字段。
 type Summary struct {
-	ID             string `json:"id"`
-	Name           string `json:"name"`
-	RealEmail      string `json:"real_email"`
-	ICloudEmail    string `json:"icloud_email"`
-	Host           string `json:"host"`
-	Status         string `json:"status"`
-	AliasTotal     int    `json:"alias_total"`
-	AliasActive    int    `json:"alias_active"`
-	HasCookies     bool   `json:"has_cookies"`
-	HasAppPassword bool   `json:"has_app_password"`
-	HasProxy       bool   `json:"has_proxy"`
-	LastValidated  string `json:"last_validated"`
-	StatusMessage  string `json:"status_message,omitempty"`
-	CreatedAt      string `json:"created_at"`
+	ID             string          `json:"id"`
+	Name           string          `json:"name"`
+	RealEmail      string          `json:"real_email"`
+	ICloudEmail    string          `json:"icloud_email"`
+	Host           string          `json:"host"`
+	Status         string          `json:"status"`
+	AliasTotal     int             `json:"alias_total"`
+	AliasActive    int             `json:"alias_active"`
+	HasCookies     bool            `json:"has_cookies"`
+	HasAppPassword bool            `json:"has_app_password"`
+	HasProxy       bool            `json:"has_proxy"`
+	Mailbox        *MailboxSummary `json:"mailbox,omitempty"`
+	LastValidated  string          `json:"last_validated"`
+	StatusMessage  string          `json:"status_message,omitempty"`
+	CreatedAt      string          `json:"created_at"`
 }
 
 // Summary 返回账号的安全快照,忽略内部 LastError。
@@ -46,6 +47,9 @@ func (a *Account) Summary() Summary {
 		LastValidated:  a.LastValidated,
 		CreatedAt:      a.CreatedAt,
 	}
+	if a.Mailbox != nil {
+		s.Mailbox = &MailboxSummary{Provider: a.Mailbox.Provider, Email: a.Mailbox.Email, IMAPHost: a.Mailbox.IMAPHost, IMAPPort: a.Mailbox.IMAPPort}
+	}
 	switch a.Status {
 	case "pending":
 		s.StatusMessage = "等待配置或验证凭据"
@@ -53,6 +57,13 @@ func (a *Account) Summary() Summary {
 		s.StatusMessage = "凭据验证失败"
 	}
 	return s
+}
+
+type MailboxSummary struct {
+	Provider string `json:"provider"`
+	Email    string `json:"email"`
+	IMAPHost string `json:"imap_host"`
+	IMAPPort int    `json:"imap_port"`
 }
 
 // AddAccountInput 是添加账号的输入。

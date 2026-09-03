@@ -1,9 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { request, ApiError } from '../api/client'
-import type { AccountSummary, Alias, InboxResult } from '../api/types'
+import type { AccountSummary, Alias, FullMessage, InboxResult, InboxMessage } from '../api/types'
 import AsyncState from '../components/AsyncState'
-import { IconKey, IconMail } from '../components/icons'
+import Dialog from '../components/Dialog'
+import ConfirmDialog from '../components/ConfirmDialog'
+import { useToast } from '../components/ToastProvider'
+import { IconKey, IconMail, IconTrash } from '../components/icons'
 
 function formatDate(raw: string): string {
   const d = new Date(raw)
@@ -29,9 +32,42 @@ export default function InboxPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [retryKey, setRetryKey] = useState(0)
+  const [detail, setDetail] = useState<FullMessage | null>(null)
+  const [detailLoading, setDetailLoading] = useState(false)
+  const [deleteFor, setDeleteFor] = useState<InboxMessage | null>(null)
+  const [deleting, setDeleting] = useState(false)
 
   const [searchParams, setSearchParams] = useSearchParams()
   const abortRef = useRef<AbortController | null>(null)
+  const { show } = useToast()
+
+  async function openMessage(message: InboxMessage) {
+    setDetailLoading(true)
+    try {
+      const data = await request<FullMessage>(`/api/inbox/${encodeURIComponent(message.id)}?account_id=${encodeURIComponent(accountId)}`)
+      setDetail(data)
+    } catch (err) {
+      show(err instanceof ApiError ? err.message : '读取邮件详情失败')
+    } finally {
+      setDetailLoading(false)
+    }
+  }
+
+  async function deleteMessage() {
+    if (!deleteFor) return
+    setDeleting(true)
+    try {
+      await request(`/api/inbox/${encodeURIComponent(deleteFor.id)}?account_id=${encodeURIComponent(accountId)}`, { method: 'DELETE' })
+      setDeleteFor(null)
+      setDetail(null)
+      show('邮件已删除')
+      setRetryKey((key) => key + 1)
+    } catch (err) {
+      show(err instanceof ApiError ? err.message : '删除邮件失败')
+    } finally {
+      setDeleting(false)
+    }
+  }
 
   // 加载账号列表并初始化筛选状态(只保存 account_id/alias/limit/days)
   useEffect(() => {
@@ -250,11 +286,11 @@ export default function InboxPage() {
                 <tbody>
                   {result.messages.map((m) => (
                     <tr key={m.id}>
-                      <td>{m.subject || '（无主题）'}</td>
+                      <td><button className="link-button" onClick={() => void openMessage(m)}>{m.subject || '（无主题）'}</button></td>
                       <td>{m.from}</td>
                       <td>{m.to}</td>
                       <td>{formatDate(m.date)}</td>
-                      <td>{m.preview || '—'}</td>
+                      <td>{m.preview || '—'} <button className="icon-button danger" aria-label="删除邮件" title="删除邮件" onClick={() => setDeleteFor(m)}><IconTrash size={14} /></button></td>
                     </tr>
                   ))}
                 </tbody>
@@ -263,6 +299,17 @@ export default function InboxPage() {
           </>
         )}
       </AsyncState>
+      <Dialog title={detail?.subject || '邮件详情'} open={detail !== null || detailLoading} onClose={() => setDetail(null)}>
+        {detailLoading && <p className="hint">读取中…</p>}
+        {detail && <>
+          <p className="hint">发件人：{detail.from}</p>
+          <p className="hint">收件人：{detail.to}</p>
+          <p className="hint">日期：{formatDate(detail.date)}</p>
+          <pre className="mail-body">{detail.body || '无正文'}</pre>
+          <div className="form-actions"><button className="danger" onClick={() => setDeleteFor(detail)}>删除邮件</button><button onClick={() => setDetail(null)}>关闭</button></div>
+        </>}
+      </Dialog>
+      {deleteFor && <ConfirmDialog title="删除邮件" message="邮件将从收件箱中永久删除。" open busy={deleting} onClose={() => setDeleteFor(null)} onConfirm={() => void deleteMessage()} />}
     </section>
   )
 }

@@ -151,6 +151,30 @@ func (s *Server) setAppPasswordHandler(c *gin.Context) {
 	ok(c, sum)
 }
 
+type setMailboxReq struct {
+	Provider          string `json:"provider"`
+	Email             string `json:"email"`
+	IMAPHost          string `json:"imap_host"`
+	IMAPPort          int    `json:"imap_port"`
+	AuthorizationCode string `json:"authorization_code"`
+}
+
+func (s *Server) setMailboxHandler(c *gin.Context) {
+	var req setMailboxReq
+	if err := c.ShouldBindJSON(&req); err != nil || req.Email == "" || req.IMAPHost == "" || req.IMAPPort < 1 || req.AuthorizationCode == "" {
+		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "参数错误: 收件邮箱、IMAP 服务器、端口和授权码必填")
+		return
+	}
+	sum, err := s.be.SetMailbox(c.Param("id"), account.MailboxConfig{
+		Provider: req.Provider, Email: req.Email, IMAPHost: req.IMAPHost, IMAPPort: req.IMAPPort, Password: req.AuthorizationCode,
+	})
+	if err != nil {
+		backendFail(c, err)
+		return
+	}
+	ok(c, sum)
+}
+
 // loginAccountReq 是 POST /api/accounts/:id/login 请求体。
 type loginAccountReq struct {
 	Password string `json:"password"`

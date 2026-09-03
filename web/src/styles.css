@@ -846,6 +846,35 @@ td .cell-secondary {
   font-weight: 600;
 }
 
+.link-button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--color-primary);
+  text-align: left;
+  cursor: pointer;
+}
+
+.icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: var(--space-2);
+  padding: 4px;
+  border: 0;
+  background: transparent;
+}
+
+.mail-body {
+  max-height: 50vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  padding: var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-subtle);
+}
+
 /* 减少动效偏好 */
 @media (prefers-reduced-motion: reduce) {
   *,

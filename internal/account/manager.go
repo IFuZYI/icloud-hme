@@ -29,12 +29,22 @@ type Account struct {
 	Host          string            `json:"host"`
 	Proxy         string            `json:"proxy,omitempty"` // HTTP/SOCKS5 代理
 	AppPassword   string            `json:"app_password,omitempty"`
+	Mailbox       *MailboxConfig    `json:"mailbox,omitempty"`
 	Status        string            `json:"status"` // active / error
 	AliasTotal    int               `json:"alias_total"`
 	AliasActive   int               `json:"alias_active"`
 	LastValidated string            `json:"last_validated"`
 	LastError     string            `json:"last_error,omitempty"`
 	CreatedAt     string            `json:"created_at"`
+}
+
+// MailboxConfig describes an external mailbox used to receive forwarded mail.
+type MailboxConfig struct {
+	Provider string `json:"provider"`
+	Email    string `json:"email"`
+	IMAPHost string `json:"imap_host"`
+	IMAPPort int    `json:"imap_port"`
+	Password string `json:"password,omitempty"`
 }
 
 // Manager 管理多个 iCloud 账号,线程安全。
@@ -399,6 +409,12 @@ func (m *Manager) ListAccounts() []*Account {
 	for _, acc := range m.accounts {
 		cp := copyAccount(acc)
 		cp.Cookies = nil
+		cp.AppPassword = ""
+		if acc.Mailbox != nil {
+			mailbox := *acc.Mailbox
+			mailbox.Password = ""
+			cp.Mailbox = &mailbox
+		}
 		out = append(out, cp)
 	}
 	return out
@@ -516,6 +532,9 @@ func (m *Manager) MailClient(id string) (*mail.Client, error) {
 	if !ok {
 		return nil, fmt.Errorf("账号不存在: %s", id)
 	}
+	if snap.Mailbox != nil && snap.Mailbox.Email != "" && snap.Mailbox.Password != "" {
+		return mail.NewClientWithServer(snap.Mailbox.Email, snap.Mailbox.Password, snap.Mailbox.IMAPHost, snap.Mailbox.IMAPPort), nil
+	}
 	imapEmail := snap.ICloudEmail
 	if imapEmail == "" {
 		imapEmail = snap.RealEmail
@@ -532,6 +551,22 @@ func (m *Manager) MailClient(id string) (*mail.Client, error) {
 // WithMailClient 使用连接池中的长连接执行 fn(串行/账号级)。
 // fn 返回后连接保留在池中, 不会 Logout。
 func (m *Manager) WithMailClient(id string, fn func(*mail.Client) error) error {
+	m.mu.RLock()
+	acc, ok := m.accounts[id]
+	var mailbox *MailboxConfig
+	if ok && acc.Mailbox != nil {
+		copy := *acc.Mailbox
+		mailbox = &copy
+	}
+	m.mu.RUnlock()
+	if mailbox != nil && mailbox.Email != "" && mailbox.Password != "" {
+		mc := mail.NewClientWithServer(mailbox.Email, mailbox.Password, mailbox.IMAPHost, mailbox.IMAPPort)
+		if err := mc.Connect(); err != nil {
+			return err
+		}
+		defer mc.Disconnect()
+		return fn(mc)
+	}
 	imapEmail, appPassword, err := m.imapCreds(id)
 	if err != nil {
 		return err
@@ -564,6 +599,42 @@ func (m *Manager) imapCreds(id string) (imapEmail, appPassword string, err error
 		return "", "", fmt.Errorf("账号未设置 App 专用密码")
 	}
 	return imapEmail, snap.AppPassword, nil
+}
+
+// SetMailbox validates and stores an external IMAP mailbox after testing it.
+func (m *Manager) SetMailbox(id string, config MailboxConfig) error {
+	config.Provider = strings.TrimSpace(config.Provider)
+	config.Email = strings.TrimSpace(config.Email)
+	config.IMAPHost = strings.TrimSpace(config.IMAPHost)
+	if config.Email == "" || config.IMAPHost == "" || config.Password == "" {
+		return fmt.Errorf("收件邮箱、IMAP 服务器和授权码不能为空")
+	}
+	if strings.Contains(config.IMAPHost, "://") || config.IMAPPort < 1 || config.IMAPPort > 65535 {
+		return fmt.Errorf("IMAP 服务器或端口无效")
+	}
+	m.mu.RLock()
+	_, ok := m.accounts[id]
+	m.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("账号不存在: %s", id)
+	}
+	mc := mail.NewClientWithServer(config.Email, config.Password, config.IMAPHost, config.IMAPPort)
+	if err := mc.Connect(); err != nil {
+		return err
+	}
+	_, err := mc.InboxCount()
+	mc.Disconnect()
+	if err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	acc, ok := m.accounts[id]
+	if !ok {
+		return fmt.Errorf("账号不存在: %s", id)
+	}
+	acc.Mailbox = &config
+	return m.save()
 }
 
 // WebMailClient 为指定账号创建 Web 邮件客户端。

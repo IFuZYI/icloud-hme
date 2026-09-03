@@ -23,9 +23,17 @@ export interface AccountSummary {
   has_cookies: boolean
   has_app_password: boolean
   has_proxy: boolean
+  mailbox?: MailboxSummary
   last_validated: string
   status_message?: string
   created_at: string
+}
+
+export interface MailboxSummary {
+  provider: string
+  email: string
+  imap_host: string
+  imap_port: number
 }
 
 /** HME 别名(iCloud 返回字段风格为 camelCase) */
@@ -45,6 +53,11 @@ export interface InboxMessage {
   subject: string
   date: string
   preview: string
+}
+
+export interface FullMessage extends InboxMessage {
+  body: string
+  content_type: string
 }
 
 /** 收件箱查询结果 */

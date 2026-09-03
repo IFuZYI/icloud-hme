@@ -12,6 +12,7 @@ import (
 
 	"icloud-hme/internal/account"
 	"icloud-hme/internal/hme"
+	"icloud-hme/internal/mail"
 )
 
 // fakeBackend 是测试用内存 Backend,记录调用,不访问网络。
@@ -83,6 +84,13 @@ func (f *fakeBackend) SetAppPassword(id, email, appPassword string) (account.Sum
 	return f.accounts[0], nil
 }
 
+func (f *fakeBackend) SetMailbox(id string, config account.MailboxConfig) (account.Summary, error) {
+	if len(f.accounts) == 0 {
+		return account.Summary{}, fmt.Errorf("fake: 收件邮箱设置失败")
+	}
+	return f.accounts[0], nil
+}
+
 func (f *fakeBackend) LoginAccount(id, password, otp string) (account.Summary, error) {
 	f.loginID = id
 	if f.loginErr != nil {
@@ -121,6 +129,12 @@ func (f *fakeBackend) ListInbox(q InboxQuery) (InboxResult, error) {
 	f.listInboxQuery = q
 	return f.inbox, nil
 }
+
+func (f *fakeBackend) GetMessage(accountID string, uid uint32) (*mail.FullMessage, error) {
+	return &mail.FullMessage{Message: mail.Message{ID: fmt.Sprint(uid)}}, nil
+}
+
+func (f *fakeBackend) DeleteMessage(accountID string, uid uint32) error { return nil }
 
 func (f *fakeBackend) Reload() error {
 	f.reloadCount++
