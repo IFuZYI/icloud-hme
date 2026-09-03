@@ -10,6 +10,7 @@ import (
 	"mime"
 	"mime/quotedprintable"
 	"net/mail"
+	"sort"
 	"strings"
 	"time"
 
@@ -42,14 +43,21 @@ type FullMessage struct {
 
 // Client 是 iCloud 邮件 IMAP 客户端。
 type Client struct {
-	appleID     string
-	appPassword string
-	cli         *client.Client
+	username string
+	password string
+	server   string
+	port     int
+	cli      *client.Client
 }
 
 // NewClient 创建 IMAP 客户端。需在调用其它方法前先 Connect。
 func NewClient(appleID, appPassword string) *Client {
-	return &Client{appleID: appleID, appPassword: appPassword}
+	return NewClientWithServer(appleID, appPassword, IMAPServer, IMAPPort)
+}
+
+// NewClientWithServer creates an IMAP client for a custom server.
+func NewClientWithServer(username, password, server string, port int) *Client {
+	return &Client{username: username, password: password, server: server, port: port}
 }
 
 // Connect 连接并登录 IMAP 服务器。已连接且存活时直接复用。
@@ -60,14 +68,14 @@ func (c *Client) Connect() error {
 		}
 		c.forceClose()
 	}
-	addr := fmt.Sprintf("%s:%d", IMAPServer, IMAPPort)
+	addr := fmt.Sprintf("%s:%d", c.server, c.port)
 	cli, err := client.DialTLS(addr, nil)
 	if err != nil {
 		return fmt.Errorf("IMAP 连接失败: %w", err)
 	}
-	if err := cli.Login(c.appleID, c.appPassword); err != nil {
+	if err := cli.Login(c.username, c.password); err != nil {
 		_ = cli.Logout()
-		return fmt.Errorf("IMAP 登录失败 — 请检查: 1) 应用专用密码是否正确 2) Apple ID: %s — %w", c.appleID, err)
+		return fmt.Errorf("IMAP 登录失败 — 请检查邮箱账号、授权码和服务器地址: %w", err)
 	}
 	c.cli = cli
 	return nil
@@ -170,6 +178,7 @@ func (c *Client) ListInbox(limit int, days int) ([]Message, error) {
 	if err := <-done; err != nil {
 		return nil, err
 	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Date > out[j].Date })
 	return out, nil
 }
 

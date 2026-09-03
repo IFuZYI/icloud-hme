@@ -48,6 +48,7 @@ type Backend interface {
 	UpdateProxy(string, string) (account.Summary, error)
 	UpdateCookies(string, string) (account.Summary, error)
 	SetAppPassword(string, string, string) (account.Summary, error)
+	SetMailbox(string, account.MailboxConfig) (account.Summary, error)
 	LoginAccount(string, string, string) (account.Summary, error)
 	RemoveAccount(string) bool
 	CreateAlias(string, string) (*hme.CreateResult, error)
@@ -55,6 +56,8 @@ type Backend interface {
 	SetAliasActive(string, string, bool) (bool, error)
 	DeleteAlias(string, string) error
 	ListInbox(InboxQuery) (InboxResult, error)
+	GetMessage(string, uint32) (*mail.FullMessage, error)
+	DeleteMessage(string, uint32) error
 	Reload() error
 }
 
@@ -123,6 +126,21 @@ func (b *managerBackend) SetAppPassword(id, icloudEmail, appPassword string) (ac
 		}
 		// IMAP 连接失败属于上游错误,不拼接详细错误
 		return account.Summary{}, &BackendError{Status: http.StatusBadGateway, Code: "UPSTREAM_FAILURE", Message: "IMAP 验证失败,请检查邮箱与 App 专用密码"}
+	}
+	sum, ok := b.mgr.GetAccount(id)
+	if !ok {
+		return account.Summary{}, &BackendError{Status: http.StatusNotFound, Code: "ACCOUNT_NOT_FOUND", Message: "账号不存在"}
+	}
+	return sum.Summary(), nil
+}
+
+// SetMailbox configures and verifies an external IMAP mailbox.
+func (b *managerBackend) SetMailbox(id string, config account.MailboxConfig) (account.Summary, error) {
+	if err := b.mgr.SetMailbox(id, config); err != nil {
+		if strings.Contains(err.Error(), "账号不存在") {
+			return account.Summary{}, &BackendError{Status: http.StatusNotFound, Code: "ACCOUNT_NOT_FOUND", Message: "账号不存在"}
+		}
+		return account.Summary{}, &BackendError{Status: http.StatusBadGateway, Code: "UPSTREAM_FAILURE", Message: "收件邮箱验证失败,请检查邮箱、授权码和 IMAP 配置"}
 	}
 	sum, ok := b.mgr.GetAccount(id)
 	if !ok {
@@ -283,6 +301,37 @@ func (b *managerBackend) ListInbox(q InboxQuery) (InboxResult, error) {
 		return InboxResult{}, &BackendError{Status: http.StatusBadGateway, Code: "UPSTREAM_FAILURE", Message: "读取邮件失败"}
 	}
 	return InboxResult{AccountID: q.AccountID, Count: len(messages), Messages: messages, Method: "web_api"}, nil
+}
+
+func (b *managerBackend) GetMessage(accountID string, uid uint32) (*mail.FullMessage, error) {
+	mc, err := b.mgr.MailClient(accountID)
+	if err != nil {
+		return nil, mapAccountErr(err)
+	}
+	if err := mc.Connect(); err != nil {
+		return nil, &BackendError{Status: http.StatusBadGateway, Code: "UPSTREAM_FAILURE", Message: "读取邮件失败"}
+	}
+	defer mc.Disconnect()
+	message, err := mc.GetFull(uid)
+	if err != nil {
+		return nil, &BackendError{Status: http.StatusBadGateway, Code: "UPSTREAM_FAILURE", Message: "读取邮件详情失败"}
+	}
+	return message, nil
+}
+
+func (b *managerBackend) DeleteMessage(accountID string, uid uint32) error {
+	mc, err := b.mgr.MailClient(accountID)
+	if err != nil {
+		return mapAccountErr(err)
+	}
+	if err := mc.Connect(); err != nil {
+		return &BackendError{Status: http.StatusBadGateway, Code: "UPSTREAM_FAILURE", Message: "删除邮件失败"}
+	}
+	defer mc.Disconnect()
+	if err := mc.Delete(uid); err != nil {
+		return &BackendError{Status: http.StatusBadGateway, Code: "UPSTREAM_FAILURE", Message: "删除邮件失败"}
+	}
+	return nil
 }
 
 // Reload 重新加载配置。
