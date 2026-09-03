@@ -213,6 +213,22 @@ func (c *Client) buildURL(rawURL string) string {
 	return parsed.String()
 }
 
+// requestOrigin 根据实际请求端点选择 Origin。
+// Apple 可能把国区账号路由到全球服务，Origin 必须跟随目标域名而不是账号配置。
+func requestOrigin(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err == nil {
+		host := strings.ToLower(u.Hostname())
+		if host == "icloud.com.cn" || strings.HasSuffix(host, ".icloud.com.cn") {
+			return "https://www.icloud.com.cn"
+		}
+		if host == "icloud.com" || strings.HasSuffix(host, ".icloud.com") {
+			return "https://www.icloud.com"
+		}
+	}
+	return "https://www.icloud.com"
+}
+
 // request 执行带重试的 HTTP 请求,返回响应体字符串。
 func (c *Client) request(method, rawURL string, body any, timeout time.Duration, maxAttempts int) (string, error) {
 	if timeout == 0 {
@@ -249,8 +265,9 @@ func (c *Client) request(method, rawURL string, body any, timeout time.Duration,
 		if err != nil {
 			return "", err
 		}
-		req.Header.Set("Origin", c.Origin())
-		req.Header.Set("Referer", c.Origin()+"/")
+		origin := requestOrigin(rawURL)
+		req.Header.Set("Origin", origin)
+		req.Header.Set("Referer", origin+"/")
 		req.Header.Set("Accept", acceptType)
 		req.Header.Set("Accept-Language", "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7")
 		req.Header.Set("Connection", "keep-alive")
@@ -340,6 +357,20 @@ func (c *Client) sleepRetry(attempt int) {
 	time.Sleep(retryDelays[idx])
 }
 
+// validationURLs 返回会话校验端点。
+// 国区优先使用本地区域端点，并回退到全球端点以兼容 Apple 的路由调整。
+func (c *Client) validationURLs() []string {
+	primary := c.SetupURL() + "/validate"
+	if c.Host != "icloud.com.cn" {
+		return []string{primary}
+	}
+	global := "https://setup.icloud.com/setup/ws/1/validate"
+	if primary == global {
+		return []string{primary}
+	}
+	return []string{primary, global}
+}
+
 // ValidateSession 校验 iCloud 会话,解析 HME 服务端点和账号身份。
 //
 // 必须在调用 ListAliases / Generate / Reserve / Delete 之前完成。
@@ -353,24 +384,32 @@ func (c *Client) ValidateSession() error {
 		}
 	}
 
-	body, err := c.request("POST", c.SetupURL()+"/validate", nil, 20*time.Second, MaxRetries)
+	var body string
+	var err error
+	validationURLs := c.validationURLs()
+	for i, validationURL := range validationURLs {
+		var candidate string
+		candidate, err = c.request("POST", validationURL, nil, 20*time.Second, MaxRetries)
+		if err == nil && !gjson.Valid(candidate) {
+			err = fmt.Errorf("invalid JSON response")
+		}
+		if err == nil && gjson.Get(candidate, "webservices.premiummailsettings.url").String() == "" {
+			err = fmt.Errorf("validate 响应缺少 Hide My Email 服务端点")
+		}
+		if err == nil {
+			body = candidate
+			break
+		}
+		if i < len(validationURLs)-1 {
+			c.log("区域 validate 失败，改用全球端点: %v", err)
+		}
+	}
 	if err != nil {
 		c.log("校验失败: %v", err)
 		return err
 	}
-	if !gjson.Valid(body) {
-		return fmt.Errorf("invalid JSON response")
-	}
 	data := gjson.Parse(body)
 	serviceURL := data.Get("webservices.premiummailsettings.url").String()
-	if serviceURL == "" {
-		return fmt.Errorf(
-			"iCloud 会话校验失败 — 可能原因:\n" +
-				"  1. 未开通 iCloud+ 订阅 (Hide My Email 需要 iCloud+)\n" +
-				"  2. Cookie 已过期,请在 Chrome 重新登录 icloud.com\n" +
-				"  3. 网络问题",
-		)
-	}
 	c.serviceURL = strings.TrimRight(serviceURL, "/")
 	// 剥离 :443 端口——tls-client cookie jar 按无端口 host 存储 cookie,带端口会丢失 cookie → 401
 	if strings.HasSuffix(c.serviceURL, ":443") {
