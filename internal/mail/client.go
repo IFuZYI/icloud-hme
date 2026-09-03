@@ -412,6 +412,27 @@ func (c *Client) GetFull(uid uint32) (*FullMessage, error) {
 	return full, nil
 }
 
+// Delete 删除收件箱中指定 UID 的邮件。
+func (c *Client) Delete(uid uint32) error {
+	if c.cli == nil {
+		return fmt.Errorf("未连接")
+	}
+	if uid == 0 {
+		return fmt.Errorf("邮件 UID 无效")
+	}
+	if _, err := c.cli.Select("INBOX", false); err != nil {
+		return err
+	}
+
+	seqset := new(imap.SeqSet)
+	seqset.AddNum(uid)
+	item := imap.FormatFlagsOp(imap.AddFlags, true)
+	if err := c.cli.UidStore(seqset, item, []interface{}{imap.DeletedFlag}, nil); err != nil {
+		return err
+	}
+	return c.cli.Expunge(nil)
+}
+
 // ---- 解析工具 ----
 
 func toMessage(msg *imap.Message) Message {
