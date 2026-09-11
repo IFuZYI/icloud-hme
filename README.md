@@ -9,6 +9,7 @@
 - ✅ **中文管理界面** — 浏览器访问 `http://localhost:8081` 即开即用
 - ✅ **创建 HME 别名** — 自动生成 iCloud 隐藏邮箱地址
 - ✅ **列出所有别名** — 查看账号下的所有 HME 别名
+- ✅ **定时自动创建** — 按间隔批量创建别名，支持自定义标签序号、总数上限、暂停/续跑与进度展示
 - ✅ **收取邮件** — 通过 IMAP 或 Web API 读取发到 HME 别名的邮件
 - ✅ **双路径读信** — 邮件读取优先走 IMAP (App Password),无 App Password 时回退 Web API (Cookie)
 - ✅ **多账号管理** — 支持多个 iCloud 账号并行管理
@@ -404,6 +405,80 @@ DELETE /api/aliases/:id
 }
 ```
 
+### 自动创建任务接口
+
+自动创建任务按固定间隔为指定账号批量创建 HME 别名，标签自动追加三位序号（如 `注册001`、`注册002`）。
+
+| 接口 | 说明 |
+|---|---|
+| `GET /api/alias-tasks` | 列出所有任务（含进度与下次执行时间） |
+| `POST /api/alias-tasks` | 新建任务（默认启用，10 秒后执行首轮） |
+| `PATCH /api/alias-tasks/:id` | 编辑任务配置（保存后自动重新启用） |
+| `POST /api/alias-tasks/:id/toggle` | 启用 / 暂停任务 |
+| `DELETE /api/alias-tasks/:id` | 删除任务 |
+| `GET /api/alias-task-logs` | 查看任务运行日志（每个邮箱的成功/失败记录） |
+
+#### 新建任务
+
+```bash
+POST /api/alias-tasks
+
+# 请求体
+{
+  "enabled": true,
+  "account_id": "acc_1",
+  "interval_minutes": 60,
+  "batch_count": 5,
+  "max_total": 999,
+  "label_prefix": "注册"
+}
+
+# 响应
+{
+  "success": true,
+  "data": {
+    "id": "task_ab12cd34",
+    "enabled": true,
+    "account_id": "acc_1",
+    "interval_minutes": 60,
+    "batch_count": 5,
+    "max_total": 999,
+    "created_count": 0,
+    "label_prefix": "注册",
+    "next_number": 1,
+    "next_run": "2026-09-10T12:00:00+08:00"
+  }
+}
+```
+
+字段说明：
+
+| 字段 | 必填 | 说明 |
+|---|---|---|
+| `account_id` | ✅ | 目标账号 ID |
+| `label_prefix` | ✅ | 标签前缀，最长 180 字符，自动追加 `001`、`002`… 序号 |
+| `batch_count` | ✅ | 每轮创建数量（1–999） |
+| `max_total` | ✅ | 累计创建总数上限（1–999），达到后任务自动停止 |
+| `interval_minutes` | ✅ | 执行间隔（1–10080 分钟） |
+| `enabled` | | 是否启用；新建时忽略该字段，始终默认启用 |
+
+#### 启用 / 暂停
+
+```bash
+POST /api/alias-tasks/:id/toggle
+```
+
+暂停后 `next_run` 清空，界面显示“已暂停”；重新启用后按 `现在 + 间隔` 重新推算下次执行，不会错过触发。
+
+#### 任务运行规则
+
+- 新建任务默认启用，保存后 **10 秒缓冲** 立即执行首轮，之后按 `interval_minutes` 间隔执行
+- 每轮内每个邮箱创建间隔 **3 秒**，避免触发 iCloud 风控
+- 本轮遇到第一个失败立即停止，不再继续创建
+- 失败时检测账号状态：账号正常则保留任务等待下一轮；账号异常（如 Cookie 失效）则自动暂停任务
+- 达到 `max_total` 后任务自动停止并清空 `next_run`
+- 任务配置持久化在 `data/alias_task.json`，运行日志持久化在 `data/alias_task_logs.json`（重启后自动恢复）
+
 ## 认证方式
 
 ### 方式一: Cookie 认证 (推荐,功能最完整)
@@ -475,6 +550,9 @@ icloud-hme/
     │   ├── backend.go      # 业务接口与 Manager 适配器
     │   ├── auth.go         # 登录/会话/退出 handler 与中间件
     │   ├── account_handlers.go  # 账号管理 handler
+    │   ├── auto_task.go    # 自动创建任务调度器 (间隔执行/总数上限/自动暂停)
+    │   ├── auto_task_logs.go    # 任务运行日志持久化
+    │   ├── alias_task_handlers.go # 自动任务 API handler
     │   └── middleware.go   # 安全响应头、请求上限
     └── webui/
         └── embed.go        # 内嵌前端资源 + SPA fallback
@@ -483,6 +561,7 @@ icloud-hme/
 ### 核心模块
 
 - **account.Manager**: 管理多个 iCloud 账号,负责配置持久化和客户端创建
+- **server.autoTaskManager**: 自动创建任务调度器,负责任务持久化、间隔触发、总数上限与账号异常自动暂停
 - **hme.Client**: 封装 iCloud HME Web API,支持 Cookie 认证
 - **hme.auth**: SRP 协议登录,支持账号密码 + 可选 2FA
 - **mail.Client**: IMAP 邮件客户端 (App Password,优先读邮件)
@@ -571,6 +650,7 @@ A local management tool for Apple iCloud Hide My Email (HME) aliases, supporting
 
 - Built-in management UI at `http://localhost:8081`
 - Create HME aliases automatically
+- Scheduled auto-creation tasks: custom label numbering, per-batch count, total cap, pause/resume and live progress
 - List all aliases for an account
 - Read emails sent to HME aliases via IMAP or Web API
 - Manage multiple iCloud accounts
