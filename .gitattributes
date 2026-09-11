@@ -1,0 +1,6 @@
+# 代码文件统一 LF 行尾，避免 CRLF/LF 噪声 diff 污染提交
+*.go   text eol=lf
+*.ts   text eol=lf
+*.tsx  text eol=lf
+*.css  text eol=lf
+*.sh   text eol=lf
