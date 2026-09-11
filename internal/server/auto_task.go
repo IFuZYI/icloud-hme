@@ -109,18 +109,7 @@ func (m *autoTaskManager) load() {
 	}
 }
 func (m *autoTaskManager) saveLocked() error {
-	if err := os.MkdirAll(filepath.Dir(m.file), 0755); err != nil {
-		return err
-	}
-	raw, e := json.MarshalIndent(aliasTaskFile{Tasks: m.taskListLocked()}, "", "  ")
-	if e != nil {
-		return e
-	}
-	tmp := m.file + ".tmp"
-	if e = os.WriteFile(tmp, raw, 0600); e != nil {
-		return e
-	}
-	return os.Rename(tmp, m.file)
+	return writeJSONAtomic(m.file, aliasTaskFile{Tasks: m.taskListLocked()})
 }
 func (m *autoTaskManager) taskListLocked() []AliasTask {
 	out := make([]AliasTask, 0, len(m.tasks))
@@ -360,10 +349,23 @@ func (m *autoTaskManager) runOnce(id string) AliasTask {
 	_ = m.saveLocked()
 	m.mu.Unlock()
 	if t.CreatedCount >= t.MaxTotal || !t.Enabled {
-		m.stop(id)
+		m.requestStop(id)
 	}
 	return t
 }
+
+func (m *autoTaskManager) requestStop(id string) {
+	m.mu.Lock()
+	ch, ok := m.stops[id]
+	if ok {
+		delete(m.stops, id)
+	}
+	m.mu.Unlock()
+	if ok {
+		close(ch)
+	}
+}
+
 func (m *autoTaskManager) start() {
 	m.mu.Lock()
 	ids := make([]string, 0)

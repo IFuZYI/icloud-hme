@@ -53,6 +53,34 @@ func TestAutoTaskRunStopsAtTotal(t *testing.T) {
 		t.Fatal("task should stop at max_total")
 	}
 }
+
+func TestAutoTaskRunReturnsWhenTickerReachesTotal(t *testing.T) {
+	m := newAutoTaskManager(t.TempDir()+"/task.json", &taskBackend{})
+	task, err := m.create(aliasTaskInput{Enabled: false, AccountID: "a", IntervalMinutes: 60, BatchCount: 1, MaxTotal: 1, LabelPrefix: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	task.Enabled = true
+	m.tasks[task.ID] = task
+	m.stops[task.ID] = make(chan struct{})
+	m.done[task.ID] = make(chan struct{})
+	m.mu.Unlock()
+
+	returned := make(chan struct{})
+	go func() {
+		m.runOnce(task.ID)
+		close(returned)
+	}()
+
+	select {
+	case <-returned:
+	case <-time.After(100 * time.Millisecond):
+		close(m.done[task.ID])
+		t.Fatal("runOnce blocked while stopping its ticker")
+	}
+}
+
 func TestAutoTaskStartDoesNotDuplicate(t *testing.T) {
 	m := newAutoTaskManager(t.TempDir()+"/task.json", &taskBackend{})
 	task, e := m.create(aliasTaskInput{Enabled: true, AccountID: "a", IntervalMinutes: 1, BatchCount: 1, MaxTotal: 1, LabelPrefix: "x"})

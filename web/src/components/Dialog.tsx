@@ -55,10 +55,9 @@ export default function Dialog({ title, open, onClose, children }: DialogProps) 
   if (!open) return null
 
   return (
-    <button
-      type="button"
+    <div
       className="dialog-backdrop"
-      aria-label="关闭对话框"
+      role="presentation"
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose()
       }}
@@ -73,6 +72,6 @@ export default function Dialog({ title, open, onClose, children }: DialogProps) 
         <h3>{title}</h3>
         {children}
       </div>
-    </button>
+    </div>
   )
 }

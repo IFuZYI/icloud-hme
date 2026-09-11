@@ -47,8 +47,6 @@
 .aliases-page .aliases-ghost-btn:hover:not(:disabled) { background: #f8fafc; border-color: #cbd5e1; }
 .aliases-page .aliases-ghost-btn:disabled { opacity: .5; cursor: not-allowed; }
 
-.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
-
 /* 3. 表格卡片 */
 .aliases-page .aliases-table-card { overflow: hidden; border: 1px solid #e3e3e8; border-radius: 14px; background: #fff; box-shadow: 0 1px 3px rgb(0 0 0 / .04), 0 8px 24px rgb(0 0 0 / .05); }
 .aliases-page .aliases-table { width: 100%; border-collapse: collapse; min-width: 720px; }
