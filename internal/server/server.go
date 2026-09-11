@@ -31,6 +31,7 @@ type Config struct {
 	AdminPassword string
 	SessionTTL    time.Duration
 	SecureCookie  bool
+	AutoTaskFile  string
 }
 
 // Server 封装 Gin 引擎、账号后端与认证。
@@ -40,6 +41,7 @@ type Server struct {
 	limiter *auth.Limiter
 	cfg     Config
 	r       *gin.Engine
+	task    *autoTaskManager
 }
 
 // New 创建 Server。mgr 为账号管理器,cfg 为安全配置。
@@ -63,6 +65,7 @@ func newWithBackend(be Backend, cfg Config) *Server {
 		limiter: auth.NewLimiter(nil, 15*time.Minute, 5, 10000),
 		cfg:     cfg,
 	}
+	s.task = newAutoTaskManager(cfg.AutoTaskFile, be)
 	s.auth, _ = auth.NewManager(auth.Options{
 		Password: cfg.AdminPassword,
 		TTL:      cfg.SessionTTL,
@@ -72,6 +75,7 @@ func newWithBackend(be Backend, cfg Config) *Server {
 	// 不信任任意代理头,登录限流使用真实连接 IP
 	_ = s.r.SetTrustedProxies(nil)
 	s.register()
+	s.task.start()
 	return s
 }
 
@@ -110,6 +114,12 @@ func (s *Server) register() {
 
 			// ===== 核心接口 1: 创建邮箱 =====
 			authed.POST("/create", csrfCheck(s.auth), s.createAliasHandler)
+			authed.GET("/alias-tasks", s.listAliasTasksHandler)
+			authed.GET("/alias-task-logs", s.listAliasTaskLogsHandler)
+			authed.POST("/alias-tasks", csrfCheck(s.auth), s.createAliasTaskHandler)
+			authed.PATCH("/alias-tasks/:id", csrfCheck(s.auth), s.updateAliasTaskHandler)
+			authed.POST("/alias-tasks/:id/toggle", csrfCheck(s.auth), s.toggleAliasTaskHandler)
+			authed.DELETE("/alias-tasks/:id", csrfCheck(s.auth), s.deleteAliasTaskHandler)
 
 			// ===== 核心接口 2: 读取邮件 =====
 			authed.GET("/inbox", s.listInboxHandler)

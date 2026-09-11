@@ -6,6 +6,8 @@ import LoginPage from './pages/LoginPage'
 import AccountsPage from './pages/AccountsPage'
 import AliasesPage from './pages/AliasesPage'
 import InboxPage from './pages/InboxPage'
+import AliasTasksPage from './pages/AliasTasksPage'
+import LogsPage from './pages/LogsPage'
 
 function ProtectedLayout() {
   const { status } = useAuth()
@@ -28,6 +30,8 @@ export default function App() {
             <Route element={<ProtectedLayout />}>
               <Route path="/accounts" element={<AccountsPage />} />
               <Route path="/aliases" element={<AliasesPage />} />
+              <Route path="/alias-tasks" element={<AliasTasksPage />} />
+              <Route path="/logs" element={<LogsPage />} />
               <Route path="/inbox" element={<InboxPage />} />
               <Route path="*" element={<Navigate to="/accounts" replace />} />
             </Route>
