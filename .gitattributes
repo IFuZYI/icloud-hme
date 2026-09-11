@@ -1,6 +1,2 @@
-# 代码文件统一 LF 行尾，避免 CRLF/LF 噪声 diff 污染提交
-*.go   text eol=lf
-*.ts   text eol=lf
-*.tsx  text eol=lf
-*.css  text eol=lf
-*.sh   text eol=lf
+# 所有文本文件统一 LF 行尾(仓库内与检出后均一致), 二进制文件自动跳过
+* text=auto eol=lf
