@@ -27,3 +27,5 @@ js
 accounts.json
 *.exe
 build/
+/icloud-hme
+

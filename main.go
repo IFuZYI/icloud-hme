@@ -67,6 +67,7 @@ func main() {
 		AdminPassword: adminPassword,
 		SessionTTL:    sessionTTL,
 		SecureCookie:  secureCookie,
+		AutoTaskFile:  filepath.Join(abs, "alias_task.json"),
 	})
 	if err != nil {
 		log.Fatalf("初始化服务失败: %v", err)

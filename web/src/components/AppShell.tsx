@@ -1,6 +1,6 @@
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
 import { useAuth } from '../auth/AuthProvider'
-import { IconAccounts, IconAliases, IconInbox, IconLogout, IconShield } from './icons'
+import { IconAccounts, IconAliases, IconInbox, IconLogout, IconShield, IconClock } from './icons'
 
 export default function AppShell() {
   const { logout } = useAuth()
@@ -36,6 +36,13 @@ export default function AppShell() {
           <NavLink to="/aliases">
             <IconAliases />
             别名
+          </NavLink>
+          <NavLink to="/alias-tasks">
+            <IconClock />
+            自动任务
+          </NavLink>
+          <NavLink to="/logs">
+            日志
           </NavLink>
           <NavLink to="/inbox">
             <IconInbox />
