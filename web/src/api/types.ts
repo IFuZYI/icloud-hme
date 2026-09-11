@@ -74,3 +74,28 @@ export interface LoginResult {
   csrf_token: string
   expires_at: string
 }
+
+/** 自动创建任务(与 internal/server AliasTask 契约一致) */
+export interface AliasTask {
+  id: string
+  enabled: boolean
+  account_id: string
+  interval_minutes: number
+  batch_count: number
+  max_total: number
+  created_count: number
+  label_prefix: string
+  last_run?: string
+  next_run?: string
+  last_success: number
+  last_error?: string
+}
+
+/** 自动任务运行日志(与 internal/server AliasTaskLog 契约一致) */
+export interface AliasTaskLog {
+  id: string
+  task_id: string
+  time: string
+  level: string
+  message: string
+}

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from 'react'
+import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent } from 'react'
 import { createPortal } from 'react-dom'
 import { IconChevronDown, IconCheck } from './icons'
 
@@ -18,7 +18,7 @@ export default function SelectMenu({ value, options, onChange, ariaLabel, classN
   const [position, setPosition] = useState({ top: 0, left: 0 })
   const triggerRef = useRef<HTMLButtonElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
-  const listId = useRef(`select-${Math.random().toString(36).slice(2)}`).current
+  const listId = `select-${useId()}`
   const selected = options.find((option) => option.value === value)
 
   const updatePosition = useCallback(() => {
@@ -69,7 +69,7 @@ export default function SelectMenu({ value, options, onChange, ariaLabel, classN
   }
 
   const menu = open ? createPortal(
-    <div id={listId} ref={menuRef} className="select-menu-popover" role="listbox" aria-label={ariaLabel} style={{ top: position.top, left: position.left }} onKeyDown={handleKeyDown}>
+    <div id={listId} ref={menuRef} className="select-menu-popover" role="listbox" tabIndex={-1} aria-label={ariaLabel} style={{ top: position.top, left: position.left }} onKeyDown={handleKeyDown}>
       {options.map((option) => (
         <button
           key={option.value}

@@ -22,14 +22,7 @@ func (m *autoTaskManager) logLocked(taskID, level, format string, args ...any) {
 		Time: time.Now().Format(time.RFC3339), Level: level,
 		Message: fmt.Sprintf(format, args...),
 	})
-	raw, err := json.MarshalIndent(m.logs, "", "  ")
-	if err != nil {
-		return
-	}
-	tmp := m.logFile + ".tmp"
-	if os.WriteFile(tmp, raw, 0600) == nil {
-		_ = os.Rename(tmp, m.logFile)
-	}
+	_ = writeJSONAtomic(m.logFile, m.logs)
 }
 
 func (m *autoTaskManager) listLogs() []AliasTaskLog {

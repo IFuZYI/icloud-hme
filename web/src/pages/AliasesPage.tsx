@@ -203,7 +203,7 @@ export default function AliasesPage() {
       <div className="aliases-toolbar-row">
         <div className="aliases-search">
           <IconSearch size={16} aria-hidden="true" />
-          <label className="sr-only" htmlFor="alias-search">搜索</label>
+          <label className="visually-hidden" htmlFor="alias-search">搜索</label>
           <input
             id="alias-search"
             type="search"

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from 'react'
+import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent } from 'react'
 import { createPortal } from 'react-dom'
 
 interface Props { onToggle: () => void; onEdit: () => void; onDelete: () => void; enabled: boolean; disabled?: boolean }
@@ -10,7 +10,7 @@ export default function TaskMoreMenu({ onToggle, onEdit, onDelete, enabled, disa
   const [position, setPosition] = useState<Position>({ top: 0, left: 0 })
   const buttonRef = useRef<HTMLButtonElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
-  const menuId = useRef(`task-menu-${Math.random().toString(36).slice(2)}`).current
+  const menuId = `task-menu-${useId()}`
 
   const updatePosition = useCallback(() => {
     const button = buttonRef.current
@@ -65,7 +65,7 @@ export default function TaskMoreMenu({ onToggle, onEdit, onDelete, enabled, disa
   function choose(action: () => void) { setOpen(false); action() }
 
   const menu = open ? createPortal(
-    <div id={menuId} ref={menuRef} className="task-more-popover" role="menu" aria-label="任务操作" style={{ top: position.top, left: position.left }} onKeyDown={handleMenuKeyDown}>
+    <div id={menuId} ref={menuRef} className="task-more-popover" role="menu" tabIndex={-1} aria-label="任务操作" style={{ top: position.top, left: position.left }} onKeyDown={handleMenuKeyDown}>
       <button type="button" role="menuitem" onClick={() => choose(onToggle)}>{enabled ? '暂停' : '启用'}</button>
       <button type="button" role="menuitem" onClick={() => choose(onEdit)}>编辑</button>
       <button type="button" role="menuitem" className="danger" onClick={() => choose(onDelete)}>删除</button>

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from 'react'
+import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent } from 'react'
 import { createPortal } from 'react-dom'
 import type { ReactNode } from 'react'
 
@@ -16,7 +16,7 @@ export default function RowActionMenu({ items, onSelect, disabled = false, ariaL
   const [position, setPosition] = useState({ top: 0, left: 0 })
   const buttonRef = useRef<HTMLButtonElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
-  const menuId = useRef(`menu-${Math.random().toString(36).slice(2)}`).current
+  const menuId = `menu-${useId()}`
 
   const updatePosition = useCallback(() => {
     const button = buttonRef.current
@@ -68,7 +68,7 @@ export default function RowActionMenu({ items, onSelect, disabled = false, ariaL
   function choose(key: string) { setOpen(false); onSelect(key) }
 
   const menu = open ? createPortal(
-    <div id={menuId} ref={menuRef} className="row-action-popover" role="menu" aria-label={ariaLabel} style={{ top: position.top, left: position.left }} onKeyDown={handleKeyDown}>
+    <div id={menuId} ref={menuRef} className="row-action-popover" role="menu" tabIndex={-1} aria-label={ariaLabel} style={{ top: position.top, left: position.left }} onKeyDown={handleKeyDown}>
       {items.map((item) => (
         <button key={item.key} type="button" role="menuitem" className={item.danger ? 'danger' : ''} onClick={() => choose(item.key)}>
           {item.icon}{item.label}

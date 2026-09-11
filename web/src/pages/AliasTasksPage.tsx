@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react'
 import { request, ApiError } from '../api/client'
-import AliasTaskForm, { type AliasTask } from '../components/AliasTaskForm'
+import AliasTaskForm from '../components/AliasTaskForm'
 import TaskMoreMenu from '../components/TaskMoreMenu'
-import type { AccountSummary } from '../api/types'
+import type { AccountSummary, AliasTask } from '../api/types'
 import { useToast } from '../components/ToastProvider'
 import { IconPlus } from '../components/icons'
 
@@ -19,14 +19,15 @@ export default function AliasTasksPage() {
       const [taskList, accountList] = await Promise.all([
         request<AliasTask[]>('/api/alias-tasks'), request<AccountSummary[]>('/api/accounts'),
       ])
-      setTasks(taskList); setAccounts(accountList)
+      setTasks(taskList); setAccounts(accountList); setError('')
     } catch (e) { setError(e instanceof ApiError ? e.message : '加载失败') }
   }
   useEffect(() => {
-    void load()
-    if (open) return
+    // 首次加载与轮询都放进定时器回调,避免在 effect 主体同步 setState
+    const initial = window.setTimeout(() => { void load() }, 0)
+    if (open) return () => window.clearTimeout(initial)
     const timer = window.setInterval(() => { void load() }, 2000)
-    return () => window.clearInterval(timer)
+    return () => { window.clearTimeout(initial); window.clearInterval(timer) }
   }, [open])
   const accountName = (id: string) => accounts.find((a) => a.id === id)?.name || id
 
