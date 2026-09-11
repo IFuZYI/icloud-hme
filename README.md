@@ -74,6 +74,57 @@ npm --prefix web run build
 go build -o icloud-hme .
 ```
 
+#### 方式四：Docker Compose（推荐，长期运行 / 自建部署）
+
+仓库内置 `docker-compose.yml`，一条命令完成构建与启动（含端口映射、数据卷、时区、日志轮转与健康检查）。
+
+```bash
+# 1. 进入项目目录并创建 .env（管理员密码必填）
+cd icloud-hme
+cat > .env <<'EOF'
+ICLOUD_HME_ADMIN_PASSWORD='your-strong-password'
+ICLOUD_HME_SESSION_TTL=12h
+ICLOUD_HME_SECURE_COOKIE=false
+TZ=Asia/Shanghai
+EOF
+
+# 2. 构建镜像并后台启动
+docker compose up -d --build
+
+# 3. 查看运行状态（等待 healthy）
+docker compose ps
+
+# 4. 打开管理界面
+#    浏览器访问 http://localhost:8081
+```
+
+常用命令：
+
+```bash
+# 查看实时日志（日志已限制为 10MB × 3 个文件）
+docker compose logs -f icloud-hme
+
+# 停止 / 启动 / 重启
+docker compose stop
+docker compose start
+docker compose restart
+
+# 升级：重新构建并滚动重启
+docker compose up -d --build
+
+# 完全清理（保留 data 卷，只删容器与镜像）
+docker compose down
+```
+
+说明：
+
+- **配置持久化**：`./data` 目录挂载到容器 `/app/data`，`accounts.json`、自动任务配置 `alias_task.json` 与运行日志 `alias_task_logs.json` 都保存在宿主机的 `./data` 下，容器重建不丢失。
+- **时区**：默认 `Asia/Shanghai`，可在 `.env` 中通过 `TZ` 修改。
+- **端口**：默认映射 `8081:8081`，如需修改请编辑 `docker-compose.yml` 中 `ports` 或 `.env` 配合调整。
+- **HTTPS 反代部署**：置于 TLS 反向代理后时，将 `ICLOUD_HME_SECURE_COOKIE` 设为 `true`。
+- **镜像大小**：构建采用多阶段（前端 Node 构建 → Go 编译 → 精简 Alpine 运行时），最终镜像仅含二进制与 `ca-certificates`、`tzdata`。
+- **健康检查**：容器内置 `wget` 探活 `/`，约 30 秒检测一次，失败 3 次标记 unhealthy（`docker compose ps` 可见）。
+
 ### 2. 安全配置（必读）
 
 管理界面与 API 均需要管理员登录，升级后所有 API 都必须先通过 `POST /api/auth/login` 获取会话：

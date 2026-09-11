@@ -1,0 +1,30 @@
+services:
+  icloud-hme:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: icloud-hme:latest
+    container_name: icloud-hme
+    restart: unless-stopped
+    ports:
+      - "8081:8081"
+    environment:
+      # 必填：管理员密码（至少 8 字符）。通过 .env 或宿主环境变量提供。
+      ICLOUD_HME_ADMIN_PASSWORD: "${ICLOUD_HME_ADMIN_PASSWORD:?请通过 .env 或环境变量设置 ICLOUD_HME_ADMIN_PASSWORD}"
+      ICLOUD_HME_SESSION_TTL: "${ICLOUD_HME_SESSION_TTL:-12h}"
+      ICLOUD_HME_SECURE_COOKIE: "${ICLOUD_HME_SECURE_COOKIE:-false}"
+      TZ: "${TZ:-Asia/Shanghai}"
+    volumes:
+      # 账号配置 (accounts.json)、自动任务配置与日志持久化
+      - ./data:/app/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8081/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
