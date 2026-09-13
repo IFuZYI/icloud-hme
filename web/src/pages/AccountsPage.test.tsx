@@ -112,6 +112,10 @@ describe('AccountsPage', () => {
     await screen.findByText('活跃号')
     const user = userEvent.setup()
     await user.click(screen.getByRole('button', { name: /添加账号/ }))
+    expect(screen.getByLabelText(/Cookie（可选/)).toHaveAttribute(
+      'placeholder',
+      '{\n  "X-APPLE-WEBAUTH-TOKEN": "v=1:t=AQAAAAB...",\n  "X-APPLE-WEBAUTH-USER": "d=...:s=...",\n  "X_APPLE_WEB_KB": "..."\n}',
+    )
     fireEvent.change(screen.getByLabelText(/名称/), { target: { value: '新账号' } })
     fireEvent.change(screen.getByLabelText(/iCloud 邮箱/), { target: { value: 'new@icloud.com' } })
     await user.click(screen.getByRole('button', { name: /保存/ }))

@@ -39,8 +39,12 @@ type fakeBackend struct {
 	aliasActID     string
 	aliasActActive bool
 	aliasActErr    error
+	aliasActResult *bool
 	aliasDeleteID  string
 	aliasDeleteErr error
+	aliasActIDs    []string
+	aliasDeleteIDs []string
+	aliasCallTimes []time.Time
 	listInboxQuery InboxQuery
 	reloadCount    int
 }
@@ -117,11 +121,17 @@ func (f *fakeBackend) ListAliases(accountID string) ([]hme.Alias, error) {
 
 func (f *fakeBackend) SetAliasActive(accountID, anonymousID string, active bool) (bool, error) {
 	f.aliasActID, f.aliasActActive = anonymousID, active
+	f.aliasActIDs = append(f.aliasActIDs, anonymousID)
+	if f.aliasActResult != nil {
+		return *f.aliasActResult, f.aliasActErr
+	}
 	return true, f.aliasActErr
 }
 
 func (f *fakeBackend) DeleteAlias(accountID, anonymousID string) error {
 	f.aliasDeleteID = anonymousID
+	f.aliasDeleteIDs = append(f.aliasDeleteIDs, anonymousID)
+	f.aliasCallTimes = append(f.aliasCallTimes, time.Now())
 	return f.aliasDeleteErr
 }
 

@@ -170,13 +170,13 @@ X-CSRF-Token: <token>
 PUT /api/accounts/:id/cookies
 X-CSRF-Token: <token>
 
-{"cookies": "a=1; b=2"}
+{"cookies": "{\"X-APPLE-WEBAUTH-TOKEN\":\"v=1:t=AQAAAAB...\",\"X-APPLE-WEBAUTH-USER\":\"d=...:s=...\",\"X_APPLE_WEB_KB\":\"...\"}"}
 ```
 
 `cookies` 同时兼容字符串与对象：
 
 ```json
-{"cookies": {"a": "1", "b": "2"}}
+{"cookies": {"X-APPLE-WEBAUTH-TOKEN": "v=1:t=AQAAAAB...", "X-APPLE-WEBAUTH-USER": "d=...:s=...", "X_APPLE_WEB_KB": "..."}}
 ```
 
 两种输入最终都交给 `account.ParseCookieInput`。响应只返回更新后的 `Summary`。
@@ -324,7 +324,44 @@ X-CSRF-Token: <token>
 - `account_id` 必填
 - 删除不可恢复；直接删除失败时会先停用再删
 
-### 16. 重新加载配置
+### 16. 批量停用/激活/删除别名
+
+```http
+POST /api/aliases/batch
+X-CSRF-Token: <token>
+
+{
+  "account_id": "acc_1",
+  "action": "delete",
+  "aliases": [
+    {"anonymous_id": "abc123", "email": "alias1@icloud.com"},
+    {"anonymous_id": "def456", "email": "alias2@icloud.com"}
+  ]
+}
+```
+
+- `action` 只能是 `deactivate`、`reactivate` 或 `delete`
+- `aliases` 必须包含 1–200 项；每项都必须提供 `anonymous_id` 和 `email`
+- 删除操作从第二项开始每项间隔 3 秒
+- 每项操作结果与失败原因写入任务日志；初始日志无法持久化时请求会在执行任何别名操作前返回 `500 INTERNAL_ERROR`
+
+```json
+{
+  "success": true,
+  "data": {
+    "action": "delete",
+    "succeeded": 1,
+    "failed": 1,
+    "results": [
+      {"anonymous_id": "abc123", "email": "alias1@icloud.com", "success": true},
+      {"anonymous_id": "def456", "email": "alias2@icloud.com", "success": false, "error": "删除失败"}
+    ],
+    "logging_error": "可选；副作用开始后的日志持久化错误"
+  }
+}
+```
+
+### 17. 重新加载配置
 
 ```http
 POST /api/reload

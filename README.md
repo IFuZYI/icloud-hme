@@ -9,12 +9,14 @@
 - ✅ **中文管理界面** — 浏览器访问 `http://localhost:8081` 即开即用
 - ✅ **创建 HME 别名** — 自动生成 iCloud 隐藏邮箱地址
 - ✅ **列出所有别名** — 查看账号下的所有 HME 别名
+- ✅ **批量管理别名** — 多选停用、启用或删除；长时间删除在后台执行并记录逐项结果
 - ✅ **定时自动创建** — 按间隔批量创建别名，支持自定义标签序号、总数上限、暂停/续跑与进度展示
 - ✅ **收取邮件** — 通过 IMAP 或 Web API 读取发到 HME 别名的邮件
 - ✅ **双路径读信** — 邮件读取优先走 IMAP (App Password),无 App Password 时回退 Web API (Cookie)
 - ✅ **多账号管理** — 支持多个 iCloud 账号并行管理
 - ✅ **双认证模式** — Cookie (创建别名 + 读邮件回退) 和 App Password (IMAP 优先)
 - ✅ **安全模型** — 单管理员会话、CSRF 校验、登录限流、响应脱敏
+- ✅ **Apple 风格响应式 UI** — 深色模式、减少动态效果、移动端布局与键盘无障碍操作
 
 ## 快速开始
 
@@ -22,7 +24,7 @@
 
 #### 方式一：下载二进制发布版（推荐）
 
-从 [GitHub Releases](https://github.com/xiaozhou26/icloud-hme/releases) 下载对应平台的二进制文件：
+从 [GitHub Releases](https://github.com/IFuZYI/icloud-hme/releases) 下载对应平台的二进制文件：
 
 | 平台 | 文件 |
 |---|---|
@@ -43,15 +45,19 @@ chmod +x icloud-hme_linux_amd64
 
 ```bash
 # 拉取镜像
-docker pull ghcr.io/xiaozhou26/icloud-hme:latest
+docker pull ghcr.io/ifuzyi/icloud-hme:latest
 
 # 运行（将本机 data 目录挂载进去）
 docker run -d \
   --name icloud-hme \
+  --restart unless-stopped \
+  --read-only \
+  --tmpfs /tmp:size=16m,mode=1777 \
+  --security-opt no-new-privileges:true \
   -p 8081:8081 \
-  -v /path/to/data:/app/data \
+  -v "$(pwd)/data:/app/data" \
   -e ICLOUD_HME_ADMIN_PASSWORD='change-this-before-running-2026' \
-  ghcr.io/xiaozhou26/icloud-hme:latest
+  ghcr.io/ifuzyi/icloud-hme:latest
 ```
 
 > ⚠️ 上面的密码仅为示例，**不可照抄**，请务必更换为至少 8 字符的强密码。
@@ -62,7 +68,7 @@ docker run -d \
 
 ```bash
 # 前置要求: Go 1.26+、Node.js 22.12+
-git clone https://github.com/xiaozhou26/icloud-hme.git
+git clone https://github.com/IFuZYI/icloud-hme.git
 cd icloud-hme
 
 # 一键构建（安装前端依赖 → 前端测试 → 前端构建 → Go 测试 → 编译）
@@ -85,6 +91,7 @@ cat > .env <<'EOF'
 ICLOUD_HME_ADMIN_PASSWORD='your-strong-password'
 ICLOUD_HME_SESSION_TTL=12h
 ICLOUD_HME_SECURE_COOKIE=false
+ICLOUD_HME_PORT=8081
 TZ=Asia/Shanghai
 EOF
 
@@ -120,8 +127,10 @@ docker compose down
 
 - **配置持久化**：`./data` 目录挂载到容器 `/app/data`，`accounts.json`、自动任务配置 `alias_task.json` 与运行日志 `alias_task_logs.json` 都保存在宿主机的 `./data` 下，容器重建不丢失。
 - **时区**：默认 `Asia/Shanghai`，可在 `.env` 中通过 `TZ` 修改。
-- **端口**：默认映射 `8081:8081`，如需修改请编辑 `docker-compose.yml` 中 `ports` 或 `.env` 配合调整。
+- **端口**：默认映射 `8081:8081`；在 `.env` 设置 `ICLOUD_HME_PORT=9090` 可改为从宿主机 `9090` 访问。
 - **HTTPS 反代部署**：置于 TLS 反向代理后时，将 `ICLOUD_HME_SECURE_COOKIE` 设为 `true`。
+- **构建门禁**：Docker 构建阶段会运行前端 lint/测试/构建以及 Go 测试和 Vet，任一失败都会中止镜像构建。
+- **运行时加固**：Compose 默认启用只读根文件系统、`no-new-privileges` 和独立临时目录；只有 `/app/data` 持久化目录可写。
 - **镜像大小**：构建采用多阶段（前端 Node 构建 → Go 编译 → 精简 Alpine 运行时），最终镜像仅含二进制与 `ca-certificates`、`tzdata`。
 - **健康检查**：容器内置 `wget` 探活 `/`，约 30 秒检测一次，失败 3 次标记 unhealthy（`docker compose ps` 可见）。
 
@@ -151,8 +160,9 @@ docker compose down
       "real_email": "owner@example.com",
       "icloud_email": "owner@icloud.com",
       "cookies": {
-        "X-APPLE-WEBAUTH-TOKEN": "token_value",
-        "X-APPLE-WEBAUTH-USER": "v=1:s=1:d=22789132008"
+        "X-APPLE-WEBAUTH-TOKEN": "v=1:t=AQAAAAB...",
+        "X-APPLE-WEBAUTH-USER": "d=...:s=...",
+        "X_APPLE_WEB_KB": "..."
       },
       "host": "icloud.com",
       "proxy": "http://user:pass@host:port",
@@ -183,6 +193,14 @@ export ICLOUD_HME_ADMIN_PASSWORD='your-strong-password'
 ```
 
 服务默认监听 `:8081`。浏览器打开 `http://localhost:8081` 进入管理界面（账号 / 别名 / 收件箱）。完整 API 契约见 [API.md](API.md)。
+
+### 5. 使用管理界面
+
+- **账号**：添加账号时可直接粘贴 Cookie JSON；区域下拉框支持全球区和中国区。
+- **别名**：支持搜索、状态筛选、创建时间排序和多选批量操作。确认批量删除后弹窗立即关闭，结果通过通知和任务日志反馈。
+- **自动任务**：按间隔自动创建别名，并展示进度、下次执行时间和失败原因。
+- **日志**：查看自动任务及批量操作的逐项成功/失败记录和详细原因。
+- **收件箱**：按账号、别名、数量和时间范围筛选邮件。
 
 ## API 接口
 
@@ -456,6 +474,23 @@ DELETE /api/aliases/:id
 }
 ```
 
+#### 批量停用、启用或删除别名
+
+```bash
+POST /api/aliases/batch
+
+{
+  "account_id": "acc_1",
+  "action": "delete",
+  "aliases": [
+    {"anonymous_id": "abc123", "email": "alias1@icloud.com"},
+    {"anonymous_id": "def456", "email": "alias2@icloud.com"}
+  ]
+}
+```
+
+单次最多 200 个别名；`action` 可为 `deactivate`、`reactivate` 或 `delete`。删除操作之间间隔 3 秒。响应包含 `succeeded`、`failed` 和逐项 `results`；若操作已完成但审计日志写入失败，还会返回 `logging_error`。
+
 ### 自动创建任务接口
 
 自动创建任务按固定间隔为指定账号批量创建 HME 别名，标签自动追加三位序号（如 `注册001`、`注册002`）。
@@ -547,6 +582,14 @@ Cookie 认证可实现所有功能:创建别名、读取邮件、管理别名。
 3. 进入 Application → Cookies
 4. 导出全部 Cookie 为 `{"key":"value"}` 格式的 JSON
 
+```json
+{
+  "X-APPLE-WEBAUTH-TOKEN": "v=1:t=AQAAAAB...",
+  "X-APPLE-WEBAUTH-USER": "d=...:s=...",
+  "X_APPLE_WEB_KB": "..."
+}
+```
+
 **关键 Cookie (必需):**
 - `X-APPLE-WEBAUTH-TOKEN` — 认证 token
 - `X-APPLE-WEBAUTH-USER` — 含 dsid (`v=1:s=1:d=22789132008`)
@@ -581,7 +624,9 @@ icloud-hme/
 ├── main.go                 # 入口: 读取安全配置、加载账号、启动服务
 ├── web/                    # 前端工程 (React + TypeScript + Vite)
 │   └── src/                #   管理界面源码
-├── accounts.json           # 账号配置文件 (自动生成)
+├── Dockerfile              # 多阶段生产镜像
+├── docker-compose.yml      # 持久化、健康检查与运行时加固
+├── data/                   # 运行数据目录 (自动生成，Git 忽略)
 ├── go.mod
 └── internal/
     ├── account/
@@ -676,7 +721,7 @@ GOOS=windows GOARCH=amd64 go build -o icloud-hme.exe .
 git tag v0.2.0 && git push origin --tags
 ```
 
-Actions 会自动构建多平台二进制、Docker 镜像（`ghcr.io/xiaozhou26/icloud-hme`）并创建 Release。
+Actions 会自动构建多平台二进制、Docker 镜像（`ghcr.io/ifuzyi/icloud-hme`）并创建 Release。
 
 ### 代码规范
 
@@ -702,17 +747,19 @@ A local management tool for Apple iCloud Hide My Email (HME) aliases, supporting
 - Built-in management UI at `http://localhost:8081`
 - Create HME aliases automatically
 - Scheduled auto-creation tasks: custom label numbering, per-batch count, total cap, pause/resume and live progress
+- Batch deactivate, reactivate, and delete with per-item audit logs; long deletions do not block the confirmation dialog
 - List all aliases for an account
 - Read emails sent to HME aliases via IMAP or Web API
 - Manage multiple iCloud accounts
 - Dual authentication: Cookie and App Password
 - Security: single-admin session, CSRF checks, login rate limiting, redacted API responses
+- Responsive Apple-inspired UI with dark mode, reduced-motion support, and keyboard accessibility
 
 ### Quick Start
 
 #### Option 1: Binary (GitHub Releases)
 
-Download the latest binary from [GitHub Releases](https://github.com/xiaozhou26/icloud-hme/releases):
+Download the latest binary from [GitHub Releases](https://github.com/IFuZYI/icloud-hme/releases):
 
 | Platform | File |
 |---|---|
@@ -732,22 +779,41 @@ chmod +x icloud-hme_linux_amd64
 #### Option 2: Docker
 
 ```bash
-docker pull ghcr.io/xiaozhou26/icloud-hme:latest
+docker pull ghcr.io/ifuzyi/icloud-hme:latest
 
 docker run -d \
   --name icloud-hme \
+  --restart unless-stopped \
+  --read-only \
+  --tmpfs /tmp:size=16m,mode=1777 \
+  --security-opt no-new-privileges:true \
   -p 8081:8081 \
-  -v /path/to/data:/app/data \
+  -v "$(pwd)/data:/app/data" \
   -e ICLOUD_HME_ADMIN_PASSWORD='change-this-before-running-2026' \
-  ghcr.io/xiaozhou26/icloud-hme:latest
+  ghcr.io/ifuzyi/icloud-hme:latest
 ```
 
 > The password above is only an example — do NOT copy it. Use a strong password with at least 8 characters.
 
-#### Option 3: Build from source (Go 1.26+ and Node.js 22.12+)
+#### Option 3: Docker Compose
 
 ```bash
-git clone https://github.com/xiaozhou26/icloud-hme.git
+cat > .env <<'EOF'
+ICLOUD_HME_ADMIN_PASSWORD=your-strong-password
+ICLOUD_HME_SESSION_TTL=12h
+ICLOUD_HME_SECURE_COOKIE=false
+ICLOUD_HME_PORT=8081
+TZ=Asia/Shanghai
+EOF
+
+docker compose up -d --build
+docker compose ps
+```
+
+#### Option 4: Build from source (Go 1.26+ and Node.js 22.12+)
+
+```bash
+git clone https://github.com/IFuZYI/icloud-hme.git
 cd icloud-hme
 
 # One-shot build (frontend deps → frontend test → frontend build → Go test → binary)

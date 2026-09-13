@@ -1,4 +1,5 @@
-import { useEffect, useRef, type ReactNode } from 'react'
+import { useEffect, useEffectEvent, useRef, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 
 interface DialogProps {
   title: string
@@ -11,6 +12,7 @@ interface DialogProps {
 export default function Dialog({ title, open, onClose, children }: DialogProps) {
   const ref = useRef<HTMLDivElement>(null)
   const lastFocused = useRef<Element | null>(null)
+  const closeDialog = useEffectEvent(() => onClose())
 
   useEffect(() => {
     if (!open) return
@@ -27,7 +29,7 @@ export default function Dialog({ title, open, onClose, children }: DialogProps) 
 
     const handleKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        onClose()
+        closeDialog()
         return
       }
       if (e.key !== 'Tab') return
@@ -50,11 +52,11 @@ export default function Dialog({ title, open, onClose, children }: DialogProps) 
         lastFocused.current.focus()
       }
     }
-  }, [open, onClose])
+  }, [open])
 
   if (!open) return null
 
-  return (
+  return createPortal(
     <div
       className="dialog-backdrop"
       role="presentation"
@@ -72,6 +74,7 @@ export default function Dialog({ title, open, onClose, children }: DialogProps) 
         <h3>{title}</h3>
         {children}
       </div>
-    </div>
+    </div>,
+    document.body,
   )
 }

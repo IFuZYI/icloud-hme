@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,6 +14,20 @@ import (
 )
 
 const maxTaskTotal = 999
+
+var (
+	errAliasTaskValidation  = errors.New("alias task validation error")
+	errAliasTaskNotFound    = errors.New("alias task not found")
+	errAliasTaskPersistence = errors.New("alias task persistence error")
+)
+
+func aliasTaskValidationError(format string, args ...any) error {
+	return fmt.Errorf("%w: %s", errAliasTaskValidation, fmt.Sprintf(format, args...))
+}
+
+func aliasTaskPersistenceError(err error) error {
+	return fmt.Errorf("%w: %v", errAliasTaskPersistence, err)
+}
 
 type AliasTask struct {
 	ID              string `json:"id"`
@@ -51,41 +66,44 @@ type AliasTaskLog struct {
 }
 
 type autoTaskManager struct {
-	mu       sync.Mutex
-	tasks    map[string]AliasTask
-	file     string
-	backend  Backend
-	stops    map[string]chan struct{}
-	done     map[string]chan struct{}
-	creating map[string]bool
-	logs     []AliasTaskLog
-	logFile  string
+	mu         sync.Mutex
+	tasks      map[string]AliasTask
+	file       string
+	backend    Backend
+	stops      map[string]chan struct{}
+	done       map[string]chan struct{}
+	creating   map[string]bool
+	logs       []AliasTaskLog
+	logFile    string
+	batchDelay time.Duration
+	writeState func(string, any) error
+	writeLogs  func(string, any) error
 }
 
 func normalizeAliasTask(in aliasTaskInput) (AliasTask, error) {
 	if strings.TrimSpace(in.AccountID) == "" {
-		return AliasTask{}, fmt.Errorf("account_id 必填")
+		return AliasTask{}, aliasTaskValidationError("account_id 必填")
 	}
 	if in.IntervalMinutes < 1 || in.IntervalMinutes > 10080 {
-		return AliasTask{}, fmt.Errorf("interval_minutes 必须为 1-10080")
+		return AliasTask{}, aliasTaskValidationError("interval_minutes 必须为 1-10080")
 	}
 	if in.BatchCount < 1 || in.BatchCount > maxTaskTotal {
-		return AliasTask{}, fmt.Errorf("batch_count 必须为 1-%d", maxTaskTotal)
+		return AliasTask{}, aliasTaskValidationError("batch_count 必须为 1-%d", maxTaskTotal)
 	}
 	if in.MaxTotal < 1 || in.MaxTotal > maxTaskTotal {
-		return AliasTask{}, fmt.Errorf("max_total 必须为 1-%d", maxTaskTotal)
+		return AliasTask{}, aliasTaskValidationError("max_total 必须为 1-%d", maxTaskTotal)
 	}
 	prefix := strings.TrimSpace(in.LabelPrefix)
 	if prefix == "" {
-		return AliasTask{}, fmt.Errorf("label_prefix 必填")
+		return AliasTask{}, aliasTaskValidationError("label_prefix 必填")
 	}
 	if len([]rune(prefix)) > 180 {
-		return AliasTask{}, fmt.Errorf("label_prefix 不能超过 180 个字符")
+		return AliasTask{}, aliasTaskValidationError("label_prefix 不能超过 180 个字符")
 	}
 	return AliasTask{ID: "task_" + uuid.New().String()[:8], Enabled: in.Enabled, AccountID: strings.TrimSpace(in.AccountID), IntervalMinutes: in.IntervalMinutes, BatchCount: in.BatchCount, MaxTotal: in.MaxTotal, LabelPrefix: prefix, NextNumber: 1}, nil
 }
 func newAutoTaskManager(file string, backend Backend) *autoTaskManager {
-	m := &autoTaskManager{file: file, logFile: filepath.Join(filepath.Dir(file), "alias_task_logs.json"), backend: backend, tasks: map[string]AliasTask{}, stops: map[string]chan struct{}{}, done: map[string]chan struct{}{}, creating: map[string]bool{}}
+	m := &autoTaskManager{file: file, logFile: filepath.Join(filepath.Dir(file), "alias_task_logs.json"), backend: backend, tasks: map[string]AliasTask{}, stops: map[string]chan struct{}{}, done: map[string]chan struct{}{}, creating: map[string]bool{}, batchDelay: 3 * time.Second, writeState: writeJSONAtomic, writeLogs: writeJSONAtomic}
 	m.load()
 	m.loadLogs()
 	return m
@@ -109,7 +127,7 @@ func (m *autoTaskManager) load() {
 	}
 }
 func (m *autoTaskManager) saveLocked() error {
-	return writeJSONAtomic(m.file, aliasTaskFile{Tasks: m.taskListLocked()})
+	return m.writeState(m.file, aliasTaskFile{Tasks: m.taskListLocked()})
 }
 func (m *autoTaskManager) taskListLocked() []AliasTask {
 	out := make([]AliasTask, 0, len(m.tasks))
@@ -138,11 +156,15 @@ func (m *autoTaskManager) create(in aliasTaskInput) (AliasTask, error) {
 	t.NextRun = time.Now().Add(10 * time.Second).Format(time.RFC3339)
 	m.mu.Lock()
 	e = m.saveAddLocked(t)
-	if e == nil {
-		m.logLocked(t.ID, "info", "创建任务，等待 10 秒后开始")
+	committed := e == nil
+	if !committed {
+		delete(m.tasks, t.ID)
+		e = aliasTaskPersistenceError(e)
+	} else if logErr := m.logLocked(t.ID, "info", "创建任务，等待 10 秒后开始"); logErr != nil {
+		e = aliasTaskPersistenceError(logErr)
 	}
 	m.mu.Unlock()
-	if e == nil {
+	if committed {
 		m.scheduleStart(t.ID)
 	}
 	return t, e
@@ -155,18 +177,37 @@ func (m *autoTaskManager) scheduleStart(id string) {
 		m.ensureRunning(id)
 	}()
 }
-func (m *autoTaskManager) saveAddLocked(t AliasTask) error { m.tasks[t.ID] = t; return m.saveLocked() }
+func (m *autoTaskManager) saveAddLocked(t AliasTask) error {
+	old, existed := m.tasks[t.ID]
+	m.tasks[t.ID] = t
+	if err := m.saveLocked(); err != nil {
+		if existed {
+			m.tasks[t.ID] = old
+		} else {
+			delete(m.tasks, t.ID)
+		}
+		return err
+	}
+	return nil
+}
 func (m *autoTaskManager) update(id string, in aliasTaskInput) (AliasTask, error) {
 	n, e := normalizeAliasTask(in)
 	if e != nil {
 		return n, e
 	}
-	m.stop(id)
 	m.mu.Lock()
 	old, ok := m.tasks[id]
 	if !ok {
 		m.mu.Unlock()
-		return AliasTask{}, fmt.Errorf("任务不存在")
+		return AliasTask{}, fmt.Errorf("%w: 任务不存在", errAliasTaskNotFound)
+	}
+	m.mu.Unlock()
+	m.stop(id)
+	m.mu.Lock()
+	old, ok = m.tasks[id]
+	if !ok {
+		m.mu.Unlock()
+		return AliasTask{}, fmt.Errorf("%w: 任务不存在", errAliasTaskNotFound)
 	}
 	n.ID = id
 	n.Enabled = true
@@ -177,44 +218,83 @@ func (m *autoTaskManager) update(id string, in aliasTaskInput) (AliasTask, error
 	n.LastError = old.LastError
 	n.NextRun = old.NextRun
 	e = m.saveAddLocked(n)
+	if e != nil {
+		m.tasks[id] = old
+		e = aliasTaskPersistenceError(e)
+	}
 	m.mu.Unlock()
-	if e == nil && n.Enabled && n.CreatedCount < n.MaxTotal {
-		m.ensureRunning(id)
+	if e != nil {
+		if old.Enabled && old.CreatedCount < old.MaxTotal {
+			_ = m.ensureRunning(id)
+		}
+		return old, e
+	}
+	if n.Enabled && n.CreatedCount < n.MaxTotal {
+		if runErr := m.ensureRunning(id); runErr != nil {
+			e = aliasTaskPersistenceError(runErr)
+		}
 	}
 	return n, e
 }
 func (m *autoTaskManager) remove(id string) error {
+	m.mu.Lock()
+	_, ok := m.tasks[id]
+	m.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("%w: 任务不存在", errAliasTaskNotFound)
+	}
 	m.stop(id)
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	if _, ok := m.tasks[id]; !ok {
-		return fmt.Errorf("任务不存在")
+	old, ok := m.tasks[id]
+	if !ok {
+		m.mu.Unlock()
+		return fmt.Errorf("%w: 任务不存在", errAliasTaskNotFound)
 	}
 	delete(m.tasks, id)
-	return m.saveLocked()
+	err := m.saveLocked()
+	if err != nil {
+		m.tasks[id] = old
+		err = aliasTaskPersistenceError(err)
+	}
+	m.mu.Unlock()
+	if err != nil && old.Enabled && old.CreatedCount < old.MaxTotal {
+		_ = m.ensureRunning(id)
+	}
+	return err
 }
 func (m *autoTaskManager) toggle(id string) (AliasTask, error) {
 	m.mu.Lock()
-	t, ok := m.tasks[id]
+	old, ok := m.tasks[id]
 	if !ok {
 		m.mu.Unlock()
-		return t, fmt.Errorf("任务不存在")
+		return old, fmt.Errorf("%w: 任务不存在", errAliasTaskNotFound)
 	}
+	t := old
 	t.Enabled = !t.Enabled
 	if !t.Enabled {
 		// 暂停:清空下次执行时刻,避免界面残留暂停前的旧时刻。
 		t.NextRun = ""
 	}
 	m.tasks[id] = t
-	if t.Enabled {
-		m.logLocked(id, "info", "任务已启用")
-	} else {
-		m.logLocked(id, "info", "任务已暂停")
+	if e := m.saveLocked(); e != nil {
+		m.tasks[id] = old
+		m.mu.Unlock()
+		return old, aliasTaskPersistenceError(e)
 	}
-	e := m.saveLocked()
+	message := "任务已暂停"
+	if t.Enabled {
+		message = "任务已启用"
+	}
+	logErr := m.logLocked(id, "info", "%s", message)
 	m.mu.Unlock()
+	var e error
+	if logErr != nil {
+		e = aliasTaskPersistenceError(logErr)
+	}
 	if t.Enabled && t.CreatedCount < t.MaxTotal {
-		m.ensureRunning(id)
+		if runErr := m.ensureRunning(id); runErr != nil {
+			e = errors.Join(e, aliasTaskPersistenceError(runErr))
+		}
 	} else {
 		m.stop(id)
 	}
@@ -244,13 +324,14 @@ func (m *autoTaskManager) close() {
 		m.stop(id)
 	}
 }
-func (m *autoTaskManager) ensureRunning(id string) {
+func (m *autoTaskManager) ensureRunning(id string) error {
 	m.mu.Lock()
 	t, ok := m.tasks[id]
 	if !ok || !t.Enabled || t.CreatedCount >= t.MaxTotal || m.stops[id] != nil {
 		m.mu.Unlock()
-		return
+		return nil
 	}
+	old := t
 	stop := make(chan struct{})
 	done := make(chan struct{})
 	m.stops[id] = stop
@@ -259,7 +340,10 @@ func (m *autoTaskManager) ensureRunning(id string) {
 	// 从「启用时刻 + 间隔」推算下次执行,而不是沿用暂停前的绝对时刻。
 	t.NextRun = time.Now().Add(interval).Format(time.RFC3339)
 	m.tasks[id] = t
-	_ = m.saveLocked()
+	saveErr := m.saveLocked()
+	if saveErr != nil {
+		m.tasks[id] = old
+	}
 	m.mu.Unlock()
 	go func() {
 		defer close(done)
@@ -277,6 +361,7 @@ func (m *autoTaskManager) ensureRunning(id string) {
 			}
 		}
 	}()
+	return saveErr
 }
 func (m *autoTaskManager) runOnce(id string) AliasTask {
 	m.mu.Lock()
@@ -304,25 +389,73 @@ func (m *autoTaskManager) runOnce(id string) AliasTask {
 		if i > 0 {
 			time.Sleep(3 * time.Second)
 		}
-		label := fmt.Sprintf("%s%03d", t.LabelPrefix, t.NextNumber+i)
-		_, err := m.backend.CreateAlias(t.AccountID, label)
+
 		m.mu.Lock()
-		current := m.tasks[id]
-		if err != nil {
-			lastErr = err.Error()
-			m.logLocked(id, "error", "%s 创建失败：%v", label, err)
-		} else {
-			success++
-			current.CreatedCount++
-			current.NextNumber++
-			m.tasks[id] = current
-			m.logLocked(id, "info", "%s 创建成功（进度 %d/%d）", label, current.CreatedCount, current.MaxTotal)
-		}
-		_ = m.saveLocked()
-		m.mu.Unlock()
-		if err != nil {
+		current, exists := m.tasks[id]
+		if !exists || !current.Enabled || current.CreatedCount >= current.MaxTotal {
+			m.mu.Unlock()
 			break
 		}
+		label := fmt.Sprintf("%s%03d", current.LabelPrefix, current.NextNumber)
+		reserved := current
+		reserved.NextNumber++
+		m.tasks[id] = reserved
+		if reserveErr := m.saveLocked(); reserveErr != nil {
+			m.tasks[id] = current
+			lastErr = "任务序号预留失败：" + reserveErr.Error()
+			current.Enabled = false
+			current.NextRun = ""
+			current.LastRun = time.Now().Format(time.RFC3339)
+			current.LastSuccess = success
+			current.LastError = lastErr
+			m.tasks[id] = current
+			if recoveryErr := m.saveLocked(); recoveryErr != nil {
+				lastErr += "；暂停状态保存失败：" + recoveryErr.Error()
+				current.LastError = lastErr
+				m.tasks[id] = current
+			}
+			m.mu.Unlock()
+			break
+		}
+		m.mu.Unlock()
+
+		_, createErr := m.backend.CreateAlias(current.AccountID, label)
+		m.mu.Lock()
+		current = m.tasks[id]
+		if createErr != nil {
+			lastErr = createErr.Error()
+			if logErr := m.logLocked(id, "error", "%s 创建失败：%v", label, createErr); logErr != nil {
+				lastErr += "；日志保存失败：" + logErr.Error()
+			}
+			m.mu.Unlock()
+			break
+		}
+
+		success++
+		current.CreatedCount++
+		m.tasks[id] = current
+		if saveErr := m.saveLocked(); saveErr != nil {
+			lastErr = "任务状态保存失败：" + saveErr.Error()
+			current.Enabled = false
+			current.NextRun = ""
+			current.LastRun = time.Now().Format(time.RFC3339)
+			current.LastSuccess = success
+			current.LastError = lastErr
+			m.tasks[id] = current
+			if recoveryErr := m.saveLocked(); recoveryErr != nil {
+				lastErr += "；暂停状态保存失败：" + recoveryErr.Error()
+				current.LastError = lastErr
+				m.tasks[id] = current
+			}
+			m.mu.Unlock()
+			break
+		}
+		if logErr := m.logLocked(id, "info", "%s 创建成功（进度 %d/%d）", label, current.CreatedCount, current.MaxTotal); logErr != nil {
+			lastErr = "日志保存失败：" + logErr.Error()
+			m.mu.Unlock()
+			break
+		}
+		m.mu.Unlock()
 	}
 
 	m.mu.Lock()
@@ -330,11 +463,12 @@ func (m *autoTaskManager) runOnce(id string) AliasTask {
 	t.LastRun = time.Now().Format(time.RFC3339)
 	t.LastSuccess = success
 	t.LastError = lastErr
+	pauseStatus := ""
 	if lastErr != "" {
 		for _, acc := range m.backend.ListAccounts() {
 			if acc.ID == t.AccountID && acc.Status != "active" {
 				t.Enabled = false
-				m.logLocked(id, "error", "账号状态异常（%s），任务已暂停", acc.Status)
+				pauseStatus = acc.Status
 			}
 		}
 	}
@@ -346,7 +480,26 @@ func (m *autoTaskManager) runOnce(id string) AliasTask {
 	}
 	m.tasks[id] = t
 	delete(m.creating, id)
-	_ = m.saveLocked()
+	if saveErr := m.saveLocked(); saveErr != nil {
+		if t.LastError != "" {
+			t.LastError += "；"
+		}
+		t.LastError += "任务状态保存失败：" + saveErr.Error()
+		t.Enabled = false
+		t.NextRun = ""
+		m.tasks[id] = t
+		if recoveryErr := m.saveLocked(); recoveryErr != nil {
+			t.LastError += "；暂停状态保存失败：" + recoveryErr.Error()
+			m.tasks[id] = t
+		}
+	} else if pauseStatus != "" {
+		if logErr := m.logLocked(id, "error", "账号状态异常（%s），任务已暂停", pauseStatus); logErr != nil {
+			// The pause is already durable; do not overwrite it merely to record
+			// that its explanatory log failed.
+			t.LastError = "日志保存失败：" + logErr.Error()
+			m.tasks[id] = t
+		}
+	}
 	m.mu.Unlock()
 	if t.CreatedCount >= t.MaxTotal || !t.Enabled {
 		m.requestStop(id)

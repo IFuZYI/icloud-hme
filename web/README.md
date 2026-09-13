@@ -1,32 +1,27 @@
-# React + TypeScript + Vite
+# 前端管理界面
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+React 19 + TypeScript + Vite 的单页应用，构建产物内嵌到 Go 二进制（`internal/webui/dist`）。
 
-Currently, two official plugins are available:
+## 开发
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
-
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the Oxlint configuration
-
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
-
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
+```bash
+npm ci          # 安装依赖（锁定版本）
+npm run dev     # 启动 Vite 开发服务器，/api 代理到 http://127.0.0.1:8081
 ```
 
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+## 检查
+
+```bash
+npm run lint       # ESLint
+npm run test:run   # Vitest 单元/组件测试
+npm run build      # TypeScript 类型检查 + Vite 构建（输出到 ../internal/webui/dist）
+npm run check      # lint + test + build 一键执行
+```
+
+## 结构
+
+- `src/pages/` — 各页面（账号 / 别名 / 收件箱 / 自动任务 / 日志 / 登录）
+- `src/components/` — 可复用组件与对话框
+- `src/api/` — API 客户端与类型定义
+- `src/auth/` — 管理员会话状态管理
+- `src/test/` — 测试环境（MSW mock 服务端）
