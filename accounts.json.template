@@ -6,8 +6,9 @@
       "real_email": "owner@example.com",
       "icloud_email": "owner@icloud.com",
       "cookies": {
-        "X-APPLE-WEBAUTH-TOKEN": "YOUR_WEBAUTH_TOKEN_HERE",
-        "X-APPLE-WEBAUTH-USER": "v=1:s=1:d=YOUR_DSID_HERE"
+        "X-APPLE-WEBAUTH-TOKEN": "v=1:t=AQAAAAB...",
+        "X-APPLE-WEBAUTH-USER": "d=...:s=...",
+        "X_APPLE_WEB_KB": "..."
       },
       "host": "icloud.com",
       "proxy": "",

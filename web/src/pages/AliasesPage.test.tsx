@@ -310,6 +310,91 @@ describe('AliasesPage', () => {
     await waitFor(() => expect(deletedUrl).toContain('anon_alpha'))
   })
 
+  it('可多选并批量停用、启用和删除，删除提示每项间隔 3 秒', async () => {
+    const requests: Array<{ action: string; ids: string[] }> = []
+    server.use(
+      http.get('/api/accounts', () => HttpResponse.json({ success: true, data: accounts })),
+      http.get('/api/aliases', () =>
+        HttpResponse.json({ success: true, data: { account_id: 'acc_1', count: 2, aliases } }),
+      ),
+      http.post('/api/aliases/batch', async ({ request }) => {
+        const body = await request.json() as { action: string; aliases: Array<{ anonymous_id: string }> }
+        requests.push({ action: body.action, ids: body.aliases.map((item) => item.anonymous_id) })
+        return HttpResponse.json({ success: true, data: { succeeded: body.aliases.length, failed: 0, results: [] } })
+      }),
+    )
+    renderPage()
+    await screen.findByText('alpha@icloud.com')
+    const user = userEvent.setup()
+
+    await user.click(screen.getByRole('checkbox', { name: '选择全部可见别名' }))
+    expect(screen.getByText('已选择 2 项')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '批量停用' }))
+    await user.click(screen.getByRole('button', { name: '确认批量停用' }))
+    await waitFor(() => expect(requests[0]).toEqual({ action: 'deactivate', ids: ['anon_beta', 'anon_alpha'] }))
+
+    await user.click(screen.getByRole('checkbox', { name: '选择全部可见别名' }))
+    await user.click(screen.getByRole('button', { name: '批量启用' }))
+    await user.click(screen.getByRole('button', { name: '确认批量启用' }))
+    await waitFor(() => expect(requests[1]?.action).toBe('reactivate'))
+
+    await user.click(screen.getByRole('checkbox', { name: '选择全部可见别名' }))
+    await user.click(screen.getByRole('button', { name: '批量删除' }))
+    expect(screen.getByRole('dialog')).toHaveTextContent('每个删除操作间隔 3 秒')
+    await user.click(screen.getByRole('button', { name: '确认批量删除' }))
+    await waitFor(() => expect(requests[2]?.action).toBe('delete'))
+  })
+
+  it('确认批量删除后立即关闭弹窗并在后台等待请求完成', async () => {
+    let resolveBatch: (() => void) | undefined
+    server.use(
+      http.get('/api/accounts', () => HttpResponse.json({ success: true, data: accounts })),
+      http.get('/api/aliases', () =>
+        HttpResponse.json({ success: true, data: { account_id: 'acc_1', count: 2, aliases } }),
+      ),
+      http.post('/api/aliases/batch', async () => {
+        await new Promise<void>((resolve) => { resolveBatch = resolve })
+        return HttpResponse.json({ success: true, data: { succeeded: 2, failed: 0, results: [] } })
+      }),
+    )
+    renderPage()
+    await screen.findByText('alpha@icloud.com')
+    const user = userEvent.setup()
+
+    await user.click(screen.getByRole('checkbox', { name: '选择全部可见别名' }))
+    await user.click(screen.getByRole('button', { name: '批量删除' }))
+    await user.click(screen.getByRole('button', { name: '确认批量删除' }))
+
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveTextContent('批量删除已在后台处理')
+    resolveBatch?.()
+    await screen.findByText(/批量删除完成：成功 2，失败 0/)
+  })
+
+  it('批量操作成功但日志保存失败时显示警告', async () => {
+    server.use(
+      http.get('/api/accounts', () => HttpResponse.json({ success: true, data: accounts })),
+      http.get('/api/aliases', () =>
+        HttpResponse.json({ success: true, data: { account_id: 'acc_1', count: 2, aliases } }),
+      ),
+      http.post('/api/aliases/batch', () =>
+        HttpResponse.json({
+          success: true,
+          data: { succeeded: 2, failed: 0, results: [], logging_error: '磁盘写入失败' },
+        }),
+      ),
+    )
+    renderPage()
+    await screen.findByText('alpha@icloud.com')
+    const user = userEvent.setup()
+
+    await user.click(screen.getByRole('checkbox', { name: '选择全部可见别名' }))
+    await user.click(screen.getByRole('button', { name: '批量停用' }))
+    await user.click(screen.getByRole('button', { name: '确认批量停用' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('批量操作已完成，但任务日志保存失败：磁盘写入失败')
+  })
+
   it('操作失败保留列表并显示错误', async () => {
     server.use(
       http.get('/api/accounts', () => HttpResponse.json({ success: true, data: accounts })),

@@ -12,14 +12,13 @@ BINARY_NAME="icloud-hme"
 echo "==> 安装前端依赖"
 npm --prefix web ci
 
-echo "==> 运行前端测试"
-npm --prefix web run test:run
+echo "==> 检查并构建前端(lint + test + build)"
+npm --prefix web run check
 
-echo "==> 构建前端(输出到 internal/webui/dist)"
-npm --prefix web run build
-
-echo "==> 运行 Go 测试"
-go test ./internal/... .
+echo "==> 运行 Go 测试、竞态检测与静态检查"
+go test ./...
+go test -race ./...
+go vet ./...
 
 echo "==> 清理旧的构建文件"
 rm -rf "$OUTPUT_DIR"

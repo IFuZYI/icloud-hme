@@ -2,6 +2,12 @@ import { useState } from 'react'
 import Dialog from './Dialog'
 import { request, ApiError } from '../api/client'
 
+const cookieExample = `{
+  "X-APPLE-WEBAUTH-TOKEN": "v=1:t=AQAAAAB...",
+  "X-APPLE-WEBAUTH-USER": "d=...:s=...",
+  "X_APPLE_WEB_KB": "..."
+}`
+
 interface AccountFormDialogProps {
   open: boolean
   onClose: () => void
@@ -126,7 +132,7 @@ export default function AccountFormDialog({
               value={cookies}
               onChange={(e) => setCookies(e.target.value)}
               spellCheck={false}
-              placeholder="a=1; b=2"
+              placeholder={cookieExample}
             />
             <p className="hint">可粘贴 Cookie Header 字符串或 JSON。</p>
           </div>

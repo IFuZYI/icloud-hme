@@ -128,6 +128,7 @@ func (s *Server) register() {
 
 			// ===== 别名管理 =====
 			authed.GET("/aliases", s.listAliasesHandler)
+			authed.POST("/aliases/batch", csrfCheck(s.auth), s.batchAliasHandler)
 			authed.POST("/aliases/:id/deactivate", csrfCheck(s.auth), s.deactivateAliasHandler)
 			authed.POST("/aliases/:id/reactivate", csrfCheck(s.auth), s.reactivateAliasHandler)
 			authed.DELETE("/aliases/:id", csrfCheck(s.auth), s.deleteAliasHandler)
@@ -302,6 +303,100 @@ func (s *Server) listAliasesHandler(c *gin.Context) {
 
 type aliasActionReq struct {
 	AccountID string `json:"account_id"`
+}
+
+type batchAliasItem struct {
+	AnonymousID string `json:"anonymous_id"`
+	Email       string `json:"email"`
+}
+
+type batchAliasReq struct {
+	AccountID string           `json:"account_id"`
+	Action    string           `json:"action"`
+	Aliases   []batchAliasItem `json:"aliases"`
+}
+
+type batchAliasResult struct {
+	AnonymousID string `json:"anonymous_id"`
+	Email       string `json:"email"`
+	Success     bool   `json:"success"`
+	Error       string `json:"error,omitempty"`
+}
+
+func (s *Server) batchAliasHandler(c *gin.Context) {
+	var req batchAliasReq
+	if err := c.ShouldBindJSON(&req); err != nil || strings.TrimSpace(req.AccountID) == "" || len(req.Aliases) == 0 || len(req.Aliases) > 200 {
+		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "参数错误: account_id 和 1-200 个别名必填")
+		return
+	}
+	actionNames := map[string]string{"deactivate": "停用", "reactivate": "启用", "delete": "删除"}
+	actionName, valid := actionNames[req.Action]
+	if !valid {
+		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "参数错误: action 必须为 deactivate、reactivate 或 delete")
+		return
+	}
+	for _, item := range req.Aliases {
+		if item.AnonymousID == "" || len(item.AnonymousID) > 256 || strings.TrimSpace(item.Email) == "" {
+			failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "参数错误: 别名 ID 和邮箱必填")
+			return
+		}
+	}
+
+	logID := "batch_alias_" + req.Action
+	if err := s.task.log(logID, "info", "批量%s开始：共 %d 个别名", actionName, len(req.Aliases)); err != nil {
+		failCode(c, http.StatusInternalServerError, "INTERNAL_ERROR", "批量操作日志保存失败")
+		return
+	}
+	results := make([]batchAliasResult, 0, len(req.Aliases))
+	succeeded := 0
+	loggingError := ""
+	for i, item := range req.Aliases {
+		if req.Action == "delete" && i > 0 {
+			time.Sleep(s.task.batchDelay)
+		}
+		var err error
+		operationSucceeded := true
+		if req.Action == "delete" {
+			err = s.be.DeleteAlias(req.AccountID, item.AnonymousID)
+		} else {
+			operationSucceeded, err = s.be.SetAliasActive(req.AccountID, item.AnonymousID, req.Action == "reactivate")
+			if err == nil && !operationSucceeded {
+				err = errors.New("操作未成功")
+			}
+		}
+		result := batchAliasResult{AnonymousID: item.AnonymousID, Email: item.Email, Success: err == nil}
+		if err != nil {
+			result.Error = err.Error()
+			if logErr := s.task.log(logID, "error", "%s %s失败：%v", item.Email, actionName, err); logErr != nil {
+				if loggingError == "" {
+					loggingError = logErr.Error()
+				}
+			}
+		} else {
+			succeeded++
+			if logErr := s.task.log(logID, "info", "%s %s成功", item.Email, actionName); logErr != nil {
+				if loggingError == "" {
+					loggingError = logErr.Error()
+				}
+			}
+		}
+		results = append(results, result)
+	}
+	failed := len(req.Aliases) - succeeded
+	level := "info"
+	if failed > 0 {
+		level = "error"
+	}
+	if err := s.task.log(logID, level, "批量%s完成：成功 %d，失败 %d", actionName, succeeded, failed); err != nil {
+		if loggingError == "" {
+			loggingError = err.Error()
+		}
+	}
+	data := gin.H{"action": req.Action, "succeeded": succeeded, "failed": failed, "results": results}
+	if loggingError != "" {
+		data["logging_error"] = loggingError
+	}
+	ok(c, data)
 }
 
 // validateAliasAction 校验别名操作的匿名 ID 与请求体。

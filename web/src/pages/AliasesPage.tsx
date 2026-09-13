@@ -12,6 +12,13 @@ import { copyText } from '../utils/clipboard'
 import { IconChevronDown, IconChevronUp, IconClock, IconCopy, IconInbox, IconPlus, IconSearch, IconTrash, IconCheck } from '../components/icons'
 
 type SortDirection = 'asc' | 'desc'
+type BatchAction = 'deactivate' | 'reactivate' | 'delete'
+
+interface BatchAliasResponse {
+  succeeded: number
+  failed: number
+  logging_error?: string
+}
 
 function parseAliasDate(raw?: string): Date | null {
   const value = raw?.trim()
@@ -61,6 +68,8 @@ export default function AliasesPage() {
   const [confirm, setConfirm] = useState<{ type: 'deactivate' | 'reactivate' | 'delete'; alias: Alias } | null>(null)
   const [busy, setBusy] = useState(false)
   const [actionError, setActionError] = useState('')
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set())
+  const [batchAction, setBatchAction] = useState<BatchAction | null>(null)
   const [searchParams, setSearchParams] = useSearchParams()
   const navigate = useNavigate()
   const { show, showCopyable } = useToast()
@@ -94,6 +103,7 @@ export default function AliasesPage() {
       .then((data) => {
         if (cancelled) return
         setAliases(data.aliases ?? [])
+        setSelectedIds(new Set())
         setError('')
       })
       .catch((err) => { if (!cancelled) setError(err instanceof ApiError ? err.message : '网络连接失败，请检查服务状态') })
@@ -125,6 +135,58 @@ export default function AliasesPage() {
   }, [aliases, search, filter, sortDirection])
 
   function handleRetry() { setLoading(true); setRetryKey((k) => k + 1) }
+
+  const selectedAliases = filtered.filter((alias) => selectedIds.has(alias.anonymousId))
+  const allVisibleSelected = filtered.length > 0 && selectedAliases.length === filtered.length
+
+  function toggleSelected(id: string) {
+    setSelectedIds((current) => {
+      const next = new Set(current)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  function toggleAllVisible() {
+    setSelectedIds((current) => {
+      const next = new Set(current)
+      if (allVisibleSelected) filtered.forEach((alias) => next.delete(alias.anonymousId))
+      else filtered.forEach((alias) => next.add(alias.anonymousId))
+      return next
+    })
+  }
+
+  async function runBatchAction() {
+    if (!batchAction || selectedAliases.length === 0) return
+    const action = batchAction
+    const aliasesToProcess = selectedAliases
+    const actionLabel = action === 'delete' ? '删除' : action === 'deactivate' ? '停用' : '启用'
+    setBusy(true)
+    setActionError('')
+    setBatchAction(null)
+    show(`批量${actionLabel}已在后台处理，可继续使用其他功能`)
+    try {
+      const result = await request<BatchAliasResponse>('/api/aliases/batch', {
+        method: 'POST',
+        body: {
+          account_id: accountId,
+          action,
+          aliases: aliasesToProcess.map((alias) => ({ anonymous_id: alias.anonymousId, email: alias.email })),
+        },
+      })
+      show(`批量${actionLabel}完成：成功 ${result.succeeded}，失败 ${result.failed}`)
+      if (result.logging_error) {
+        setActionError(`批量操作已完成，但任务日志保存失败：${result.logging_error}`)
+      }
+      setSelectedIds(new Set())
+      setRetryKey((key) => key + 1)
+    } catch (cause) {
+      setActionError(cause instanceof ApiError ? cause.message : '批量操作失败')
+    } finally {
+      setBusy(false)
+    }
+  }
 
   const copyEmail = useCallback(async (email: string) => {
     if (await copyText(email)) show('邮箱已复制')
@@ -174,6 +236,7 @@ export default function AliasesPage() {
             options={accounts.map((a) => ({ value: a.id, label: a.name }))}
             onChange={(next) => {
               setAccountId(next)
+              setSelectedIds(new Set())
               setSearchParams({ account_id: next }, { replace: true })
             }}
           />
@@ -212,6 +275,12 @@ export default function AliasesPage() {
             placeholder="按邮箱或标签搜索"
           />
         </div>
+        <div className="aliases-batch-actions">
+          <span>已选择 {selectedAliases.length} 项</span>
+          <button type="button" disabled={selectedAliases.length === 0 || busy} onClick={() => setBatchAction('deactivate')}>批量停用</button>
+          <button type="button" disabled={selectedAliases.length === 0 || busy} onClick={() => setBatchAction('reactivate')}>批量启用</button>
+          <button type="button" className="danger" disabled={selectedAliases.length === 0 || busy} onClick={() => setBatchAction('delete')}>批量删除</button>
+        </div>
       </div>
 
       <AsyncState
@@ -225,6 +294,14 @@ export default function AliasesPage() {
           <table className="aliases-table">
             <thead>
               <tr>
+                <th className="aliases-select-column">
+                  <input
+                    type="checkbox"
+                    aria-label="选择全部可见别名"
+                    checked={allVisibleSelected}
+                    onChange={toggleAllVisible}
+                  />
+                </th>
                 <th>邮箱</th>
                 <th>标签</th>
                 <th>状态</th>
@@ -246,6 +323,14 @@ export default function AliasesPage() {
             <tbody>
               {filtered.map((alias) => (
                 <tr key={alias.anonymousId}>
+                  <td className="aliases-select-column">
+                    <input
+                      type="checkbox"
+                      aria-label={`选择 ${alias.email}`}
+                      checked={selectedIds.has(alias.anonymousId)}
+                      onChange={() => toggleSelected(alias.anonymousId)}
+                    />
+                  </td>
                   <td>
                     <div className="aliases-email-cell">
                       <button type="button" className="aliases-email" onClick={() => void copyEmail(alias.email)} title="复制邮箱">
@@ -327,6 +412,22 @@ export default function AliasesPage() {
           busy={busy}
           onClose={() => setConfirm(null)}
           onConfirm={() => void runAction(confirm.type)}
+        />
+      )}
+
+      {batchAction && (
+        <ConfirmDialog
+          title={`批量${batchAction === 'delete' ? '删除' : batchAction === 'deactivate' ? '停用' : '启用'}别名`}
+          message={
+            batchAction === 'delete'
+              ? `将永久删除选中的 ${selectedAliases.length} 个别名，每个删除操作间隔 3 秒。操作过程和失败原因会写入任务日志。`
+              : `将批量${batchAction === 'deactivate' ? '停用' : '启用'}选中的 ${selectedAliases.length} 个别名，操作结果会写入任务日志。`
+          }
+          confirmLabel={`确认批量${batchAction === 'delete' ? '删除' : batchAction === 'deactivate' ? '停用' : '启用'}`}
+          open
+          busy={busy}
+          onClose={() => setBatchAction(null)}
+          onConfirm={() => void runBatchAction()}
         />
       )}
 

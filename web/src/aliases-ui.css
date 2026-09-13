@@ -4,7 +4,7 @@
 /* 1. Header 严格单行 */
 .aliases-page .aliases-header { display: flex; align-items: center; justify-content: space-between; gap: 24px; flex-wrap: nowrap; margin-bottom: 22px; }
 .aliases-page .aliases-title { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-.aliases-page .aliases-title h2 { margin: 0; padding: 0; font-size: clamp(1.4rem, 2vw, 1.7rem); font-weight: 600; letter-spacing: -0.02em; color: #1d1d1f; line-height: 1.2; white-space: nowrap; }
+.aliases-page .aliases-title h2 { margin: 0; padding: 0; font-size: clamp(1.55rem, 3vw, 2rem); font-weight: 650; letter-spacing: -0.035em; color: #1d1d1f; line-height: 1.15; white-space: nowrap; }
 .aliases-page .aliases-title p { margin: 0; padding: 0; color: #6e6e73; font-size: 13px; white-space: nowrap; }
 .aliases-page .aliases-toolbar { display: inline-flex; align-items: center; gap: 10px; flex-wrap: nowrap; }
 .aliases-page .aliases-toolbar select { width: 144px; min-width: 144px; margin: 0; }
@@ -18,10 +18,15 @@
 .aliases-page .aliases-search svg { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: #86868b; pointer-events: none; z-index: 1; }
 .aliases-page .aliases-filter-select { width: 136px; min-width: 136px; margin: 0; }
 .aliases-page .aliases-toolbar { gap: 10px; flex-shrink: 0; }
+.aliases-page .aliases-batch-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+.aliases-page .aliases-batch-actions span { color: #6e6e73; font-size: 13px; white-space: nowrap; }
+.aliases-page .aliases-batch-actions button { width: auto; min-height: 36px; padding: 6px 11px; font-size: 13px; }
+.aliases-page .aliases-select-column { width: 48px; padding-right: 0 !important; text-align: center !important; }
+.aliases-page .aliases-select-column input { width: 16px; min-height: 16px; margin: 0; accent-color: #0071e3; cursor: pointer; }
 
 /* 自定义下拉框 SelectMenu */
 .select-menu { display: inline-flex; align-items: center; }
-.select-trigger { display: inline-flex; align-items: center; justify-content: space-between; gap: 8px; height: 40px; min-width: 0; padding: 0 12px; border: 1px solid #e2e8f0; border-radius: 8px; background: #fff; color: #1e293b; font: inherit; font-size: 14px; cursor: pointer; white-space: nowrap; transition: border-color .18s ease, box-shadow .18s ease, background .18s ease; }
+.select-trigger { display: inline-flex; align-items: center; justify-content: space-between; gap: 8px; height: 40px; min-width: 0; padding: 0 12px; border: 1px solid #d2d2d7; border-radius: 11px; background: #fff; color: #1d1d1f; font: inherit; font-size: 14px; cursor: pointer; white-space: nowrap; transition: border-color .2s var(--ease-apple), box-shadow .2s var(--ease-apple), background .2s var(--ease-apple), transform .2s var(--ease-apple); }
 .select-trigger:hover:not(:disabled) { border-color: #cbd5e1; background: #fafafa; }
 .select-trigger:focus-visible { outline: none; border-color: #3b82f6; box-shadow: 0 0 0 3px rgb(59 130 246 / .16); }
 .select-trigger.is-ghost { border-color: transparent; background: transparent; color: #475569; box-shadow: none; }
@@ -30,7 +35,7 @@
 .select-trigger-chevron { flex-shrink: 0; color: #94a3b8; }
 .aliases-account-select .select-trigger { width: 144px; }
 .aliases-status-filter .select-trigger { min-width: 110px; }
-.select-menu-popover { position: fixed; z-index: 9999; min-width: 160px; max-width: min(260px, calc(100vw - 24px)); max-height: 280px; overflow-y: auto; padding: 5px; border: 1px solid #e2e8f0; border-radius: 10px; background: #fff; box-shadow: 0 10px 30px rgb(15 23 42 / .12), 0 2px 8px rgb(15 23 42 / .06); }
+.select-menu-popover { position: fixed; z-index: 9999; min-width: 160px; max-width: min(260px, calc(100vw - 24px)); max-height: 280px; overflow-y: auto; padding: 5px; border: 1px solid rgb(226 232 240 / .8); border-radius: 12px; background: rgb(255 255 255 / .9); backdrop-filter: saturate(180%) blur(20px); -webkit-backdrop-filter: saturate(180%) blur(20px); box-shadow: 0 16px 44px rgb(15 23 42 / .14), 0 2px 8px rgb(15 23 42 / .06); }
 .select-menu-item { display: flex; align-items: center; gap: 9px; width: 100%; padding: 8px 10px; border: 0; border-radius: 7px; background: transparent; color: #334155; font: inherit; font-size: 14px; text-align: left; cursor: pointer; transition: background .13s ease, color .13s ease; }
 .select-menu-item:hover { background: #f1f5f9; }
 .select-menu-item.is-selected { background: #eff6ff; color: #1d4ed8; font-weight: 500; }
@@ -39,16 +44,16 @@
 .aliases-toolbar .select-menu { flex-shrink: 0; }
 
 /* 按钮 */
-.aliases-page .aliases-primary-btn { display: inline-flex; align-items: center; gap: 7px; height: 40px; padding: 0 16px; border: 0; border-radius: 8px; background: #0071e3; color: #fff; font: inherit; font-size: 14px; font-weight: 500; cursor: pointer; white-space: nowrap; transition: background .2s ease, transform .12s ease, box-shadow .2s ease; }
-.aliases-page .aliases-primary-btn:hover:not(:disabled) { background: #0077ed; box-shadow: 0 4px 14px rgb(0 113 227 / .32); }
+.aliases-page .aliases-primary-btn { display: inline-flex; align-items: center; gap: 7px; height: 40px; padding: 0 16px; border: 0; border-radius: var(--radius-pill); background: #0071e3; color: #fff; font: inherit; font-size: 14px; font-weight: 500; cursor: pointer; white-space: nowrap; transition: background .2s var(--ease-apple), transform .2s var(--ease-apple), box-shadow .2s var(--ease-apple); }
+.aliases-page .aliases-primary-btn:hover:not(:disabled) { background: #0077ed; box-shadow: var(--shadow-sm); }
 .aliases-page .aliases-primary-btn:active:not(:disabled) { transform: scale(.97); }
 .aliases-page .aliases-primary-btn:disabled { opacity: .5; cursor: not-allowed; }
-.aliases-page .aliases-ghost-btn { display: inline-flex; align-items: center; gap: 7px; height: 40px; padding: 0 14px; border: 1px solid #e2e8f0; border-radius: 8px; background: #fff; color: #1e293b; font: inherit; font-size: 14px; cursor: pointer; white-space: nowrap; transition: background .2s ease, border-color .2s ease; }
+.aliases-page .aliases-ghost-btn { display: inline-flex; align-items: center; gap: 7px; height: 40px; padding: 0 14px; border: 1px solid #d2d2d7; border-radius: var(--radius-pill); background: #fff; color: #1d1d1f; font: inherit; font-size: 14px; cursor: pointer; white-space: nowrap; transition: background .2s var(--ease-apple), border-color .2s var(--ease-apple), transform .2s var(--ease-apple); }
 .aliases-page .aliases-ghost-btn:hover:not(:disabled) { background: #f8fafc; border-color: #cbd5e1; }
 .aliases-page .aliases-ghost-btn:disabled { opacity: .5; cursor: not-allowed; }
 
 /* 3. 表格卡片 */
-.aliases-page .aliases-table-card { overflow: hidden; border: 1px solid #e3e3e8; border-radius: 14px; background: #fff; box-shadow: 0 1px 3px rgb(0 0 0 / .04), 0 8px 24px rgb(0 0 0 / .05); }
+.aliases-page .aliases-table-card { overflow: hidden; border: 1px solid #e3e3e8; border-radius: var(--radius-xl); background: #fff; box-shadow: var(--shadow-sm); transition:transform .38s var(--ease-apple),box-shadow .38s var(--ease-apple),border-color .38s var(--ease-apple); }
 .aliases-page .aliases-table { width: 100%; border-collapse: collapse; min-width: 720px; }
 .aliases-page .aliases-table thead th { padding: 11px 18px; border-bottom: 1px solid #ececf1; background: #fafafc; color: #86868b; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; text-align: left; white-space: nowrap; }
 .aliases-page .aliases-table tbody td { padding: 12px 18px; border-bottom: 1px solid #f0f0f4; vertical-align: middle; }
@@ -85,7 +90,7 @@
 .aliases-page .row-action-button::before { content: '⋯'; font-size: 20px; line-height: 1; letter-spacing: 1px; }
 .aliases-page .row-action-button:hover:not(:disabled) { background: #f0f0f4; color: #1d1d1f; }
 .aliases-page .row-action-button:focus-visible, .row-action-popover button:focus-visible { outline: 2px solid #0071e3; outline-offset: 2px; }
-.row-action-popover { position: fixed; z-index: 9999; min-width: 148px; max-width: min(240px, calc(100vw - 24px)); padding: 6px; border: 1px solid #e3e3e8; border-radius: 12px; background: #fff; box-shadow: 0 12px 32px rgb(0 0 0 / .14); }
+.row-action-popover { position: fixed; z-index: 9999; min-width: 148px; max-width: min(240px, calc(100vw - 24px)); padding: 6px; border: 1px solid rgb(227 227 232 / .8); border-radius: 14px; background: rgb(255 255 255 / .9); backdrop-filter: saturate(180%) blur(20px); -webkit-backdrop-filter: saturate(180%) blur(20px); box-shadow: 0 16px 44px rgb(0 0 0 / .14); }
 .row-action-popover button { display: flex; align-items: center; gap: 9px; width: 100%; padding: 9px 12px; border: 0; border-radius: 8px; background: transparent; color: #1d1d1f; font: inherit; font-size: 14px; text-align: left; cursor: pointer; transition: background .15s ease; }
 .row-action-popover button:hover { background: #f5f5f7; }
 .row-action-popover button.danger { color: #d70015; }
@@ -95,6 +100,18 @@
   .aliases-page .aliases-header { flex-wrap: wrap; }
   .aliases-page .aliases-toolbar-row { flex-wrap: wrap; }
   .aliases-page .aliases-search { width: 100%; max-width: none; }
+}
+
+@media (max-width: 640px) {
+  .aliases-page .aliases-title h2,
+  .aliases-page .aliases-title p { white-space: normal; }
+  .aliases-page .aliases-toolbar { width: 100%; }
+  .aliases-page .aliases-toolbar .select-menu,
+  .aliases-page .aliases-toolbar .aliases-primary-btn { flex: 1; }
+  .aliases-page .aliases-toolbar .select-trigger,
+  .aliases-page .aliases-toolbar .aliases-primary-btn { width: 100%; min-height: 44px; justify-content: center; }
+  .aliases-page .aliases-batch-actions { justify-content: flex-start; }
+  .aliases-page .aliases-batch-actions button { min-height: 44px; }
 }
 
 /* 暗色模式适配 */
@@ -113,6 +130,7 @@
   .select-menu-item.is-selected { background: rgb(37 99 235 / .18); color: #93c5fd; }
   .select-menu-check { color: #60a5fa; }
   .aliases-page .aliases-search input { border-color: var(--color-border-strong); background: var(--color-bg-raised); color: var(--color-text); }
+  .aliases-page .aliases-batch-actions span { color: var(--color-text-secondary); }
   .aliases-page .aliases-ghost-btn { border-color: var(--color-border-strong); background: var(--color-bg-raised); color: var(--color-text); }
   .aliases-page .aliases-ghost-btn:hover:not(:disabled) { background: var(--color-bg-subtle); }
   .aliases-page .aliases-table-card { border-color: var(--color-border); background: var(--color-bg-raised); box-shadow: var(--shadow-xs); }

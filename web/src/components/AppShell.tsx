@@ -17,13 +17,13 @@ export default function AppShell() {
         跳到主要内容
       </a>
       <header>
-        <div className="brand">
+        <div className="brand brand-lockup">
           <span className="brand-logo" aria-hidden="true">
             <IconShield size={18} />
           </span>
-          <span>
-            iCloud HME 管理台
-            <span className="brand-sub" style={{ display: 'block' }}>
+          <span className="brand-copy">
+            <span className="brand-name">iCloud HME</span>
+            <span className="brand-sub">
               Hide My Email
             </span>
           </span>
@@ -50,7 +50,7 @@ export default function AppShell() {
           </NavLink>
         </nav>
         <span className="spacer" />
-        <button onClick={() => void handleLogout()} title="退出登录">
+        <button className="shell-logout" onClick={() => void handleLogout()} title="退出登录">
           <IconLogout />
           退出登录
         </button>
