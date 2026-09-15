@@ -11,9 +11,20 @@ interface Props {
   ariaLabel: string
   className?: string
   ghost?: boolean
+  disabled?: boolean
+  /** 占满父容器宽度(表单内联场景)。 */
+  block?: boolean
+  /** 无障碍关联的 label id(表单内用 htmlFor 指向触发按钮)。 */
+  id?: string
 }
 
-export default function SelectMenu({ value, options, onChange, ariaLabel, className = '', ghost = false }: Props) {
+/**
+ * 苹果风格下拉选择器: 触发按钮 + portal 弹出列表。
+ *
+ * 替代原生 <select>: 统一视觉(圆角胶囊/毛玻璃弹层/选中勾)、
+ * 键盘可达(方向键/Home/End/Esc)、点击外部关闭、滚动/缩放自动重定位。
+ */
+export default function SelectMenu({ value, options, onChange, ariaLabel, className = '', ghost = false, disabled = false, block = false, id }: Props) {
   const [open, setOpen] = useState(false)
   const [position, setPosition] = useState({ top: 0, left: 0 })
   const triggerRef = useRef<HTMLButtonElement>(null)
@@ -87,18 +98,21 @@ export default function SelectMenu({ value, options, onChange, ariaLabel, classN
   ) : null
 
   return (
-    <div className={`select-menu ${className}`}>
+    <div className={`select-menu ${block ? 'is-block' : ''} ${className}`}>
       <button
         ref={triggerRef}
         type="button"
+        id={id}
         className={`select-trigger ${ghost ? 'is-ghost' : ''}`}
         aria-haspopup="listbox"
         aria-expanded={open}
+        aria-controls={listId}
         aria-label={ariaLabel}
-        onClick={() => setOpen((value) => !value)}
+        disabled={disabled}
+        onClick={() => setOpen((open) => !open)}
       >
         <span className="select-trigger-label">{selected?.label ?? value}</span>
-        <IconChevronDown size={14} className="select-trigger-chevron" aria-hidden="true" />
+        <IconChevronDown size={14} className={`select-trigger-chevron${open ? ' is-open' : ''}`} aria-hidden="true" />
       </button>
       {menu}
     </div>

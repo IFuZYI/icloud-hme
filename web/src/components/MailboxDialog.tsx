@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import Dialog from './Dialog'
+import SelectMenu from './SelectMenu'
 import { request, ApiError } from '../api/client'
 import type { MailboxSummary } from '../api/types'
 
@@ -80,12 +81,19 @@ export default function MailboxDialog({ accountId, current, open, onClose, onSav
       {error && <div className="alert-error" role="alert">{error}</div>}
       <div className="form-field">
         <label htmlFor="mailbox-provider">邮箱服务商</label>
-        <select id="mailbox-provider" value={form.provider} onChange={(event) => changeProvider(event.target.value)}>
-          <option value="qq">QQ 邮箱</option>
-          <option value="gmail">Gmail</option>
-          <option value="outlook">Outlook</option>
-          <option value="custom">其他</option>
-        </select>
+        <SelectMenu
+          id="mailbox-provider"
+          block
+          ariaLabel="选择邮箱服务商"
+          value={form.provider}
+          options={[
+            { value: 'qq', label: 'QQ 邮箱' },
+            { value: 'gmail', label: 'Gmail' },
+            { value: 'outlook', label: 'Outlook' },
+            { value: 'custom', label: '其他' },
+          ]}
+          onChange={changeProvider}
+        />
       </div>
       <div className="form-field"><label htmlFor="mailbox-email">收件邮箱</label><input id="mailbox-email" type="email" value={form.email} onChange={(event) => update('email', event.target.value)} /></div>
       <div className="form-field"><label htmlFor="mailbox-host">IMAP 服务器</label><input id="mailbox-host" value={form.host} onChange={(event) => update('host', event.target.value)} /></div>

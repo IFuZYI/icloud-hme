@@ -123,6 +123,7 @@ func (s *Server) register() {
 
 			// ===== 核心接口 2: 读取邮件 =====
 			authed.GET("/inbox", s.listInboxHandler)
+			authed.POST("/inbox/previews", csrfCheck(s.auth), s.fetchPreviewsHandler)
 			authed.GET("/inbox/:message_id", s.getMessageHandler)
 			authed.DELETE("/inbox/:message_id", csrfCheck(s.auth), s.deleteMessageHandler)
 
@@ -214,14 +215,19 @@ func (s *Server) listInboxHandler(c *gin.Context) {
 		return
 	}
 	alias := strings.TrimSpace(c.Query("alias"))
-	limit, err := parseInboxInt(c.DefaultQuery("limit", "20"), 1, 100)
+	limit, err := parseInboxInt(c.DefaultQuery("limit", "20"), 1, 50)
 	if err != nil {
-		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "参数错误: limit 需为 1-100 的整数")
+		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "参数错误: limit 需为 1-50 的整数")
 		return
 	}
-	days, err := parseInboxInt(c.DefaultQuery("days", "7"), 1, 90)
+	offset, err := parseInboxInt(c.DefaultQuery("offset", "0"), 0, 10000)
 	if err != nil {
-		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "参数错误: days 需为 1-90 的整数")
+		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "参数错误: offset 需为非负整数")
+		return
+	}
+	days, err := parseInboxInt(c.DefaultQuery("days", "7"), 0, 3650)
+	if err != nil {
+		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "参数错误: days 需为 0-3650 的整数(0 表示不限)")
 		return
 	}
 
@@ -229,6 +235,7 @@ func (s *Server) listInboxHandler(c *gin.Context) {
 		AccountID: accountID,
 		Alias:     alias,
 		Limit:     limit,
+		Offset:    offset,
 		Days:      days,
 	})
 	if err != nil {
@@ -236,6 +243,42 @@ func (s *Server) listInboxHandler(c *gin.Context) {
 		return
 	}
 	ok(c, result)
+}
+
+// fetchPreviewsHandler 批量补齐邮件摘要(渐进式加载第二阶段)。
+//
+//	POST /api/inbox/previews?account_id=acc_xxx  body: {"ids": ["168","167"]}
+func (s *Server) fetchPreviewsHandler(c *gin.Context) {
+	accountID := c.Query("account_id")
+	if accountID == "" {
+		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "参数缺失: account_id")
+		return
+	}
+	var req struct {
+		IDs []string `json:"ids"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil || len(req.IDs) == 0 {
+		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "参数错误: ids 不能为空")
+		return
+	}
+	if len(req.IDs) > 20 {
+		req.IDs = req.IDs[:20]
+	}
+	uids := make([]uint32, 0, len(req.IDs))
+	for _, id := range req.IDs {
+		uid, err := strconv.ParseUint(id, 10, 32)
+		if err != nil {
+			failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "参数错误: 邮件 ID 无效")
+			return
+		}
+		uids = append(uids, uint32(uid))
+	}
+	previews, err := s.be.FetchPreviews(accountID, uids)
+	if err != nil {
+		backendFail(c, err)
+		return
+	}
+	ok(c, previews)
 }
 
 func (s *Server) getMessageHandler(c *gin.Context) {

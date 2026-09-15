@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import Dialog from './Dialog'
+import SelectMenu from './SelectMenu'
 import { request, ApiError } from '../api/client'
 
 const cookieExample = `{
@@ -113,15 +114,18 @@ export default function AccountFormDialog({
       </div>
       <div className="form-field">
         <label htmlFor="acc-host">区域</label>
-        <select
+        <SelectMenu
           id="acc-host"
+          block
+          ariaLabel="选择区域"
           value={host}
-          onChange={(e) => setHost(e.target.value)}
+          options={[
+            { value: 'icloud.com', label: '全球区 (icloud.com)' },
+            { value: 'icloud.com.cn', label: '中国区 (icloud.com.cn)' },
+          ]}
+          onChange={setHost}
           disabled={Boolean(editing)}
-        >
-          <option value="icloud.com">全球区 (icloud.com)</option>
-          <option value="icloud.com.cn">中国区 (icloud.com.cn)</option>
-        </select>
+        />
       </div>
       {!editing && (
         <>
