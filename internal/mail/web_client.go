@@ -221,7 +221,7 @@ func (c *WebClient) search(payload string) ([]Message, error) {
 			ID:      t.ThreadID,
 			From:    from,
 			Subject: t.Subject,
-			Preview: sanitizePreview(t.Preview),
+			Preview: capPreview(strings.TrimSpace(sanitizePreview(t.Preview))),
 			Date:    date,
 		})
 	}
@@ -234,16 +234,10 @@ func (c *WebClient) ListInbox(limit int) ([]Message, error) {
 	return c.search(payload)
 }
 
-// SearchMails 搜索邮件。query 为空时等价于 ListInbox。
-func (c *WebClient) SearchMails(query string, limit int) ([]Message, error) {
-	if query == "" {
-		return c.ListInbox(limit)
-	}
-	payload := fmt.Sprintf(`{"responseType":"THREAD_DIGEST","includeFolderStatus":false,"maxResults":%d,"query":%q,"sessionHeaders":{"folder":"INBOX","condstore":1,"qresync":1,"threadmode":1}}`, limit, query)
-	return c.search(payload)
-}
-
 // FindByAlias 查找发给指定别名的邮件——在本地过滤(Web API 不支持收件人搜索)。
+//
+// 注意: 本地匹配是对 To/主题/发件人做子串包含判断, 调用方必须传入完整别名地址
+// (如 abc123@icloud.com)。若只传本地部分(如 abc), "abcd@icloud.com" 也会命中。
 func (c *WebClient) FindByAlias(alias string, limit int) ([]Message, error) {
 	// 拉取收件箱全部邮件(最多取 2*limit),本地过滤
 	batchSize := limit * 2

@@ -136,8 +136,25 @@ func (f *fakeBackend) DeleteAlias(accountID, anonymousID string) error {
 }
 
 func (f *fakeBackend) ListInbox(q InboxQuery) (InboxResult, error) {
-	f.listInboxQuery = q
-	return f.inbox, nil
+	msgs, total := slicePage(f.inbox.Messages, q.Offset, q.Limit)
+	return InboxResult{
+		AccountID: q.AccountID,
+		Alias:     q.Alias,
+		Count:     len(msgs),
+		Messages:  msgs,
+		Method:    f.inbox.Method,
+		Total:     total,
+		Offset:    q.Offset,
+		Warning:   f.inbox.Warning,
+	}, nil
+}
+
+func (f *fakeBackend) FetchPreviews(accountID string, uids []uint32) (map[string]string, error) {
+	previews := map[string]string{}
+	for _, uid := range uids {
+		previews[fmt.Sprintf("%d", uid)] = fmt.Sprintf("预览 %d", uid)
+	}
+	return previews, nil
 }
 
 func (f *fakeBackend) GetMessage(accountID string, uid uint32) (*mail.FullMessage, error) {
@@ -220,4 +237,82 @@ func do(t *testing.T, req *http.Request) (int, string, []*http.Cookie) {
 		t.Fatal(err)
 	}
 	return resp.StatusCode, string(raw), resp.Cookies()
+}
+
+// 渐进式收件箱: 分页参数透传 + previews 端点批量补摘要。
+func TestInboxPaginationAndPreviews(t *testing.T) {
+	f := &fakeBackend{
+		accounts: []account.Summary{{ID: "acc_1", Name: "主号"}},
+		inbox: InboxResult{
+			Method: "imap",
+			Messages: []mail.Message{
+				{ID: "1", Subject: "m1"}, {ID: "2", Subject: "m2"}, {ID: "3", Subject: "m3"},
+			},
+		},
+	}
+	_, ts := newTestServer(f)
+	cookie, csrf := login(t, ts, "admin-pass-2026-strong")
+
+	// 第一页: offset=0 limit=2 → m3,m2(新→旧) + total=3
+	req := authedReq(t, ts, "GET", "/api/inbox?account_id=acc_1&limit=2&offset=0&days=7", "")
+	req.AddCookie(&http.Cookie{Name: "hme_session", Value: cookie})
+	req.Header.Set("X-CSRF-Token", csrf)
+	code, raw, _ := do(t, req)
+	if code != 200 {
+		t.Fatalf("listInbox status = %d, body = %s", code, raw)
+	}
+	var listResp struct {
+		Data InboxResult `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(raw), &listResp); err != nil {
+		t.Fatal(err)
+	}
+	if listResp.Data.Total != 3 || listResp.Data.Offset != 0 {
+		t.Fatalf("total/offset = %d/%d, want 3/0", listResp.Data.Total, listResp.Data.Offset)
+	}
+	if len(listResp.Data.Messages) != 2 {
+		t.Fatalf("page size = %d, want 2", len(listResp.Data.Messages))
+	}
+
+	// 第二页: offset=2 → m1
+	req = authedReq(t, ts, "GET", "/api/inbox?account_id=acc_1&limit=2&offset=2&days=7", "")
+	req.AddCookie(&http.Cookie{Name: "hme_session", Value: cookie})
+	req.Header.Set("X-CSRF-Token", csrf)
+	code, raw, _ = do(t, req)
+	if code != 200 {
+		t.Fatalf("listInbox p2 status = %d", code)
+	}
+	if err := json.Unmarshal([]byte(raw), &listResp); err != nil {
+		t.Fatal(err)
+	}
+	if len(listResp.Data.Messages) != 1 || listResp.Data.Messages[0].ID != "3" {
+		t.Fatalf("page2 = %+v, want [m3]", listResp.Data.Messages)
+	}
+
+	// previews 端点: 批量 id → 摘要映射
+	req = authedReq(t, ts, "POST", "/api/inbox/previews?account_id=acc_1", `{"ids":["1","2"]}`)
+	req.AddCookie(&http.Cookie{Name: "hme_session", Value: cookie})
+	req.Header.Set("X-CSRF-Token", csrf)
+	code, raw, _ = do(t, req)
+	if code != 200 {
+		t.Fatalf("previews status = %d, body = %s", code, raw)
+	}
+	var prevResp struct {
+		Data map[string]string `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(raw), &prevResp); err != nil {
+		t.Fatal(err)
+	}
+	if prevResp.Data["1"] == "" || prevResp.Data["2"] == "" {
+		t.Fatalf("previews = %v, want ids 1,2 filled", prevResp.Data)
+	}
+
+	// 参数校验: 非法 offset 拒绝
+	req = authedReq(t, ts, "GET", "/api/inbox?account_id=acc_1&offset=-1", "")
+	req.AddCookie(&http.Cookie{Name: "hme_session", Value: cookie})
+	req.Header.Set("X-CSRF-Token", csrf)
+	code, _, _ = do(t, req)
+	if code != 400 {
+		t.Fatalf("offset=-1 status = %d, want 400", code)
+	}
 }

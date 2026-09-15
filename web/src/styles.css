@@ -383,23 +383,6 @@ button.ghost:hover:not(:disabled) {
   color: var(--color-text);
 }
 
-/* 链接样式按钮(表格内复制邮箱等) */
-button.link-like {
-  background: none;
-  border: none;
-  padding: 0;
-  min-height: 0;
-  color: var(--color-primary);
-  text-decoration: underline;
-  text-underline-offset: 2px;
-  cursor: pointer;
-}
-
-button.link-like:hover {
-  color: var(--color-primary-hover);
-  background: none;
-}
-
 /* ─── 徽章 ─── */
 .badge {
   display: inline-flex;
@@ -611,32 +594,6 @@ th {
   white-space: nowrap;
 }
 
-.table-sort-button {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-1);
-  min-height: 0;
-  padding: 0;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  font-weight: inherit;
-  letter-spacing: inherit;
-  text-transform: inherit;
-}
-
-.table-sort-button:hover:not(:disabled) {
-  border-color: transparent;
-  background: transparent;
-  color: var(--color-primary);
-}
-
-.table-sort-button svg {
-  flex-shrink: 0;
-}
-
 tbody tr {
   transition: background var(--dur-fast) var(--ease-out);
 }
@@ -668,9 +625,10 @@ td .cell-secondary {
 
 .page-header .page-title h2 {
   margin: 0;
-  font-size: var(--text-2xl);
-  font-weight: 600;
+  font-size: clamp(1.55rem, 3vw, 2rem);
+  font-weight: 650;
   letter-spacing: -0.035em;
+  line-height: 1.15;
 }
 
 .page-header .page-title p {
@@ -707,6 +665,25 @@ td .cell-secondary {
   padding: var(--space-3) var(--space-4);
   margin-bottom: var(--space-4);
   font-size: var(--text-sm);
+}
+
+.alert-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  border: 1px solid color-mix(in srgb, var(--color-warning) 34%, transparent);
+  background: var(--color-warning-soft);
+  color: var(--color-warning);
+  border-radius: var(--radius);
+  padding: var(--space-3) var(--space-4);
+  margin-bottom: var(--space-4);
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}
+
+.alert-warning svg {
+  flex-shrink: 0;
+  margin-top: 1px;
 }
 
 /* ─── Toast ─── */
@@ -997,26 +974,6 @@ td .cell-secondary {
   cursor: pointer;
 }
 
-.icon-button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  margin-left: var(--space-2);
-  padding: 4px;
-  border: 0;
-  background: transparent;
-}
-
-.mail-body {
-  max-height: 50vh;
-  overflow: auto;
-  white-space: pre-wrap;
-  word-break: break-word;
-  padding: var(--space-3);
-  border-radius: var(--radius-sm);
-  background: var(--color-bg-subtle);
-}
-
 /* ─── Apple 风格动效与表面层 ─── */
 html {
   scroll-behavior: smooth;
@@ -1080,8 +1037,8 @@ textarea:focus {
 }
 
 .page-header .page-title h2 {
-  font-size: clamp(24px, 3vw, 32px);
-  font-weight: 600;
+  font-size: clamp(1.55rem, 3vw, 2rem);
+  font-weight: 650;
   letter-spacing: -0.035em;
   line-height: 1.15;
 }

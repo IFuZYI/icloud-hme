@@ -282,6 +282,27 @@ GET /api/inbox?account_id=acc_1&alias=xyz123@icloud.com&limit=20&days=7
 
 `method` 为 `imap` 或 `web_api`。IMAP 路径支持服务端按收件人搜索；Web API 路径拉取后本地过滤。
 
+IMAP 不可用而回退到 Web API 时，响应会额外带 `warning` 字段说明降级原因（缺省表示走 IMAP 成功）：
+
+```json
+{
+  "success": true,
+  "data": {
+    "account_id": "acc_1",
+    "count": 1,
+    "method": "web_api",
+    "warning": "IMAP 不可用，已回退 Web API：IMAP 登录失败 — 请检查邮箱账号、授权码和服务器地址",
+    "messages": []
+  }
+}
+```
+
+`preview` 由服务端解析 MIME 正文得到：支持 `multipart/*` 递归、`message/rfc822` 转发邮件、base64 / quoted-printable 解码与非 UTF-8 字符集转换，优先 `text/plain`，仅有 HTML 时转为纯文本。摘要最多保留 2000 个字符（按字符计），完整正文通过 `GET /api/inbox/:message_id` 获取，不受此限制。
+
+附件判定：`Content-Disposition: attachment` 的部分一律跳过（含 filename 未加引号导致解析失败的情况）；多部分邮件中只带 `name=` 参数而无 `Content-Disposition` 的部分同样按附件处理（单部分邮件的 `name=` 仍视为正文）。另：为省去对超大 HTML 部分的解析开销，有 `text/plain` 部分时不再解析 HTML。
+
+`date` 取邮件 `Date` 头（缺失时回退 IMAP `INTERNALDATE`）；`days` 过滤与排序改用服务端收件时间 `INTERNALDATE`，因为 `Date` 由发件人填写，不可靠。
+
 ### 14. 列出别名
 
 ```http

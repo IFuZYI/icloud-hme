@@ -9,6 +9,7 @@ import RowActionMenu from '../components/RowActionMenu'
 import SelectMenu from '../components/SelectMenu'
 import { useToast } from '../components/ToastProvider'
 import { copyText } from '../utils/clipboard'
+import { formatDateTime } from '../utils/datetime'
 import { IconChevronDown, IconChevronUp, IconClock, IconCopy, IconInbox, IconPlus, IconSearch, IconTrash, IconCheck } from '../components/icons'
 
 type SortDirection = 'asc' | 'desc'
@@ -46,8 +47,7 @@ function parseAliasDate(raw?: string): Date | null {
 function formatDate(raw?: string): string {
   const date = parseAliasDate(raw)
   if (!date) return raw?.trim() || '—'
-  const pad = (value: number) => String(value).padStart(2, '0')
-  return `${date.getFullYear()}/${pad(date.getMonth() + 1)}/${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+  return formatDateTime(date)
 }
 
 function dateTimestamp(raw?: string): number | null {
@@ -81,6 +81,12 @@ export default function AliasesPage() {
       .then((data) => {
         if (cancelled) return
         setAccounts(data)
+        if (data.length === 0) {
+          // 无账号: 没有后续别名请求会来关 loading, 就在这里关,
+          // 让「暂无账号」引导正常显示
+          setLoading(false)
+          return
+        }
         const queryId = searchParams.get('account_id')
         const valid = data.find((a) => a.id === queryId)
         const target = valid ? valid.id : data[0]?.id ?? ''
@@ -90,7 +96,9 @@ export default function AliasesPage() {
         }
       })
       .catch((err) => { if (!cancelled) setError(err instanceof ApiError ? err.message : '网络连接失败，请检查服务状态') })
-      .finally(() => { if (!cancelled) setLoading(false) })
+      // 注意: 这里不关 loading——账号返回后别名列表才开始拉取,
+      // 提前置 false 会让骨架屏切到"暂无别名"空态, 数据到达后再闪回列表。
+      // loading 由别名列表的 effect 负责关闭。
     return () => { cancelled = true }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])

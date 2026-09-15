@@ -67,6 +67,12 @@ export interface InboxResult {
   count: number
   messages: InboxMessage[]
   method: 'imap' | 'web_api'
+  /** 符合日期过滤的邮件总数(用于「加载更多」) */
+  total: number
+  /** 本页起始偏移(新→旧) */
+  offset: number
+  /** 降级读取的说明(如 IMAP 不可用),缺省表示一切正常 */
+  warning?: string
 }
 
 /** 登录响应 */

@@ -9,10 +9,13 @@ import (
 var (
 	htmlTagRE        = regexp.MustCompile(`(?s)<[^>]+>`)
 	htmlNoiseBlockRE = regexp.MustCompile(`(?is)<(style|script|head|title|noscript)\b[^>]*>.*?</(style|script|head|title|noscript)\s*>`)
-	htmlCommentRE    = regexp.MustCompile(`(?s)<!--.*?-->`)
-	htmlBreakRE      = regexp.MustCompile(`(?i)<br\s*/?>`)
-	htmlBlockEndRE   = regexp.MustCompile(`(?i)</(p|div|tr|h[1-6])\s*>`)
-	htmlListItemRE   = regexp.MustCompile(`(?i)<li\b[^>]*>`)
+	// unclosedNoiseBlockRE 匹配"有开标签但到结尾都没闭合"的 noise 块
+	// (截断邮件的常见形态), 只删开标签, 保留后续文本。
+	unclosedNoiseBlockRE = regexp.MustCompile(`(?is)<(style|script|head|title|noscript)\b[^>]*>[^<]*$`)
+	htmlCommentRE        = regexp.MustCompile(`(?s)<!--.*?-->`)
+	htmlBreakRE          = regexp.MustCompile(`(?i)<br\s*/?>`)
+	htmlBlockEndRE       = regexp.MustCompile(`(?i)</(p|div|tr|h[1-6])\s*>`)
+	htmlListItemRE       = regexp.MustCompile(`(?i)<li\b[^>]*>`)
 
 	cssSignalRE      = regexp.MustCompile(`(?i)(@font-face|@media|@import|@supports|@keyframes|(^|[\s;{])(-webkit-|-moz-|-ms-|mso-)[\w-]*|(^|[\s;{])(font-family|text-size-adjust|border-collapse|mso-table-[\w-]+)\s*:)`)
 	cssDeclarationRE = regexp.MustCompile(`(?i)(^|[;{])\s*[-a-z_][\w-]*\s*:\s*[^;{}]+`)
@@ -46,6 +49,11 @@ func sanitizePlainPreview(raw string) string {
 func stripHTML(raw string) string {
 	raw = htmlNoiseBlockRE.ReplaceAllString(raw, "")
 	raw = htmlCommentRE.ReplaceAllString(raw, "")
+	// 截断的 HTML(摘要走 partial fetch)可能停在未闭合的 <style>/<head> 里:
+	// 贪婪的块匹配会把开标签之后的全部正文一起吞掉, 摘要变空。
+	// 未闭合时只删掉开标签本身, 让后续内容按普通文本处理;
+	// 漏进来的 CSS 由 sanitizePlainPreview 的 looksLikeCSS 兜底清理。
+	raw = unclosedNoiseBlockRE.ReplaceAllString(raw, " ")
 	raw = htmlBreakRE.ReplaceAllString(raw, "\n")
 	raw = htmlBlockEndRE.ReplaceAllString(raw, "\n")
 	raw = htmlListItemRE.ReplaceAllString(raw, "\n- ")

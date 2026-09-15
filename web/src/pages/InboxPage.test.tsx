@@ -2,10 +2,11 @@ import { http, HttpResponse } from 'msw'
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import InboxPage from './InboxPage'
 import { server } from '../test/server'
 import { setCSRFToken } from '../api/client'
+import { chooseOption } from '../test/selectMenu'
 import { ToastProvider } from '../components/ToastProvider'
 import type { AccountSummary, InboxResult } from '../api/types'
 
@@ -31,6 +32,8 @@ const inboxResult: InboxResult = {
   account_id: 'acc_1',
   alias: 'alpha@icloud.com',
   count: 1,
+  total: 1,
+  offset: 0,
   method: 'imap',
   messages: [
     {
@@ -65,6 +68,14 @@ describe('InboxPage', () => {
   beforeEach(() => {
     setCSRFToken('csrf-test')
     server.resetHandlers()
+    // 渐进摘要接口的默认桩: 回显请求的 id 对应的固定摘要
+    server.use(
+      http.post('/api/inbox/previews', async ({ request }) => {
+        const body = (await request.json()) as { ids: string[] }
+        const previews = Object.fromEntries(body.ids.map((id) => [id, `预览 ${id}`]))
+        return HttpResponse.json({ success: true, data: previews })
+      }),
+    )
   })
 
   it('账号必选;alias 可空;limit/days 生效;query 经 URLSearchParams', async () => {
@@ -85,12 +96,12 @@ describe('InboxPage', () => {
     expect(url.searchParams.get('days')).toBe('7')
     // 修改 limit/days 再查询
     const user = userEvent.setup()
-    await user.selectOptions(screen.getByLabelText(/每页/), '100')
-    await user.selectOptions(screen.getByLabelText(/时间范围/), '30')
+    await chooseOption(user, /每页数量/, '50')
+    await chooseOption(user, /时间范围/, '近 30 天')
     await user.click(screen.getByRole('button', { name: /查询/ }))
     await waitFor(() => {
       const u = new URL(lastUrl)
-      expect(u.searchParams.get('limit')).toBe('100')
+      expect(u.searchParams.get('limit')).toBe('50')
       expect(u.searchParams.get('days')).toBe('30')
     })
   })
@@ -126,7 +137,8 @@ describe('InboxPage', () => {
     await waitFor(() => {
       expect(inboxUrls.some((url) => new URL(url).searchParams.get('alias') === 'alpha@icloud.com')).toBe(true)
     })
-    expect(screen.getByLabelText(/别名/)).toHaveValue('alpha@icloud.com')
+    // SelectMenu: 触发按钮直接显示选中别名的文本
+    expect(screen.getByRole('button', { name: /筛选别名/ }).textContent).toContain('alpha@icloud.com')
   })
 
   it('展示 method=imap 或 web_api', async () => {
@@ -150,7 +162,7 @@ describe('InboxPage', () => {
       http.get('/api/inbox', () =>
         HttpResponse.json({
           success: true,
-          data: { account_id: 'acc_1', count: 0, messages: [], method: 'imap' },
+          data: { account_id: 'acc_1', count: 0, total: 0, offset: 0, messages: [], method: 'imap' },
         }),
       ),
     )
@@ -227,7 +239,7 @@ describe('InboxPage', () => {
     await screen.findByText(/加载中/)
     // 触发第二次查询(首次挂起中)
     const user = userEvent.setup()
-    await user.selectOptions(screen.getByLabelText(/每页/), '100')
+    await chooseOption(user, /每页数量/, '50')
     await user.click(screen.getByRole('button', { name: /查询/ }))
     await screen.findByText('第二请求主题')
     // 第一次请求此时才返回
@@ -269,6 +281,154 @@ describe('InboxPage', () => {
       ),
     )
     renderPage()
-    expect(await screen.findByText('—')).toBeInTheDocument()
+    // 空摘要不再显示"—", 而是渐进加载: 骨架条出现后由 previews 接口补齐
+    const previewText = await screen.findByText('预览 1')
+    expect(previewText).toBeInTheDocument()
+  })
+
+  it('IMAP 不可用降级到 Web API 时展示提示,不把降级当成功', async () => {
+    server.use(
+      http.get('/api/accounts', () => HttpResponse.json({ success: true, data: accounts })),
+      http.get('/api/inbox', () =>
+        HttpResponse.json({
+          success: true,
+          data: {
+            ...inboxResult,
+            method: 'web_api',
+            warning: 'IMAP 不可用，已回退 Web API：IMAP 登录失败',
+          },
+        }),
+      ),
+    )
+    renderPage()
+    expect(await screen.findByText(/IMAP 不可用，已回退 Web API/)).toBeInTheDocument()
+    // 摘要行的时间范围描述(下拉选项里也有"近 7 天", 限定在摘要行内断言)
+    const summary = document.querySelector('.inbox-summary')
+    expect(summary?.textContent).toContain('近 7 天')
+  })
+
+  it('列表展示收件人别名与相对日期', async () => {
+    server.use(
+      http.get('/api/accounts', () => HttpResponse.json({ success: true, data: accounts })),
+      http.get('/api/inbox', () =>
+        HttpResponse.json({
+          success: true,
+          data: {
+            ...inboxResult,
+            messages: [
+              { ...inboxResult.messages[0], date: new Date(Date.now() - 3600_000).toISOString() },
+            ],
+          },
+        }),
+      ),
+    )
+    renderPage()
+    expect(await screen.findByText('主题一')).toBeInTheDocument()
+    expect(screen.getByText('alpha@icloud.com')).toBeInTheDocument()
+    expect(screen.getByText(/^今天 /)).toBeInTheDocument()
+  })
+
+  it('从列表删除邮件:确认后带 CSRF 发送 DELETE 并刷新', async () => {
+    const deletes: { url: string; token: string | null }[] = []
+    let inboxCalls = 0
+    server.use(
+      http.get('/api/accounts', () => HttpResponse.json({ success: true, data: accounts })),
+      http.get('/api/inbox', () => {
+        inboxCalls++
+        return HttpResponse.json({ success: true, data: inboxResult })
+      }),
+      http.delete('/api/inbox/:id', ({ request }) => {
+        deletes.push({ url: request.url, token: request.headers.get('x-csrf-token') })
+        return HttpResponse.json({ success: true, data: { id: '1' } })
+      }),
+    )
+    renderPage()
+    await screen.findByText('主题一')
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: /删除邮件：主题一/ }))
+    await user.click(await screen.findByRole('button', { name: '确认删除' }))
+    await waitFor(() => expect(deletes).toHaveLength(1))
+    expect(new URL(deletes[0].url).searchParams.get('account_id')).toBe('acc_1')
+    expect(new URL(deletes[0].url).pathname).toBe('/api/inbox/1')
+    expect(deletes[0].token).toBe('csrf-test')
+    await waitFor(() => expect(inboxCalls).toBeGreaterThan(1))
+  })
+
+  it('点击邮件打开详情:展示元信息与正文,并可复制正文', async () => {
+    // 先 setup:userEvent 会安装自己的剪贴板桩,必须在它之后再覆盖
+    const user = userEvent.setup()
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText },
+      configurable: true,
+    })
+    server.use(
+      http.get('/api/accounts', () => HttpResponse.json({ success: true, data: accounts })),
+      http.get('/api/inbox', () => HttpResponse.json({ success: true, data: inboxResult })),
+      http.get('/api/inbox/:id', () =>
+        HttpResponse.json({
+          success: true,
+          data: {
+            ...inboxResult.messages[0],
+            body: '验证码：123456',
+            content_type: 'text/plain',
+          },
+        }),
+      ),
+    )
+    renderPage()
+    await screen.findByText('主题一')
+    await user.click(screen.getByRole('button', { name: '查看邮件：主题一' }))
+    expect(await screen.findByText('验证码：123456')).toBeInTheDocument()
+    expect(screen.getByText('发件人')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: /复制正文/ }))
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('验证码：123456'))
+  })
+  it('空收件箱仍展示摘要行(共 0 封 + 读取方式)', async () => {
+    server.use(
+      http.get('/api/accounts', () => HttpResponse.json({ success: true, data: accounts })),
+      http.get('/api/inbox', () =>
+        HttpResponse.json({
+          success: true,
+          data: { account_id: 'acc_1', count: 0, total: 0, offset: 0, messages: [], method: 'imap' },
+        }),
+      ),
+    )
+    renderPage()
+    expect(await screen.findByText(/暂无邮件/)).toBeInTheDocument()
+    // 摘要行不在 AsyncState 内, 空结果时也要可见
+    // 等结果真正渲染后再断言(避免停在 accounts 已返回、收件箱未返回的中间态)
+    await waitFor(() => expect(document.querySelector('.inbox-summary')).not.toBeNull())
+    const summary = document.querySelector('.inbox-summary')
+    expect(summary?.textContent).toContain('共')
+    expect(summary?.textContent).toContain('0')
+    expect(summary?.textContent).toContain('读取方式：IMAP')
+  })
+
+  it('点击刷新时按钮进入忙碌态并禁用, 完成后恢复', async () => {
+    let release: (() => void) | undefined
+    let calls = 0
+    server.use(
+      http.get('/api/accounts', () => HttpResponse.json({ success: true, data: accounts })),
+      http.get('/api/inbox', () => {
+        calls++
+        if (calls === 1) return HttpResponse.json({ success: true, data: inboxResult })
+        return new Promise<Response>((resolve) => {
+          release = () => resolve(HttpResponse.json({ success: true, data: inboxResult }))
+        })
+      }),
+    )
+    renderPage()
+    await screen.findByText('主题一')
+    const user = userEvent.setup()
+    const refresh = screen.getByRole('button', { name: '刷新收件箱' })
+    expect(refresh.className).toBe('inbox-action')
+
+    await user.click(refresh)
+    await waitFor(() => expect(screen.getByRole('button', { name: '刷新收件箱' })).toBeDisabled())
+    expect(screen.getByRole('button', { name: '刷新收件箱' }).className).toContain('is-busy')
+
+    release?.()
+    await waitFor(() => expect(screen.getByRole('button', { name: '刷新收件箱' })).not.toBeDisabled())
   })
 })
