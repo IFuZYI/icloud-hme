@@ -10,7 +10,8 @@
 - ✅ **创建 HME 别名** — 自动生成 iCloud 隐藏邮箱地址
 - ✅ **列出所有别名** — 查看账号下的所有 HME 别名
 - ✅ **批量管理别名** — 多选停用、启用或删除；长时间删除在后台执行并记录逐项结果
-- ✅ **低频自动创建** — 设置目标数量、20–60 分钟周期与每日上限；每次仅创建一个，标签从常用服务名称库自动轮换，失败立即暂停
+- ✅ **两类自动创建任务** — 自主任务（设定每天 5–50 个，系统自动分摊全天时刻）与定时任务（每隔固定分钟创建固定数量）；均到达目标总数后停止，失败立即暂停
+- ✅ **三种标签生成方式** — 名称库自动轮换、前缀+顺序序号（`主邮箱001`）、前缀+随机哈希（`主邮箱k7m9`）
 - ✅ **收取邮件** — 通过 IMAP 或 Web API 读取发到 HME 别名的邮件
 - ✅ **双路径读信** — 邮件读取优先走 IMAP (App Password),无 App Password 时回退 Web API (Cookie)
 - ✅ **多账号管理** — 支持多个 iCloud 账号并行管理
@@ -129,7 +130,7 @@ docker compose down
 - **时区**：默认 `Asia/Shanghai`，可在 `.env` 中通过 `TZ` 修改。
 - **端口**：默认映射 `8081:8081`；在 `.env` 设置 `ICLOUD_HME_PORT=9090` 可改为从宿主机 `9090` 访问。
 - **HTTPS 反代部署**：置于 TLS 反向代理后时，将 `ICLOUD_HME_SECURE_COOKIE` 设为 `true`。
-- **构建门禁**：Docker 构建阶段会运行前端 lint/测试/构建以及 Go 测试和 Vet，任一失败都会中止镜像构建。
+- **构建门禁**：Docker 镜像构建只产出前端资源并编译二进制；lint、单元测试与 `go vet` 属于 CI 与本地 `./build.sh` 环节，不在镜像构建内执行，以缩短构建耗时。
 - **运行时加固**：Compose 默认启用只读根文件系统、`no-new-privileges` 和独立临时目录；只有 `/app/data` 持久化目录可写。
 - **镜像大小**：构建采用多阶段（前端 Node 构建 → Go 编译 → 精简 Alpine 运行时），最终镜像仅含二进制与 `ca-certificates`、`tzdata`。
 - **健康检查**：容器内置 `wget` 探活 `/`，约 30 秒检测一次，失败 3 次标记 unhealthy（`docker compose ps` 可见）。
@@ -198,7 +199,7 @@ export ICLOUD_HME_ADMIN_PASSWORD='your-strong-password'
 
 - **账号**：添加账号时可直接粘贴 Cookie JSON；区域下拉框支持全球区和中国区。
 - **别名**：支持搜索、状态筛选、创建时间排序和多选批量操作。确认批量删除后弹窗立即关闭，结果通过通知和任务日志反馈。
-- **自动任务**：设置目标数量、创建周期和每日上限；每次只创建一个别名，展示进度、下次执行时间和失败原因。
+- **自动任务**：两种任务类型可选——自主任务设定每天创建数量（5/10/…/50），系统自动把创建时刻分摊到全天；定时任务设定间隔分钟与每批数量。标签可选名称库自动轮换、前缀顺序序号或前缀随机哈希。展示进度、下次执行时间和失败原因，达到目标总数后自动停止。
 - **日志**：查看自动任务及批量操作的逐项成功/失败记录和详细原因。
 - **收件箱**：按账号、别名、数量和时间范围筛选邮件。
 
@@ -493,7 +494,16 @@ POST /api/aliases/batch
 
 ### 自动创建任务接口
 
-自动创建任务以低频方式为指定账号创建 HME 别名：每个周期只创建 1 个，周期限制为 20–60 分钟。标签由内置常用服务名称库自动轮换（如 GitHub、Google Workspace、Notion、Slack、淘宝），不会使用固定前缀或序号。
+自动创建任务分为两种类型，均以低频方式为指定账号创建 HME 别名，达到目标总数（`target_count`，1–999）后自动停止：
+
+- **自主任务（`mode: auto`）**：设定每天创建数量 `daily_limit`（5/10/15/…/50），系统按 24 小时自动分摊执行时刻，每次创建 1 个。
+- **定时任务（`mode: scheduled`）**：每隔 `interval_minutes`（20–1440 分钟）创建 `batch_count` 个（1–20）。
+
+标签可用三种方式生成（`label_mode`）：
+
+- `library`：内置常用服务名称库自动轮换（如 GitHub、Google Workspace、Notion、Slack、淘宝）。
+- `sequential`：`label_prefix` + 补零序号（如 `主邮箱001`）。
+- `hash`：`label_prefix` + 长度 `hash_length`（4–8）的随机哈希（如 `主邮箱k7m9`）。
 
 | 接口 | 说明 |
 |---|---|
@@ -509,24 +519,39 @@ POST /api/aliases/batch
 ```bash
 POST /api/alias-tasks
 
-# 请求体
+# 自主任务：每天 10 个，名称库标签
 {
   "account_id": "acc_1",
-  "interval_minutes": 60,
-  "target_count": 20,
-  "daily_limit": 10
+  "mode": "auto",
+  "target_count": 100,
+  "daily_limit": 10,
+  "label_mode": "library"
 }
 
-# 响应
+# 定时任务：每 60 分钟 2 个，前缀+顺序序号标签
+{
+  "account_id": "acc_1",
+  "mode": "scheduled",
+  "target_count": 50,
+  "interval_minutes": 60,
+  "batch_count": 2,
+  "label_mode": "sequential",
+  "label_prefix": "主邮箱"
+}
+
+# 响应（自主任务示例）
 {
   "success": true,
   "data": {
     "id": "task_ab12cd34",
     "enabled": true,
     "account_id": "acc_1",
-    "interval_minutes": 60,
+    "mode": "auto",
+    "interval_minutes": 144,
+    "batch_count": 1,
     "daily_limit": 10,
-    "max_total": 20,
+    "label_mode": "library",
+    "max_total": 100,
     "created_count": 0,
     "next_number": 1,
     "daily_count": 0,
@@ -541,8 +566,15 @@ POST /api/alias-tasks
 |---|---|---|
 | `account_id` | ✅ | 目标账号 ID |
 | `target_count` | ✅ | 累计创建目标（1–999），达到后任务自动停止 |
-| `daily_limit` | ✅ | 此任务每日上限（1–20）；同账号所有任务合计每天最多 20 个 |
-| `interval_minutes` | ✅ | 执行间隔（20、30、45 或 60 分钟） |
+| `mode` | ⭕ | `auto`（默认）或 `scheduled` |
+| `daily_limit` | auto 必填 | 自主任务每天创建数量，取值 5/10/…/50 |
+| `interval_minutes` | scheduled 必填 | 定时任务执行间隔（20–1440 分钟） |
+| `batch_count` | scheduled 必填 | 定时任务每个周期创建数量（1–20） |
+| `label_mode` | ⭕ | `library`（默认）/ `sequential` / `hash` |
+| `label_prefix` | sequential/hash 必填 | 手动标签前缀（最长 32 字符） |
+| `hash_length` | ⭕ | hash 模式后缀长度（4–8，默认 4） |
+
+> 自主任务的 `interval_minutes` 由系统按每日数量自动分摊（24×60 ÷ 每日数量，且不低于 20 分钟），无需手动填写。定时任务的 `daily_limit` 固定为账号每日安全上限 50。
 
 #### 启用 / 暂停
 
@@ -555,12 +587,14 @@ POST /api/alias-tasks/:id/toggle
 #### 任务运行规则
 
 - 新建任务默认启用，保存后 **10 秒缓冲** 执行首轮，之后按 `interval_minutes` 间隔执行
-- 每次调度只创建 **1 个**，避免批量创建
-- 任务使用内置名称库轮换标签；名称仅是本地标识，不代表已在对应服务注册
+- 每个周期创建的数量：自主任务固定 1 个；定时任务为 `batch_count` 个（受剩余目标与当日额度约束，批内有短暂间隔）
+- 标签按 `label_mode` 生成；名称仅是本地标识，不代表已在对应服务注册
 - 任意创建失败或 iCloud 提示都会**立即暂停**任务并清空 `next_run`，须由用户检查后手动恢复
-- 达到 `daily_limit` 或账号每日总上限 20 时，推迟到次日 00:05 后继续
+- 达到 `daily_limit` 或账号每日总上限 50 时，推迟到次日 00:05 后继续
+- 同一账号任意两次创建尝试至少间隔 20 分钟
 - 达到 `target_count` 后任务自动停止并清空 `next_run`
 - 任务配置持久化在 `data/alias_task.json`，运行日志持久化在 `data/alias_task_logs.json`（重启后自动恢复）
+- 旧版任务向后兼容：缺 `mode` 视为 `scheduled`，缺 `label_mode` 视为 `library`
 
 ## 认证方式
 

@@ -81,13 +81,24 @@ export interface LoginResult {
   expires_at: string
 }
 
+/** 任务类型：auto 自主任务 / scheduled 定时任务 */
+export type TaskMode = 'auto' | 'scheduled'
+
+/** 标签生成方式：library 名称库自动 / sequential 顺序 / hash 哈希 */
+export type LabelMode = 'library' | 'sequential' | 'hash'
+
 /** 自动创建任务(与 internal/server AliasTask 契约一致) */
 export interface AliasTask {
   id: string
   enabled: boolean
   account_id: string
+  mode: TaskMode
   interval_minutes: number
+  batch_count: number
   daily_limit: number
+  label_mode: LabelMode
+  label_prefix?: string
+  hash_length?: number
   max_total: number
   created_count: number
   daily_count: number

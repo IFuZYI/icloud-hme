@@ -16,13 +16,25 @@ import (
 const (
 	// 创建周期下限、上限：防止短周期集中请求触发上游风控。
 	minTaskIntervalMinutes = 20
-	maxTaskIntervalMinutes = 60
-	// 单个自动任务每天最多创建 20 个别名；更低的每日上限可由用户设置。
-	maxTaskDailyLimit = 20
+	maxTaskIntervalMinutes = 24 * 60
+	// 单个账号每天最多创建的别名数（人工 + 所有任务合计的硬上限）。
+	maxTaskDailyLimit = 50
 	maxTaskTotal      = 999
 	// 无论人工或自动路径，同一账号两次创建尝试至少间隔 20 分钟。
 	minCreationCooldown = 20 * time.Minute
+
+	// 任务类型：
+	//   auto      自主任务——设定每天创建数量，由系统自动把创建时刻分摊到全天；
+	//   scheduled 定时任务——每隔固定分钟创建固定数量，直到达到目标总数。
+	taskModeAuto      = "auto"
+	taskModeScheduled = "scheduled"
+
+	// scheduled 任务单个周期允许创建的数量上限（防止一次性爆发）。
+	maxBatchPerInterval = 20
 )
+
+// allowedDailyCounts 是自主任务可选的每日创建数量。
+var allowedDailyCounts = map[int]bool{5: true, 10: true, 15: true, 20: true, 25: true, 30: true, 35: true, 40: true, 45: true, 50: true}
 
 var (
 	errAliasTaskValidation  = errors.New("alias task validation error")
@@ -41,12 +53,24 @@ func aliasTaskPersistenceError(err error) error {
 }
 
 type AliasTask struct {
-	ID              string `json:"id"`
-	Enabled         bool   `json:"enabled"`
-	AccountID       string `json:"account_id"`
-	IntervalMinutes int    `json:"interval_minutes"`
-	// DailyLimit 表示每个自然日最多创建数量，范围为 1-20。
-	DailyLimit   int    `json:"daily_limit"`
+	ID        string `json:"id"`
+	Enabled   bool   `json:"enabled"`
+	AccountID string `json:"account_id"`
+	// Mode 为任务类型：auto(自主) 或 scheduled(定时)。
+	Mode string `json:"mode"`
+	// IntervalMinutes 仅 scheduled 任务使用：每隔多少分钟创建一批。
+	IntervalMinutes int `json:"interval_minutes"`
+	// BatchCount 仅 scheduled 任务使用：每个周期创建的数量。
+	BatchCount int `json:"batch_count"`
+	// DailyLimit 表示每个自然日最多创建数量。
+	// auto 任务：即为用户设定的每天创建数量；scheduled 任务：作为每日安全上限。
+	DailyLimit int `json:"daily_limit"`
+	// LabelMode 为标签生成方式：library(名称库自动) / sequential(顺序) / hash(哈希)。
+	LabelMode string `json:"label_mode"`
+	// LabelPrefix 为手动标签前缀（sequential/hash 模式使用）。
+	LabelPrefix string `json:"label_prefix,omitempty"`
+	// HashLength 为哈希后缀长度（hash 模式使用）。
+	HashLength   int    `json:"hash_length,omitempty"`
 	MaxTotal     int    `json:"max_total"`
 	CreatedCount int    `json:"created_count"`
 	NextNumber   int    `json:"next_number"`
@@ -61,9 +85,14 @@ type AliasTask struct {
 type aliasTaskInput struct {
 	Enabled         bool   `json:"enabled"`
 	AccountID       string `json:"account_id"`
+	Mode            string `json:"mode"`
 	IntervalMinutes int    `json:"interval_minutes"`
+	BatchCount      int    `json:"batch_count"`
 	TargetCount     int    `json:"target_count"`
 	DailyLimit      int    `json:"daily_limit"`
+	LabelMode       string `json:"label_mode"`
+	LabelPrefix     string `json:"label_prefix"`
+	HashLength      int    `json:"hash_length"`
 }
 type aliasTaskFile struct {
 	Tasks          []AliasTask                     `json:"tasks"`
@@ -111,24 +140,97 @@ func normalizeAliasTask(in aliasTaskInput) (AliasTask, error) {
 	if strings.TrimSpace(in.AccountID) == "" {
 		return AliasTask{}, aliasTaskValidationError("account_id 必填")
 	}
-	if in.IntervalMinutes < minTaskIntervalMinutes || in.IntervalMinutes > maxTaskIntervalMinutes {
-		return AliasTask{}, aliasTaskValidationError("interval_minutes 必须为 %d-%d", minTaskIntervalMinutes, maxTaskIntervalMinutes)
-	}
 	if in.TargetCount < 1 || in.TargetCount > maxTaskTotal {
 		return AliasTask{}, aliasTaskValidationError("target_count 必须为 1-%d", maxTaskTotal)
 	}
-	if in.DailyLimit < 1 || in.DailyLimit > maxTaskDailyLimit {
-		return AliasTask{}, aliasTaskValidationError("daily_limit 必须为 1-%d", maxTaskDailyLimit)
+
+	task := AliasTask{
+		ID:         "task_" + uuid.New().String()[:8],
+		Enabled:    in.Enabled,
+		AccountID:  strings.TrimSpace(in.AccountID),
+		MaxTotal:   in.TargetCount,
+		NextNumber: 1,
 	}
-	return AliasTask{
-		ID:              "task_" + uuid.New().String()[:8],
-		Enabled:         in.Enabled,
-		AccountID:       strings.TrimSpace(in.AccountID),
-		IntervalMinutes: in.IntervalMinutes,
-		DailyLimit:      in.DailyLimit,
-		MaxTotal:        in.TargetCount,
-		NextNumber:      1,
-	}, nil
+
+	mode := in.Mode
+	if mode == "" {
+		mode = taskModeAuto
+	}
+	switch mode {
+	case taskModeAuto:
+		// 自主任务：用户设定每天创建数量（5-50，步进 5），系统自动安排时间。
+		if !allowedDailyCounts[in.DailyLimit] {
+			return AliasTask{}, aliasTaskValidationError("daily_limit 必须为 5-%d 之间且为 5 的倍数", maxTaskDailyLimit)
+		}
+		task.Mode = taskModeAuto
+		task.DailyLimit = in.DailyLimit
+		// 自主任务的执行间隔由系统按每日数量自动分摊（见 autoIntervalMinutes）。
+		task.IntervalMinutes = autoIntervalMinutes(in.DailyLimit)
+		task.BatchCount = 1
+	case taskModeScheduled:
+		// 定时任务：每隔 interval 分钟创建 batch 个，直到达到目标总数。
+		if in.IntervalMinutes < minTaskIntervalMinutes || in.IntervalMinutes > maxTaskIntervalMinutes {
+			return AliasTask{}, aliasTaskValidationError("interval_minutes 必须为 %d-%d", minTaskIntervalMinutes, maxTaskIntervalMinutes)
+		}
+		if in.BatchCount < 1 || in.BatchCount > maxBatchPerInterval {
+			return AliasTask{}, aliasTaskValidationError("batch_count 必须为 1-%d", maxBatchPerInterval)
+		}
+		task.Mode = taskModeScheduled
+		task.IntervalMinutes = in.IntervalMinutes
+		task.BatchCount = in.BatchCount
+		task.DailyLimit = maxTaskDailyLimit
+	default:
+		return AliasTask{}, aliasTaskValidationError("mode 必须为 %s 或 %s", taskModeAuto, taskModeScheduled)
+	}
+
+	labelMode := in.LabelMode
+	if labelMode == "" {
+		labelMode = labelModeLibrary
+	}
+	switch labelMode {
+	case labelModeLibrary:
+		task.LabelMode = labelModeLibrary
+	case labelModeSequential, labelModeHash:
+		prefix := strings.TrimSpace(in.LabelPrefix)
+		if prefix == "" {
+			return AliasTask{}, aliasTaskValidationError("label_prefix 必填")
+		}
+		if len([]rune(prefix)) > maxLabelPrefixLen {
+			return AliasTask{}, aliasTaskValidationError("label_prefix 最长 %d 字符", maxLabelPrefixLen)
+		}
+		task.LabelMode = labelMode
+		task.LabelPrefix = prefix
+		if labelMode == labelModeHash {
+			hashLen := in.HashLength
+			if hashLen == 0 {
+				hashLen = minHashLength
+			}
+			if hashLen < minHashLength || hashLen > maxHashLength {
+				return AliasTask{}, aliasTaskValidationError("hash_length 必须为 %d-%d", minHashLength, maxHashLength)
+			}
+			task.HashLength = hashLen
+		}
+	default:
+		return AliasTask{}, aliasTaskValidationError("label_mode 必须为 %s、%s 或 %s", labelModeLibrary, labelModeSequential, labelModeHash)
+	}
+
+	return task, nil
+}
+
+// autoIntervalMinutes 为自主任务按每天创建数量把 24 小时均匀分摊出的执行间隔。
+// 例如每天 10 个 → 每 144 分钟一次；同时受最小冷却窗口约束不会低于下限。
+func autoIntervalMinutes(dailyCount int) int {
+	if dailyCount < 1 {
+		dailyCount = 1
+	}
+	interval := (24 * 60) / dailyCount
+	if interval < minTaskIntervalMinutes {
+		interval = minTaskIntervalMinutes
+	}
+	if interval > maxTaskIntervalMinutes {
+		interval = maxTaskIntervalMinutes
+	}
+	return interval
 }
 func newAutoTaskManager(file string, backend Backend) *autoTaskManager {
 	m := &autoTaskManager{file: file, logFile: filepath.Join(filepath.Dir(file), "alias_task_logs.json"), backend: backend, tasks: map[string]AliasTask{}, stops: map[string]chan struct{}{}, done: map[string]chan struct{}{}, creating: map[string]bool{}, manualDaily: map[string]dailyCreationCounter{}, creationGuards: map[string]creationGuard{}, batchDelay: 3 * time.Second, writeState: writeJSONAtomic, writeLogs: writeJSONAtomic}
@@ -155,6 +257,16 @@ func (m *autoTaskManager) load() {
 			}
 			if t.NextNumber < 1 {
 				t.NextNumber = 1
+			}
+			// 兼容旧任务：旧记录没有 mode 字段，按定时任务解释。
+			if t.Mode == "" {
+				t.Mode = taskModeScheduled
+			}
+			if t.LabelMode == "" {
+				t.LabelMode = labelModeLibrary
+			}
+			if t.BatchCount < 1 {
+				t.BatchCount = 1
 			}
 			// 兼容旧任务：旧字段没有 daily_limit 时采用新的安全默认值。
 			if t.DailyLimit < 1 || t.DailyLimit > maxTaskDailyLimit {
@@ -440,7 +552,12 @@ func (m *autoTaskManager) runOnce(id string) AliasTask {
 		return t
 	}
 	m.creating[id] = true
-	count := 1
+	// 定时任务每个周期创建 BatchCount 个；自主任务每次 1 个。数量还需
+	// 受剩余目标数与当日额度约束，逐个创建时再次校验。
+	count := t.BatchCount
+	if count < 1 {
+		count = 1
+	}
 	if remaining < count {
 		count = remaining
 	}
@@ -449,6 +566,10 @@ func (m *autoTaskManager) runOnce(id string) AliasTask {
 	success := 0
 	lastErr := ""
 	for i := 0; i < count; i++ {
+		// 同一周期内连续创建时留出间隔，避免瞬时高频触发上游风控。
+		if i > 0 {
+			time.Sleep(m.batchDelay)
+		}
 		m.mu.Lock()
 		current, exists := m.tasks[id]
 		if exists {
@@ -471,7 +592,7 @@ func (m *autoTaskManager) runOnce(id string) AliasTask {
 			m.mu.Unlock()
 			break
 		}
-		label := aliasLabelFor(current.NextNumber - 1)
+		label := current.labelFor(current.NextNumber)
 		reserved := current
 		reserved.NextNumber++
 		reserved.DailyCount++

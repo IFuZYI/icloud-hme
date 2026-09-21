@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { request, ApiError } from '../api/client'
+import { fetchAccounts } from '../api/cache'
 import AliasTaskForm from '../components/AliasTaskForm'
 import TaskMoreMenu from '../components/TaskMoreMenu'
 import type { AccountSummary, AliasTask } from '../api/types'
@@ -17,7 +18,7 @@ export default function AliasTasksPage() {
   async function load() {
     try {
       const [taskList, accountList] = await Promise.all([
-        request<AliasTask[]>('/api/alias-tasks'), request<AccountSummary[]>('/api/accounts'),
+        request<AliasTask[]>('/api/alias-tasks'), fetchAccounts<AccountSummary[]>(),
       ])
       setTasks(taskList); setAccounts(accountList); setError('')
     } catch (e) { setError(e instanceof ApiError ? e.message : '加载失败') }
@@ -38,18 +39,26 @@ export default function AliasTasksPage() {
     } catch (e) { setError(e instanceof ApiError ? e.message : '操作失败') }
   }
 
+  const intervalText = (minutes: number) => (minutes % 60 === 0 ? `${minutes / 60} 小时` : `${minutes} 分钟`)
+  const labelText = (task: AliasTask) => {
+    if (task.label_mode === 'sequential') return `${task.label_prefix ?? ''}001 顺序`
+    if (task.label_mode === 'hash') return `${task.label_prefix ?? ''}+哈希`
+    return '名称库自动'
+  }
+
   return <section>
     <div className="task-page-header">
-      <div><h2>自动创建任务</h2><p>每次仅创建 1 个，周期限制为 20–60 分钟；同账号创建尝试至少间隔 20 分钟、每日最多 20 个，任何失败立即暂停。</p></div>
+      <div><h2>自动创建任务</h2><p>自主任务按每天数量自动安排时间，定时任务按固定周期创建；两者都在达到目标数量后停止。同账号创建尝试至少间隔 20 分钟、每日合计最多 50 个，任何失败立即暂停。</p></div>
       <button className="primary task-create-button" onClick={() => { setEdit(undefined); setOpen(true) }}><IconPlus size={16} />新建任务</button>
     </div>
     {error && <div className="alert-error" role="alert">{error}</div>}
     {tasks.length === 0 ? <p className="empty-state">暂无自动创建任务</p> : <div className="task-card-grid">
       {tasks.map((task) => {
         const percent = Math.min(100, Math.round((task.created_count / task.max_total) * 100))
+        const isAuto = task.mode === 'auto'
         return <article className={`task-card ${task.enabled ? 'task-card-enabled' : 'task-card-disabled'}`} key={task.id}>
-          <div className="task-card-header"><div className="task-card-title"><div className="task-title-line"><h3>名称库自动标签</h3><span className="task-type-badge">低频创建</span></div><p title={accountName(task.account_id)}>{accountName(task.account_id)}</p></div><TaskMoreMenu enabled={task.enabled} onToggle={() => void action(task, 'toggle')} onEdit={() => { setEdit(task); setOpen(true) }} onDelete={() => void action(task, 'delete')} /></div>
-          <div className="task-card-meta"><span><small>创建周期</small><strong>{task.interval_minutes === 60 ? '1 小时' : `${task.interval_minutes} 分钟`}</strong></span><span><small>今日</small><strong>{task.daily_count} / {task.daily_limit} 个</strong></span></div>
+          <div className="task-card-header"><div className="task-card-title"><div className="task-title-line"><h3>{labelText(task)}</h3><span className="task-type-badge">{isAuto ? '自主任务' : '定时任务'}</span></div><p title={accountName(task.account_id)}>{accountName(task.account_id)}</p></div><TaskMoreMenu enabled={task.enabled} onToggle={() => void action(task, 'toggle')} onEdit={() => { setEdit(task); setOpen(true) }} onDelete={() => void action(task, 'delete')} /></div>
+          <div className="task-card-meta"><span><small>{isAuto ? '每天数量' : '创建周期'}</small><strong>{isAuto ? `${task.daily_limit} 个/天` : `每${intervalText(task.interval_minutes)} ${task.batch_count} 个`}</strong></span><span><small>今日</small><strong>{task.daily_count} / {task.daily_limit} 个</strong></span></div>
           <div className="task-progress-label"><span>进度</span><strong>{task.created_count} / {task.max_total}（{percent}%）</strong></div>
           <div className="task-next-run">下次执行：{task.enabled ? (task.next_run ? new Date(task.next_run).toLocaleString() : '已达上限或等待下一轮') : '已暂停'}</div>
           <div className="task-progress" role="progressbar" aria-valuenow={task.created_count} aria-valuemin={0} aria-valuemax={task.max_total} aria-label={`${task.created_count}/${task.max_total}`}><div className="task-progress-fill" style={{ width: `${percent}%` }} /></div>

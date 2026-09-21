@@ -9,7 +9,8 @@ COPY web/package.json web/package-lock.json ./
 RUN --mount=type=cache,target=/root/.npm \
     npm ci
 COPY web/ ./
-RUN npm run check
+# 镜像构建只产出前端资源;lint/单测属于 CI/本地环节,不在此拖慢构建
+RUN npm run build
 
 # ── 第二阶段:编译 Go 二进制(含内嵌前端) ──
 FROM golang:1.26-alpine AS builder
@@ -23,9 +24,9 @@ COPY . .
 # 复制第一阶段生成的前端产物到内嵌目录
 COPY --from=web-builder /src/internal/webui/dist ./internal/webui/dist
 # 挂载模块与编译缓存,增量构建可复用已编译的包对象
+# 只编译二进制;go test/vet 属于 CI/本地环节,不在镜像构建内执行
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    go test ./... && go vet ./... && \
     CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -buildid=" -o icloud-hme .
 
 # ── 第三阶段:运行时(仅二进制,无 Node) ──

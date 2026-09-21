@@ -68,7 +68,7 @@ Gin Server /api ─────────────────────�
 - **HTTP handler 不直接依赖 iCloud/IMAP 客户端**：只调用 `server.Backend`。生产实现是 `managerBackend`，测试使用 fake backend。
 - **`account.Account` 是内部敏感模型**：包含 Cookie、App Password、代理和外部邮箱密码；HTTP 响应只能使用 `account.Summary`。
 - **所有 iCloud Cookie 刷新后必须持久化**：HME 业务调用后通过 `Manager.SaveCookies` 保存客户端持有的最新 Cookie。
-- **自动任务状态写入必须原子化**：任务状态和日志分别由 `writeJSONAtomic` 写入，避免中断后产生半个 JSON 文件；调度每次只允许创建一个、周期为 20–60 分钟，同账号创建尝试至少间隔 20 分钟，且每天最多 20 个。
+- **自动任务状态写入必须原子化**：任务状态和日志分别由 `writeJSONAtomic` 写入，避免中断后产生半个 JSON 文件；任务分自主（每天 5–50 个自动分摊时刻，每次 1 个）与定时（每 20–1440 分钟创建 1–20 个）两类，同账号创建尝试至少间隔 20 分钟，且每天最多 50 个。
 - **收件箱列表是两阶段加载**：先取 IMAP 信封，再由 `POST /api/inbox/previews` 分批补正文摘要；不要把正文抓取重新放回首屏列表路径。
 - **账号页面局部状态优先**：列表刷新、弹窗目标与异步提交状态都位于 `AccountsPage` 及其弹窗内；当前规模无需引入 Redux 等全局状态库。
 
@@ -127,7 +127,7 @@ Gin Server /api ─────────────────────�
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/alias-labels` | 获取人工创建与自动任务共用的标签名称库 |
-| POST | `/api/create` | 使用名称库标签创建一个 HME 别名（写）；账号每天最多 20 个 |
+| POST | `/api/create` | 使用名称库标签创建一个 HME 别名（写）；账号每天最多 50 个 |
 | GET | `/api/aliases?account_id=…` | 获取账号别名列表 |
 | POST | `/api/aliases/batch` | 批量停用、启用或删除，1–200 项（写） |
 | POST | `/api/aliases/:id/deactivate` | 停用别名（写） |
@@ -158,7 +158,7 @@ Gin Server /api ─────────────────────�
 | `hme.Alias` / `Alias` | `internal/hme/client.go`、`web/src/api/types.ts` | HME 别名，字段使用 iCloud camelCase |
 | `InboxResult` | `internal/server/backend.go`、`web/src/api/types.ts` | 邮件分页结果，包含 `total`、`offset`、`method` 和可选 `warning` |
 | `mail.Message` / `FullMessage` | `internal/mail/client.go`、`web/src/api/types.ts` | 邮件摘要和完整正文 |
-| `AliasTask` / `AliasTaskLog` | `internal/server/auto_task.go` | 低频自动创建状态（周期、目标、每日计数）与审计日志 |
+| `AliasTask` / `AliasTaskLog` | `internal/server/auto_task.go` | 自动创建状态（任务类型 mode、标签模式 label_mode、周期、目标、每日计数）与审计日志 |
 
 ### 现有文档差异
 

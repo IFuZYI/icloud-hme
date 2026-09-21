@@ -30,13 +30,90 @@ func (f *taskBackend) CreateAlias(_ string, label string) (*hme.CreateResult, er
 	return &hme.CreateResult{Email: label}, nil
 }
 func TestNormalizeAliasTaskValidation(t *testing.T) {
-	in := aliasTaskInput{Enabled: true, AccountID: "a", IntervalMinutes: 20, TargetCount: 20, DailyLimit: 20}
+	// 定时任务：interval/batch 校验。
+	in := aliasTaskInput{Enabled: true, AccountID: "a", Mode: taskModeScheduled, IntervalMinutes: 20, BatchCount: 1, TargetCount: 20}
 	if _, e := normalizeAliasTask(in); e != nil {
 		t.Fatal(e)
 	}
 	in.IntervalMinutes = 19
 	if _, e := normalizeAliasTask(in); e == nil {
 		t.Fatal("interval_minutes=19 should fail")
+	}
+
+	// 自主任务：每日数量必须为 5 的倍数且 5-50。
+	auto := aliasTaskInput{Enabled: true, AccountID: "a", Mode: taskModeAuto, TargetCount: 20, DailyLimit: 10}
+	if _, e := normalizeAliasTask(auto); e != nil {
+		t.Fatal(e)
+	}
+	auto.DailyLimit = 12
+	if _, e := normalizeAliasTask(auto); e == nil {
+		t.Fatal("daily_limit=12 should fail")
+	}
+
+	// 手动顺序标签需要前缀。
+	seq := aliasTaskInput{Enabled: true, AccountID: "a", Mode: taskModeAuto, TargetCount: 5, DailyLimit: 5, LabelMode: labelModeSequential}
+	if _, e := normalizeAliasTask(seq); e == nil {
+		t.Fatal("sequential label without prefix should fail")
+	}
+	seq.LabelPrefix = "邮箱"
+	got, e := normalizeAliasTask(seq)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if label := got.labelFor(1); label != "邮箱001" {
+		t.Fatalf("sequential label = %q, want 邮箱001", label)
+	}
+}
+
+func TestAliasLabelLibraryExpandedAndDeduped(t *testing.T) {
+	if len(aliasLabelLibrary) < 500 {
+		t.Fatalf("expected 500+ curated labels, got %d", len(aliasLabelLibrary))
+	}
+	seen := map[string]bool{}
+	for _, name := range aliasLabelLibrary {
+		if name == "" {
+			t.Fatal("library contains empty label")
+		}
+		if seen[name] {
+			t.Fatalf("library has duplicate label %q", name)
+		}
+		seen[name] = true
+	}
+}
+
+func TestLabelForHashModeUsesPrefixAndLength(t *testing.T) {
+	task := AliasTask{LabelMode: labelModeHash, LabelPrefix: "svc-", HashLength: 6}
+	label := task.labelFor(1)
+	if !strings.HasPrefix(label, "svc-") {
+		t.Fatalf("hash label missing prefix: %q", label)
+	}
+	suffix := strings.TrimPrefix(label, "svc-")
+	if len(suffix) != 6 {
+		t.Fatalf("hash suffix length = %d, want 6 (%q)", len(suffix), label)
+	}
+	if second := task.labelFor(1); second == label {
+		t.Fatalf("hash labels should differ across calls: %q == %q", label, second)
+	}
+}
+
+func TestAutoTaskScheduledBatchCreatesMultiplePerRun(t *testing.T) {
+	be := &taskBackend{}
+	m := newAutoTaskManager(t.TempDir()+"/task.json", be)
+	m.batchDelay = 0
+	task, err := m.create(aliasTaskInput{Enabled: false, AccountID: "a", Mode: taskModeScheduled, IntervalMinutes: 20, BatchCount: 3, TargetCount: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	task.Enabled = true
+	m.tasks[task.ID] = task
+	m.mu.Unlock()
+	out := m.runOnce(task.ID)
+	if len(be.labels) != 3 {
+		t.Fatalf("scheduled batch should create batch_count aliases in one run, got %d", len(be.labels))
+	}
+	if out.CreatedCount != 3 {
+		t.Fatalf("created_count = %d, want 3", out.CreatedCount)
 	}
 }
 

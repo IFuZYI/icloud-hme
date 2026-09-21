@@ -4,6 +4,7 @@ import { request, ApiError } from '../api/client'
 
 interface AppPasswordDialogProps {
   accountId: string
+  accountEmail?: string
   open: boolean
   onClose: () => void
   onSaved: () => void
@@ -12,11 +13,12 @@ interface AppPasswordDialogProps {
 /** 设置 App 专用密码对话框:提交后清空 */
 export default function AppPasswordDialog({
   accountId,
+  accountEmail,
   open,
   onClose,
   onSaved,
 }: AppPasswordDialogProps) {
-  const [email, setEmail] = useState('')
+  const [email, setEmail] = useState(accountEmail ?? '')
   const [appPassword, setAppPassword] = useState('')
   const [error, setError] = useState('')
   const [submitting, setSubmitting] = useState(false)

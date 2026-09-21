@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { request, ApiError } from '../api/client'
+import { fetchAccounts } from '../api/cache'
 import type { AccountSummary, Alias, FullMessage, InboxResult, InboxMessage } from '../api/types'
 import AsyncState from '../components/AsyncState'
 import Dialog from '../components/Dialog'
@@ -163,7 +164,7 @@ export default function InboxPage() {
   // 加载账号列表并初始化筛选状态(只保存 account_id/alias/limit/days)
   useEffect(() => {
     let cancelled = false
-    request<AccountSummary[]>('/api/accounts')
+    fetchAccounts<AccountSummary[]>()
       .then((data) => {
         if (cancelled) return
         setAccounts(data)
