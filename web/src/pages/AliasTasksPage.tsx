@@ -40,7 +40,7 @@ export default function AliasTasksPage() {
 
   return <section>
     <div className="task-page-header">
-      <div><h2>自动创建任务</h2><p>新建任务 10 秒后执行首轮，每个邮箱间隔 3 秒</p></div>
+      <div><h2>自动创建任务</h2><p>每次仅创建 1 个，周期限制为 20–60 分钟；同账号创建尝试至少间隔 20 分钟、每日最多 20 个，任何失败立即暂停。</p></div>
       <button className="primary task-create-button" onClick={() => { setEdit(undefined); setOpen(true) }}><IconPlus size={16} />新建任务</button>
     </div>
     {error && <div className="alert-error" role="alert">{error}</div>}
@@ -48,8 +48,8 @@ export default function AliasTasksPage() {
       {tasks.map((task) => {
         const percent = Math.min(100, Math.round((task.created_count / task.max_total) * 100))
         return <article className={`task-card ${task.enabled ? 'task-card-enabled' : 'task-card-disabled'}`} key={task.id}>
-          <div className="task-card-header"><div className="task-card-title"><div className="task-title-line"><h3 title={task.label_prefix}>{task.label_prefix}</h3><span className="task-type-badge">隐私邮箱</span></div><p title={accountName(task.account_id)}>{accountName(task.account_id)}</p></div><TaskMoreMenu enabled={task.enabled} onToggle={() => void action(task, 'toggle')} onEdit={() => { setEdit(task); setOpen(true) }} onDelete={() => void action(task, 'delete')} /></div>
-          <div className="task-card-meta"><span><small>每小时创建</small><strong>{task.batch_count} 个</strong></span><span><small>间隔</small><strong>{task.interval_minutes === 60 ? '1 小时' : `${task.interval_minutes} 分钟`}</strong></span></div>
+          <div className="task-card-header"><div className="task-card-title"><div className="task-title-line"><h3>名称库自动标签</h3><span className="task-type-badge">低频创建</span></div><p title={accountName(task.account_id)}>{accountName(task.account_id)}</p></div><TaskMoreMenu enabled={task.enabled} onToggle={() => void action(task, 'toggle')} onEdit={() => { setEdit(task); setOpen(true) }} onDelete={() => void action(task, 'delete')} /></div>
+          <div className="task-card-meta"><span><small>创建周期</small><strong>{task.interval_minutes === 60 ? '1 小时' : `${task.interval_minutes} 分钟`}</strong></span><span><small>今日</small><strong>{task.daily_count} / {task.daily_limit} 个</strong></span></div>
           <div className="task-progress-label"><span>进度</span><strong>{task.created_count} / {task.max_total}（{percent}%）</strong></div>
           <div className="task-next-run">下次执行：{task.enabled ? (task.next_run ? new Date(task.next_run).toLocaleString() : '已达上限或等待下一轮') : '已暂停'}</div>
           <div className="task-progress" role="progressbar" aria-valuenow={task.created_count} aria-valuemin={0} aria-valuemax={task.max_total} aria-label={`${task.created_count}/${task.max_total}`}><div className="task-progress-fill" style={{ width: `${percent}%` }} /></div>

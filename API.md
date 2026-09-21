@@ -21,7 +21,7 @@ HTTP JSON API，所有接口返回统一格式：
 }
 ```
 
-**稳定错误码：** `AUTH_REQUIRED`、`INVALID_CREDENTIALS`、`RATE_LIMITED`、`CSRF_INVALID`、`VALIDATION_ERROR`、`ACCOUNT_NOT_FOUND`、`OTP_REQUIRED`、`OTP_INVALID`、`UPSTREAM_UNAUTHORIZED`、`UPSTREAM_FAILURE`、`INTERNAL_ERROR`
+**稳定错误码：** `AUTH_REQUIRED`、`INVALID_CREDENTIALS`、`RATE_LIMITED`、`CREATION_COOLDOWN`、`CREATION_LIMIT_REACHED`、`CSRF_INVALID`、`VALIDATION_ERROR`、`ACCOUNT_NOT_FOUND`、`OTP_REQUIRED`、`OTP_INVALID`、`UPSTREAM_UNAUTHORIZED`、`UPSTREAM_FAILURE`、`INTERNAL_ERROR`
 
 **安全约定：**
 
@@ -225,11 +225,14 @@ X-CSRF-Token: <token>
 POST /api/create
 X-CSRF-Token: <token>
 
-{"account_id": "acc_1", "label": "注册某网站"}
+{"account_id": "acc_1", "label": "GitHub"}
 ```
 
 - `account_id` 必填
-- `label` 可选，最长 200 字符
+- `label` 必填，必须来自 `GET /api/alias-labels` 返回的名称库
+- 同一账号任何两次创建尝试（成功或失败、人工或自动）至少相隔 20 分钟；过早请求返回 `429 CREATION_COOLDOWN`
+- 单个账号当天最多创建 20 个（人工创建与自动任务合并统计）；超过上限返回 `429 CREATION_LIMIT_REACHED`
+- 若上游创建失败，已预留的人工创建额度会归还
 
 **响应：**
 
@@ -238,14 +241,26 @@ X-CSRF-Token: <token>
   "success": true,
   "data": {
     "email": "xyz123@icloud.com",
-    "label": "注册某网站",
+    "label": "GitHub",
     "created_at": "2026-01-15T10:30:00+08:00",
     "account_id": "acc_1"
   }
 }
 ```
 
-### 13. 读取邮件
+### 13. 获取别名标签名称库
+
+```http
+GET /api/alias-labels
+```
+
+返回人工创建和自动任务共用的常用服务名称数组，例如：
+
+```json
+{"success": true, "data": ["GitHub", "GitLab", "Google Workspace", "Notion", "Slack"]}
+```
+
+### 14. 读取邮件
 
 ```http
 GET /api/inbox?account_id=acc_1&alias=xyz123@icloud.com&limit=20&days=7
@@ -303,7 +318,7 @@ IMAP 不可用而回退到 Web API 时，响应会额外带 `warning` 字段说�
 
 `date` 取邮件 `Date` 头（缺失时回退 IMAP `INTERNALDATE`）；`days` 过滤与排序改用服务端收件时间 `INTERNALDATE`，因为 `Date` 由发件人填写，不可靠。
 
-### 14. 列出别名
+### 15. 列出别名
 
 ```http
 GET /api/aliases?account_id=acc_1
@@ -330,7 +345,7 @@ GET /api/aliases?account_id=acc_1
 }
 ```
 
-### 15. 停用/激活/删除别名
+### 16. 停用/激活/删除别名
 
 ```http
 POST /api/aliases/:id/deactivate
@@ -345,7 +360,7 @@ X-CSRF-Token: <token>
 - `account_id` 必填
 - 删除不可恢复；直接删除失败时会先停用再删
 
-### 16. 批量停用/激活/删除别名
+### 17. 批量停用/激活/删除别名
 
 ```http
 POST /api/aliases/batch
@@ -382,7 +397,7 @@ X-CSRF-Token: <token>
 }
 ```
 
-### 17. 重新加载配置
+### 18. 重新加载配置
 
 ```http
 POST /api/reload
@@ -467,7 +482,7 @@ curl -b cookies.txt "$BASE/api/inbox?account_id=acc_1&limit=10"
 
 ## 限制
 
-- **创建频率**：iCloud 限制别名创建频率，过快会返回 429（服务端自动重试最多 5 次）
+- **创建频率**：同账号所有创建尝试至少相隔 20 分钟；自动任务限制为 20–60 分钟一次、每次 1 个，并对人工与自动创建合计执行每账号每天 20 个上限；上游失败不自动重试，自动任务会暂停等待人工确认。
 - **Cookie 有效期**：约 24 小时，需定期更新
 - **邮件读取**：依赖 IMAP 连接，超时默认 30 秒
 - **请求体上限**：1 MiB

@@ -13,12 +13,23 @@ import (
 	"github.com/google/uuid"
 )
 
-const maxTaskTotal = 999
+const (
+	// 创建周期下限、上限：防止短周期集中请求触发上游风控。
+	minTaskIntervalMinutes = 20
+	maxTaskIntervalMinutes = 60
+	// 单个自动任务每天最多创建 20 个别名；更低的每日上限可由用户设置。
+	maxTaskDailyLimit = 20
+	maxTaskTotal      = 999
+	// 无论人工或自动路径，同一账号两次创建尝试至少间隔 20 分钟。
+	minCreationCooldown = 20 * time.Minute
+)
 
 var (
 	errAliasTaskValidation  = errors.New("alias task validation error")
 	errAliasTaskNotFound    = errors.New("alias task not found")
 	errAliasTaskPersistence = errors.New("alias task persistence error")
+	errCreationCooldown     = errors.New("creation cooldown")
+	errCreationDailyLimit   = errors.New("creation daily limit")
 )
 
 func aliasTaskValidationError(format string, args ...any) error {
@@ -34,27 +45,41 @@ type AliasTask struct {
 	Enabled         bool   `json:"enabled"`
 	AccountID       string `json:"account_id"`
 	IntervalMinutes int    `json:"interval_minutes"`
-	BatchCount      int    `json:"batch_count"`
-	MaxTotal        int    `json:"max_total"`
-	CreatedCount    int    `json:"created_count"`
-	LabelPrefix     string `json:"label_prefix"`
-	NextNumber      int    `json:"next_number"`
-	LastRun         string `json:"last_run,omitempty"`
-	LastSuccess     int    `json:"last_success"`
-	LastError       string `json:"last_error,omitempty"`
-	NextRun         string `json:"next_run,omitempty"`
+	// DailyLimit 表示每个自然日最多创建数量，范围为 1-20。
+	DailyLimit   int    `json:"daily_limit"`
+	MaxTotal     int    `json:"max_total"`
+	CreatedCount int    `json:"created_count"`
+	NextNumber   int    `json:"next_number"`
+	DailyCount   int    `json:"daily_count"`
+	DailyDate    string `json:"daily_date,omitempty"`
+	LastRun      string `json:"last_run,omitempty"`
+	LastSuccess  int    `json:"last_success"`
+	LastError    string `json:"last_error,omitempty"`
+	NextRun      string `json:"next_run,omitempty"`
 }
 
 type aliasTaskInput struct {
 	Enabled         bool   `json:"enabled"`
 	AccountID       string `json:"account_id"`
 	IntervalMinutes int    `json:"interval_minutes"`
-	BatchCount      int    `json:"batch_count"`
-	MaxTotal        int    `json:"max_total"`
-	LabelPrefix     string `json:"label_prefix"`
+	TargetCount     int    `json:"target_count"`
+	DailyLimit      int    `json:"daily_limit"`
 }
 type aliasTaskFile struct {
-	Tasks []AliasTask `json:"tasks"`
+	Tasks          []AliasTask                     `json:"tasks"`
+	ManualDaily    map[string]dailyCreationCounter `json:"manual_daily,omitempty"`
+	CreationGuards map[string]creationGuard        `json:"creation_guards,omitempty"`
+}
+
+type dailyCreationCounter struct {
+	Date  string `json:"date"`
+	Count int    `json:"count"`
+}
+
+// creationGuard 记录账号最近一次创建尝试。即使上游失败也保留记录，避免失败
+// 后立刻重试造成更高风险。
+type creationGuard struct {
+	LastAttempt string `json:"last_attempt"`
 }
 
 type AliasTaskLog struct {
@@ -66,44 +91,47 @@ type AliasTaskLog struct {
 }
 
 type autoTaskManager struct {
-	mu         sync.Mutex
-	tasks      map[string]AliasTask
-	file       string
-	backend    Backend
-	stops      map[string]chan struct{}
-	done       map[string]chan struct{}
-	creating   map[string]bool
-	logs       []AliasTaskLog
-	logFile    string
-	batchDelay time.Duration
-	writeState func(string, any) error
-	writeLogs  func(string, any) error
+	mu             sync.Mutex
+	tasks          map[string]AliasTask
+	file           string
+	backend        Backend
+	stops          map[string]chan struct{}
+	done           map[string]chan struct{}
+	creating       map[string]bool
+	manualDaily    map[string]dailyCreationCounter
+	creationGuards map[string]creationGuard
+	logs           []AliasTaskLog
+	logFile        string
+	batchDelay     time.Duration
+	writeState     func(string, any) error
+	writeLogs      func(string, any) error
 }
 
 func normalizeAliasTask(in aliasTaskInput) (AliasTask, error) {
 	if strings.TrimSpace(in.AccountID) == "" {
 		return AliasTask{}, aliasTaskValidationError("account_id 必填")
 	}
-	if in.IntervalMinutes < 1 || in.IntervalMinutes > 10080 {
-		return AliasTask{}, aliasTaskValidationError("interval_minutes 必须为 1-10080")
+	if in.IntervalMinutes < minTaskIntervalMinutes || in.IntervalMinutes > maxTaskIntervalMinutes {
+		return AliasTask{}, aliasTaskValidationError("interval_minutes 必须为 %d-%d", minTaskIntervalMinutes, maxTaskIntervalMinutes)
 	}
-	if in.BatchCount < 1 || in.BatchCount > maxTaskTotal {
-		return AliasTask{}, aliasTaskValidationError("batch_count 必须为 1-%d", maxTaskTotal)
+	if in.TargetCount < 1 || in.TargetCount > maxTaskTotal {
+		return AliasTask{}, aliasTaskValidationError("target_count 必须为 1-%d", maxTaskTotal)
 	}
-	if in.MaxTotal < 1 || in.MaxTotal > maxTaskTotal {
-		return AliasTask{}, aliasTaskValidationError("max_total 必须为 1-%d", maxTaskTotal)
+	if in.DailyLimit < 1 || in.DailyLimit > maxTaskDailyLimit {
+		return AliasTask{}, aliasTaskValidationError("daily_limit 必须为 1-%d", maxTaskDailyLimit)
 	}
-	prefix := strings.TrimSpace(in.LabelPrefix)
-	if prefix == "" {
-		return AliasTask{}, aliasTaskValidationError("label_prefix 必填")
-	}
-	if len([]rune(prefix)) > 180 {
-		return AliasTask{}, aliasTaskValidationError("label_prefix 不能超过 180 个字符")
-	}
-	return AliasTask{ID: "task_" + uuid.New().String()[:8], Enabled: in.Enabled, AccountID: strings.TrimSpace(in.AccountID), IntervalMinutes: in.IntervalMinutes, BatchCount: in.BatchCount, MaxTotal: in.MaxTotal, LabelPrefix: prefix, NextNumber: 1}, nil
+	return AliasTask{
+		ID:              "task_" + uuid.New().String()[:8],
+		Enabled:         in.Enabled,
+		AccountID:       strings.TrimSpace(in.AccountID),
+		IntervalMinutes: in.IntervalMinutes,
+		DailyLimit:      in.DailyLimit,
+		MaxTotal:        in.TargetCount,
+		NextNumber:      1,
+	}, nil
 }
 func newAutoTaskManager(file string, backend Backend) *autoTaskManager {
-	m := &autoTaskManager{file: file, logFile: filepath.Join(filepath.Dir(file), "alias_task_logs.json"), backend: backend, tasks: map[string]AliasTask{}, stops: map[string]chan struct{}{}, done: map[string]chan struct{}{}, creating: map[string]bool{}, batchDelay: 3 * time.Second, writeState: writeJSONAtomic, writeLogs: writeJSONAtomic}
+	m := &autoTaskManager{file: file, logFile: filepath.Join(filepath.Dir(file), "alias_task_logs.json"), backend: backend, tasks: map[string]AliasTask{}, stops: map[string]chan struct{}{}, done: map[string]chan struct{}{}, creating: map[string]bool{}, manualDaily: map[string]dailyCreationCounter{}, creationGuards: map[string]creationGuard{}, batchDelay: 3 * time.Second, writeState: writeJSONAtomic, writeLogs: writeJSONAtomic}
 	m.load()
 	m.loadLogs()
 	return m
@@ -115,6 +143,12 @@ func (m *autoTaskManager) load() {
 	}
 	var f aliasTaskFile
 	if json.Unmarshal(raw, &f) == nil {
+		if f.ManualDaily != nil {
+			m.manualDaily = f.ManualDaily
+		}
+		if f.CreationGuards != nil {
+			m.creationGuards = f.CreationGuards
+		}
 		for _, t := range f.Tasks {
 			if t.ID == "" {
 				t.ID = "task_" + uuid.New().String()[:8]
@@ -122,12 +156,19 @@ func (m *autoTaskManager) load() {
 			if t.NextNumber < 1 {
 				t.NextNumber = 1
 			}
+			// 兼容旧任务：旧字段没有 daily_limit 时采用新的安全默认值。
+			if t.DailyLimit < 1 || t.DailyLimit > maxTaskDailyLimit {
+				t.DailyLimit = maxTaskDailyLimit
+			}
+			if t.IntervalMinutes < minTaskIntervalMinutes || t.IntervalMinutes > maxTaskIntervalMinutes {
+				t.IntervalMinutes = maxTaskIntervalMinutes
+			}
 			m.tasks[t.ID] = t
 		}
 	}
 }
 func (m *autoTaskManager) saveLocked() error {
-	return m.writeState(m.file, aliasTaskFile{Tasks: m.taskListLocked()})
+	return m.writeState(m.file, aliasTaskFile{Tasks: m.taskListLocked(), ManualDaily: m.manualDaily, CreationGuards: m.creationGuards})
 }
 func (m *autoTaskManager) taskListLocked() []AliasTask {
 	out := make([]AliasTask, 0, len(m.tasks))
@@ -213,6 +254,8 @@ func (m *autoTaskManager) update(id string, in aliasTaskInput) (AliasTask, error
 	n.Enabled = true
 	n.NextNumber = old.NextNumber
 	n.CreatedCount = old.CreatedCount
+	n.DailyCount = old.DailyCount
+	n.DailyDate = old.DailyDate
 	n.LastRun = old.LastRun
 	n.LastSuccess = old.LastSuccess
 	n.LastError = old.LastError
@@ -371,14 +414,34 @@ func (m *autoTaskManager) runOnce(id string) AliasTask {
 		return t
 	}
 	t, ok := m.tasks[id]
+	if ok {
+		t = resetDailyCount(t, time.Now())
+		m.tasks[id] = t
+	}
 	if !ok || !t.Enabled || t.CreatedCount >= t.MaxTotal {
 		m.mu.Unlock()
 		return t
 	}
-	m.creating[id] = true
 	remaining := t.MaxTotal - t.CreatedCount
-	count := t.BatchCount
-	if count > remaining {
+	now := time.Now()
+	today := taskDate(now)
+	if m.accountDailyCountLocked(t.AccountID, today) >= maxTaskDailyLimit || t.DailyCount >= t.DailyLimit {
+		t.NextRun = nextDailyRun(now).Format(time.RFC3339)
+		m.tasks[id] = t
+		_ = m.saveLocked()
+		m.mu.Unlock()
+		return t
+	}
+	if cooldown := m.creationCooldownRemainingLocked(t.AccountID, now); cooldown > 0 {
+		t.NextRun = now.Add(cooldown).Format(time.RFC3339)
+		m.tasks[id] = t
+		_ = m.saveLocked()
+		m.mu.Unlock()
+		return t
+	}
+	m.creating[id] = true
+	count := 1
+	if remaining < count {
 		count = remaining
 	}
 	m.mu.Unlock()
@@ -386,19 +449,32 @@ func (m *autoTaskManager) runOnce(id string) AliasTask {
 	success := 0
 	lastErr := ""
 	for i := 0; i < count; i++ {
-		if i > 0 {
-			time.Sleep(3 * time.Second)
-		}
-
 		m.mu.Lock()
 		current, exists := m.tasks[id]
-		if !exists || !current.Enabled || current.CreatedCount >= current.MaxTotal {
+		if exists {
+			current = resetDailyCount(current, time.Now())
+			m.tasks[id] = current
+		}
+		if !exists || !current.Enabled || current.CreatedCount >= current.MaxTotal || current.DailyCount >= current.DailyLimit || m.accountDailyCountLocked(current.AccountID, taskDate(time.Now())) >= maxTaskDailyLimit {
 			m.mu.Unlock()
 			break
 		}
-		label := fmt.Sprintf("%s%03d", current.LabelPrefix, current.NextNumber)
+		if err := m.reserveAutoCreationAttemptLocked(current.AccountID, time.Now()); err != nil {
+			lastErr = "创建冷却状态保存失败：" + err.Error()
+			current.Enabled = false
+			current.NextRun = ""
+			current.LastRun = time.Now().Format(time.RFC3339)
+			current.LastSuccess = success
+			current.LastError = lastErr
+			m.tasks[id] = current
+			_ = m.saveLocked()
+			m.mu.Unlock()
+			break
+		}
+		label := aliasLabelFor(current.NextNumber - 1)
 		reserved := current
 		reserved.NextNumber++
+		reserved.DailyCount++
 		m.tasks[id] = reserved
 		if reserveErr := m.saveLocked(); reserveErr != nil {
 			m.tasks[id] = current
@@ -424,6 +500,13 @@ func (m *autoTaskManager) runOnce(id string) AliasTask {
 		current = m.tasks[id]
 		if createErr != nil {
 			lastErr = createErr.Error()
+			current.Enabled = false
+			current.NextRun = ""
+			current.LastRun = time.Now().Format(time.RFC3339)
+			current.LastSuccess = success
+			current.LastError = lastErr
+			m.tasks[id] = current
+			_ = m.saveLocked()
 			if logErr := m.logLocked(id, "error", "%s 创建失败：%v", label, createErr); logErr != nil {
 				lastErr += "；日志保存失败：" + logErr.Error()
 			}
@@ -472,8 +555,13 @@ func (m *autoTaskManager) runOnce(id string) AliasTask {
 			}
 		}
 	}
+	if lastErr != "" {
+		t.Enabled = false
+	}
 	// 仅当任务仍启用且未达上限时,按「本轮结束 + 间隔」推算下次执行;否则清空。
-	if t.Enabled && t.CreatedCount < t.MaxTotal {
+	if t.Enabled && t.CreatedCount < t.MaxTotal && t.DailyCount >= t.DailyLimit {
+		t.NextRun = nextDailyRun(time.Now()).Format(time.RFC3339)
+	} else if t.Enabled && t.CreatedCount < t.MaxTotal {
 		t.NextRun = time.Now().Add(time.Duration(t.IntervalMinutes) * time.Minute).Format(time.RFC3339)
 	} else {
 		t.NextRun = ""
@@ -517,6 +605,128 @@ func (m *autoTaskManager) requestStop(id string) {
 	if ok {
 		close(ch)
 	}
+}
+
+func taskDate(now time.Time) string { return now.Format("2006-01-02") }
+
+func resetDailyCount(task AliasTask, now time.Time) AliasTask {
+	today := taskDate(now)
+	if task.DailyDate != today {
+		task.DailyDate = today
+		task.DailyCount = 0
+	}
+	return task
+}
+
+// accountDailyCountLocked 返回一个账号在当前自然日内由所有任务创建的总数。
+// 调用方必须已持有 m.mu，确保并发任务无法同时越过上限。
+func (m *autoTaskManager) accountDailyCountLocked(accountID, day string) int {
+	total := 0
+	for _, task := range m.tasks {
+		if task.AccountID == accountID && task.DailyDate == day {
+			total += task.DailyCount
+		}
+	}
+	if counter := m.manualDaily[accountID]; counter.Date == day {
+		total += counter.Count
+	}
+	return total
+}
+
+func (m *autoTaskManager) resetManualDailyLocked(accountID string, now time.Time) {
+	counter := m.manualDaily[accountID]
+	if counter.Date != taskDate(now) {
+		m.manualDaily[accountID] = dailyCreationCounter{Date: taskDate(now)}
+	}
+}
+
+// creationCooldownRemainingLocked 返回同一账号再次创建前需要等待的时间。
+// 调用方必须持有 m.mu。
+func (m *autoTaskManager) creationCooldownRemainingLocked(accountID string, now time.Time) time.Duration {
+	guard := m.creationGuards[accountID]
+	last, err := time.Parse(time.RFC3339Nano, guard.LastAttempt)
+	if err != nil {
+		return 0
+	}
+	if elapsed := now.Sub(last); elapsed < minCreationCooldown {
+		return minCreationCooldown - elapsed
+	}
+	return 0
+}
+
+// reserveAutoCreationAttemptLocked 记录自动任务的尝试时间。调用方必须持有
+// m.mu；写入失败时不发起上游请求，避免重启后绕过冷却窗口。
+func (m *autoTaskManager) reserveAutoCreationAttemptLocked(accountID string, now time.Time) error {
+	oldGuard, hadGuard := m.creationGuards[accountID]
+	m.creationGuards[accountID] = creationGuard{LastAttempt: now.Format(time.RFC3339Nano)}
+	if err := m.saveLocked(); err != nil {
+		if hadGuard {
+			m.creationGuards[accountID] = oldGuard
+		} else {
+			delete(m.creationGuards, accountID)
+		}
+		return err
+	}
+	return nil
+}
+
+// reserveManualCreation 原子地预留一次人工创建额度。人工创建与自动任务
+// 共享每天 20 个的硬上限，且同一账号任意两次创建尝试至少相隔 20 分钟。
+func (m *autoTaskManager) reserveManualCreation(accountID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := time.Now()
+	for id, task := range m.tasks {
+		updated := resetDailyCount(task, now)
+		if updated != task {
+			m.tasks[id] = updated
+		}
+	}
+	if m.creationCooldownRemainingLocked(accountID, now) > 0 {
+		return errCreationCooldown
+	}
+	m.resetManualDailyLocked(accountID, now)
+	if m.accountDailyCountLocked(accountID, taskDate(now)) >= maxTaskDailyLimit {
+		return errCreationDailyLimit
+	}
+	oldGuard, hadGuard := m.creationGuards[accountID]
+	m.creationGuards[accountID] = creationGuard{LastAttempt: now.Format(time.RFC3339Nano)}
+	counter := m.manualDaily[accountID]
+	counter.Count++
+	m.manualDaily[accountID] = counter
+	if err := m.saveLocked(); err != nil {
+		counter.Count--
+		m.manualDaily[accountID] = counter
+		if hadGuard {
+			m.creationGuards[accountID] = oldGuard
+		} else {
+			delete(m.creationGuards, accountID)
+		}
+		return err
+	}
+	return nil
+}
+
+// releaseManualCreation 在上游创建失败时归还已预留的额度。归还失败时保留
+// 预留值，宁可降低当天可创建次数，也不在磁盘异常时放宽风控。
+func (m *autoTaskManager) releaseManualCreation(accountID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	counter := m.manualDaily[accountID]
+	if counter.Date != taskDate(time.Now()) || counter.Count < 1 {
+		return
+	}
+	counter.Count--
+	m.manualDaily[accountID] = counter
+	if err := m.saveLocked(); err != nil {
+		counter.Count++
+		m.manualDaily[accountID] = counter
+	}
+}
+
+func nextDailyRun(now time.Time) time.Time {
+	startOfTomorrow := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, now.Location())
+	return startOfTomorrow.Add(5 * time.Minute)
 }
 
 func (m *autoTaskManager) start() {
