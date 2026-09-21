@@ -12,11 +12,15 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"io/fs"
 	"net/http"
+	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -79,9 +83,36 @@ func newWithBackend(be Backend, cfg Config) *Server {
 	return s
 }
 
-// Run 启动 HTTP 服务。
+// Run 启动 HTTP 服务(阻塞)。收到 SIGINT/SIGTERM 后优雅停机:先停止接收新
+// 连接并给在途请求最多 timeout 的排空时间,再停掉自动任务 goroutine。
+//
+// 这样在 Docker stop / 部署重启时,不会中断进行中的别名创建或邮件读取,也不会
+// 泄漏后台定时器。
 func (s *Server) Run(addr string) error {
-	return s.r.Run(addr)
+	srv := &http.Server{Addr: addr, Handler: s.r}
+
+	errc := make(chan error, 1)
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errc <- err
+		}
+	}()
+
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+
+	select {
+	case err := <-errc:
+		s.task.close()
+		return err
+	case <-stop:
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	err := srv.Shutdown(ctx)
+	s.task.close()
+	return err
 }
 
 // Handler 返回底层 gin 引擎(便于测试)。

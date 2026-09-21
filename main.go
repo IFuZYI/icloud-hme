@@ -22,6 +22,7 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -92,7 +93,7 @@ func parseSessionTTL(raw string) (time.Duration, error) {
 		return 0, err
 	}
 	if d < 15*time.Minute || d > 168*time.Hour {
-		return 0, err
+		return 0, fmt.Errorf("会话有效期需在 15m 到 168h 之间，当前为 %v", d)
 	}
 	return d, nil
 }
