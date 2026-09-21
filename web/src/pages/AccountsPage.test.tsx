@@ -112,10 +112,8 @@ describe('AccountsPage', () => {
     await screen.findByText('活跃号')
     const user = userEvent.setup()
     await user.click(screen.getByRole('button', { name: /添加账号/ }))
-    expect(screen.getByLabelText(/Cookie（可选/)).toHaveAttribute(
-      'placeholder',
-      '{\n  "X-APPLE-WEBAUTH-TOKEN": "v=1:t=AQAAAAB...",\n  "X-APPLE-WEBAUTH-USER": "d=...:s=...",\n  "X_APPLE_WEB_KB": "..."\n}',
-    )
+    await user.click(screen.getByRole('button', { name: /高级配置/ }))
+    expect(screen.getByLabelText('Cookie（可选）')).toHaveAttribute('placeholder', expect.stringContaining('X-APPLE-WEBAUTH-TOKEN'))
     fireEvent.change(screen.getByLabelText(/名称/), { target: { value: '新账号' } })
     fireEvent.change(screen.getByLabelText(/iCloud 邮箱/), { target: { value: 'new@icloud.com' } })
     await user.click(screen.getByRole('button', { name: /保存/ }))
@@ -141,6 +139,19 @@ describe('AccountsPage', () => {
     expect(screen.getByRole('dialog')).toBeInTheDocument()
   })
 
+  it('编辑账号时显示该账号现有的基础信息', async () => {
+    server.use(
+      http.get('/api/accounts', () => HttpResponse.json({ success: true, data: accounts })),
+    )
+    renderPage()
+    await screen.findByText('活跃号')
+    const activeRow = screen.getByRole('row', { name: /活跃号/ })
+    await userEvent.click(within(activeRow).getByRole('button', { name: '编辑' }))
+
+    expect(screen.getByLabelText('名称')).toHaveValue('活跃号')
+    expect(screen.getByLabelText('iCloud 邮箱')).toHaveValue('active@icloud.com')
+  })
+
   it('Cookie 提交后 textarea 清空', async () => {
     let cookieBody = ''
     server.use(
@@ -153,12 +164,13 @@ describe('AccountsPage', () => {
     renderPage()
     await screen.findByText('活跃号')
     const user = userEvent.setup()
-    await user.click(screen.getAllByRole('button', { name: /更新 Cookie/ })[0])
-    const textarea = screen.getByLabelText('Cookie') as HTMLTextAreaElement
+    await user.click(screen.getAllByRole('button', { name: /更多操作/ })[0])
+    await user.click(screen.getByRole('menuitem', { name: '更新 Cookie' }))
+    const textarea = screen.getByLabelText('Cookie（必填）') as HTMLTextAreaElement
     await user.type(textarea, 'a=1; b=2')
     await user.click(screen.getByRole('button', { name: /保存/ }))
     await waitFor(() => expect(cookieBody).toContain('a=1; b=2'))
-    expect((screen.getByLabelText('Cookie') as HTMLTextAreaElement).value).toBe('')
+    expect((screen.getByLabelText('Cookie（必填）') as HTMLTextAreaElement).value).toBe('')
   })
 
   it('iCloud 登录收到 OTP_REQUIRED 后只显示 OTP 输入并可重试', async () => {
@@ -179,7 +191,8 @@ describe('AccountsPage', () => {
     renderPage()
     await screen.findByText('活跃号')
     const user = userEvent.setup()
-    await user.click(screen.getAllByRole('button', { name: /iCloud 登录/ })[0])
+    await user.click(screen.getAllByRole('button', { name: /更多操作/ })[0])
+    await user.click(screen.getByRole('menuitem', { name: 'iCloud 登录' }))
     await user.type(screen.getByLabelText(/密码/), 'p@ssw0rd')
     let dialog = screen.getByRole('dialog')
     await user.click(within(dialog).getByRole('button', { name: /登录/ }))
@@ -188,7 +201,7 @@ describe('AccountsPage', () => {
     expect(otpInput).toHaveAttribute('inputmode', 'numeric')
     await user.type(otpInput, '123456')
     dialog = screen.getByRole('dialog')
-    await user.click(within(dialog).getByRole('button', { name: /验证/ }))
+    await user.click(within(dialog).getByRole('button', { name: /验证并登录/ }))
     await waitFor(() => expect(calls).toBe(2))
   })
 
@@ -204,7 +217,8 @@ describe('AccountsPage', () => {
     renderPage()
     await screen.findByText('活跃号')
     const user = userEvent.setup()
-    await user.click(screen.getAllByRole('button', { name: /设置 App 密码/ })[0])
+    await user.click(screen.getAllByRole('button', { name: /更多操作/ })[0])
+    await user.click(screen.getByRole('menuitem', { name: 'App 专用密码' }))
     await user.type(screen.getByLabelText(/邮箱/), 'app@icloud.com')
     await user.type(screen.getByLabelText('App 专用密码'), 'xxxx-xxxx-xxxx-xxxx')
     await user.click(screen.getByRole('button', { name: /保存/ }))
@@ -226,7 +240,8 @@ describe('AccountsPage', () => {
     renderPage()
     await screen.findByText('活跃号')
     const user = userEvent.setup()
-    await user.click(screen.getAllByRole('button', { name: /设置代理/ })[0])
+    await user.click(screen.getAllByRole('button', { name: /更多操作/ })[0])
+    await user.click(screen.getByRole('menuitem', { name: '网络代理' }))
     const input = screen.getByLabelText(/代理地址/) as HTMLInputElement
     expect(input.value).toBe('')
     await user.type(input, 'http://u:p@proxy.example.com:8080')
@@ -235,7 +250,8 @@ describe('AccountsPage', () => {
     await waitFor(() => expect(input.value).toBe(''))
     // 关闭后重新打开:仍为空(从不回显)
     await user.click(screen.getByRole('button', { name: /取消/ }))
-    await user.click(screen.getAllByRole('button', { name: /设置代理/ })[0])
+    await user.click(screen.getAllByRole('button', { name: /更多操作/ })[0])
+    await user.click(screen.getByRole('menuitem', { name: '网络代理' }))
     expect((screen.getByLabelText(/代理地址/) as HTMLInputElement).value).toBe('')
   })
 

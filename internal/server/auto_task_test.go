@@ -15,53 +15,100 @@ import (
 
 type taskBackend struct {
 	fakeBackend
-	mu     sync.Mutex
-	labels []string
+	mu        sync.Mutex
+	labels    []string
+	createErr error
 }
 
 func (f *taskBackend) CreateAlias(_ string, label string) (*hme.CreateResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.labels = append(f.labels, label)
+	if f.createErr != nil {
+		return nil, f.createErr
+	}
 	return &hme.CreateResult{Email: label}, nil
 }
 func TestNormalizeAliasTaskValidation(t *testing.T) {
-	in := aliasTaskInput{Enabled: true, AccountID: "a", IntervalMinutes: 60, BatchCount: 5, MaxTotal: 999, LabelPrefix: "注册"}
+	in := aliasTaskInput{Enabled: true, AccountID: "a", IntervalMinutes: 20, TargetCount: 20, DailyLimit: 20}
 	if _, e := normalizeAliasTask(in); e != nil {
 		t.Fatal(e)
 	}
-	in.MaxTotal = 1000
+	in.IntervalMinutes = 19
 	if _, e := normalizeAliasTask(in); e == nil {
-		t.Fatal("max_total=1000 should fail")
+		t.Fatal("interval_minutes=19 should fail")
 	}
 }
-func TestAutoTaskRunStopsAtTotal(t *testing.T) {
+
+func TestAutoTaskUsesLabelLibraryAndEnforcesDailyCap(t *testing.T) {
 	be := &taskBackend{}
 	m := newAutoTaskManager(t.TempDir()+"/task.json", be)
-	task, e := m.create(aliasTaskInput{Enabled: false, AccountID: "a", IntervalMinutes: 60, BatchCount: 5, MaxTotal: 3, LabelPrefix: "注册"})
+	task, e := m.create(aliasTaskInput{Enabled: false, AccountID: "a", IntervalMinutes: 20, TargetCount: 25, DailyLimit: 20})
 	if e != nil {
 		t.Fatal(e)
 	}
 	m.mu.Lock()
 	task.Enabled = true
+	task.CreatedCount = 19
+	task.DailyCount = 19
+	task.DailyDate = taskDate(time.Now())
 	m.tasks[task.ID] = task
 	m.mu.Unlock()
+	task = m.runOnce(task.ID)
+	task = m.runOnce(task.ID)
+	if len(be.labels) != 1 {
+		t.Fatalf("created %d aliases, want only the remaining daily capacity", len(be.labels))
+	}
+	if be.labels[0] != "GitHub" {
+		t.Fatalf("label should come from the built-in library, got %v", be.labels)
+	}
+	if task.CreatedCount != 20 || !task.Enabled {
+		t.Fatalf("daily cap should defer, not finish or pause the task: %+v", task)
+	}
+}
+
+func TestAutoTaskPausesImmediatelyAfterCreationFailure(t *testing.T) {
+	be := &taskBackend{createErr: errors.New("iCloud 提示操作过于频繁")}
+	m := newAutoTaskManager(t.TempDir()+"/task.json", be)
+	task, err := m.create(aliasTaskInput{Enabled: false, AccountID: "a", IntervalMinutes: 20, TargetCount: 2, DailyLimit: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	task.Enabled = true
+	m.tasks[task.ID] = task
+	m.mu.Unlock()
+
 	out := m.runOnce(task.ID)
-	if len(be.labels) != 3 || be.labels[0] != "注册001" || be.labels[2] != "注册003" {
-		t.Fatalf("labels=%v", be.labels)
+	if out.Enabled || out.NextRun != "" || !strings.Contains(out.LastError, "操作过于频繁") {
+		t.Fatalf("creation warning should pause immediately: %+v", out)
 	}
-	if out.CreatedCount != 3 || out.Enabled != true {
-		t.Fatalf("task=%+v", out)
+	if len(be.labels) != 1 {
+		t.Fatalf("unexpected create calls: %v", be.labels)
 	}
-	m.runOnce(task.ID)
-	if len(be.labels) != 3 {
-		t.Fatal("task should stop at max_total")
+}
+
+func TestAutoTaskReservesDailyCapacityBeforeCallingUpstream(t *testing.T) {
+	be := &taskBackend{createErr: errors.New("upstream timeout")}
+	m := newAutoTaskManager(t.TempDir()+"/task.json", be)
+	task, err := m.create(aliasTaskInput{Enabled: false, AccountID: "a", IntervalMinutes: 20, TargetCount: 2, DailyLimit: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	task.Enabled = true
+	m.tasks[task.ID] = task
+	m.mu.Unlock()
+
+	out := m.runOnce(task.ID)
+	if out.DailyCount != 1 {
+		t.Fatalf("upstream attempt must consume pre-reserved daily capacity: %+v", out)
 	}
 }
 
 func TestAutoTaskRunReturnsWhenTickerReachesTotal(t *testing.T) {
 	m := newAutoTaskManager(t.TempDir()+"/task.json", &taskBackend{})
-	task, err := m.create(aliasTaskInput{Enabled: false, AccountID: "a", IntervalMinutes: 60, BatchCount: 1, MaxTotal: 1, LabelPrefix: "x"})
+	task, err := m.create(aliasTaskInput{Enabled: false, AccountID: "a", IntervalMinutes: 20, TargetCount: 1, DailyLimit: 20})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +135,7 @@ func TestAutoTaskRunReturnsWhenTickerReachesTotal(t *testing.T) {
 
 func TestAutoTaskStartDoesNotDuplicate(t *testing.T) {
 	m := newAutoTaskManager(t.TempDir()+"/task.json", &taskBackend{})
-	task, e := m.create(aliasTaskInput{Enabled: true, AccountID: "a", IntervalMinutes: 1, BatchCount: 1, MaxTotal: 1, LabelPrefix: "x"})
+	task, e := m.create(aliasTaskInput{Enabled: true, AccountID: "a", IntervalMinutes: 20, TargetCount: 1, DailyLimit: 20})
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -124,7 +171,7 @@ func TestAutoTaskCreateLogFailureReturnsErrorButKeepsCommittedTask(t *testing.T)
 	file := filepath.Join(t.TempDir(), "tasks.json")
 	m := newAutoTaskManager(file, &taskBackend{})
 	m.writeLogs = func(string, any) error { return errors.New("injected log failure") }
-	_, err := m.create(aliasTaskInput{AccountID: "a", IntervalMinutes: 60, BatchCount: 1, MaxTotal: 2, LabelPrefix: "x"})
+	_, err := m.create(aliasTaskInput{AccountID: "a", IntervalMinutes: 20, TargetCount: 2, DailyLimit: 20})
 	if err == nil || !strings.Contains(err.Error(), "injected log failure") {
 		t.Fatalf("create error = %v", err)
 	}
@@ -147,7 +194,7 @@ func TestAutoTaskCreateLogFailureReturnsErrorButKeepsCommittedTask(t *testing.T)
 func TestAutoTaskToggleStateFailureRollsBackLogStateAndRuntime(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "tasks.json")
 	m := newAutoTaskManager(file, &taskBackend{})
-	task := AliasTask{ID: "task_toggle", AccountID: "a", IntervalMinutes: 60, BatchCount: 1, MaxTotal: 2, LabelPrefix: "x", NextNumber: 1}
+	task := AliasTask{ID: "task_toggle", AccountID: "a", IntervalMinutes: 60, DailyLimit: 20, MaxTotal: 2, NextNumber: 1}
 	m.tasks[task.ID] = task
 	if err := m.saveLocked(); err != nil {
 		t.Fatal(err)
@@ -178,7 +225,7 @@ func TestAutoTaskToggleStateFailureRollsBackLogStateAndRuntime(t *testing.T) {
 func TestAutoTaskToggleLogFailureReturnsErrorAfterCommittingStateAndRuntime(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "tasks.json")
 	m := newAutoTaskManager(file, &taskBackend{})
-	task := AliasTask{ID: "task_toggle_log", AccountID: "a", IntervalMinutes: 60, BatchCount: 1, MaxTotal: 2, LabelPrefix: "x", NextNumber: 1}
+	task := AliasTask{ID: "task_toggle_log", AccountID: "a", IntervalMinutes: 60, DailyLimit: 20, MaxTotal: 2, NextNumber: 1}
 	m.tasks[task.ID] = task
 	if err := m.saveLocked(); err != nil {
 		t.Fatal(err)
@@ -202,7 +249,7 @@ func TestAutoTaskRunOnceReservationFailureSkipsBackendAndPauses(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "tasks.json")
 	backend := &taskBackend{}
 	m := newAutoTaskManager(file, backend)
-	task := AliasTask{ID: "task_reserve_failure", Enabled: true, AccountID: "a", IntervalMinutes: 60, BatchCount: 1, MaxTotal: 2, LabelPrefix: "x", NextNumber: 1}
+	task := AliasTask{ID: "task_reserve_failure", Enabled: true, AccountID: "a", IntervalMinutes: 60, DailyLimit: 20, MaxTotal: 2, NextNumber: 1}
 	m.tasks[task.ID] = task
 	if err := m.saveLocked(); err != nil {
 		t.Fatal(err)
@@ -231,7 +278,7 @@ func TestAutoTaskRunOnceReservationFailureSkipsBackendAndPauses(t *testing.T) {
 func TestEnsureRunningSaveFailureKeepsSchedulerForCommittedEnabledTask(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "tasks.json")
 	m := newAutoTaskManager(file, &taskBackend{})
-	task := AliasTask{ID: "task_scheduler", Enabled: true, AccountID: "a", IntervalMinutes: 60, BatchCount: 1, MaxTotal: 2, LabelPrefix: "x", NextNumber: 1}
+	task := AliasTask{ID: "task_scheduler", Enabled: true, AccountID: "a", IntervalMinutes: 60, DailyLimit: 20, MaxTotal: 2, NextNumber: 1}
 	m.tasks[task.ID] = task
 	if err := m.saveLocked(); err != nil {
 		t.Fatal(err)
@@ -251,7 +298,7 @@ func TestEnsureRunningSaveFailureKeepsSchedulerForCommittedEnabledTask(t *testin
 func TestAutoTaskRunOncePersistsConsumedSequenceAfterStateFailure(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "tasks.json")
 	m := newAutoTaskManager(file, &taskBackend{})
-	task := AliasTask{ID: "task_run", Enabled: true, AccountID: "a", IntervalMinutes: 60, BatchCount: 1, MaxTotal: 2, LabelPrefix: "x", NextNumber: 1}
+	task := AliasTask{ID: "task_run", Enabled: true, AccountID: "a", IntervalMinutes: 60, DailyLimit: 20, MaxTotal: 2, NextNumber: 1}
 	m.tasks[task.ID] = task
 	if err := m.saveLocked(); err != nil {
 		t.Fatal(err)
@@ -259,7 +306,7 @@ func TestAutoTaskRunOncePersistsConsumedSequenceAfterStateFailure(t *testing.T) 
 	writes := 0
 	m.writeState = func(path string, value any) error {
 		writes++
-		if writes == 2 {
+		if writes == 3 {
 			return errors.New("injected post-create state failure")
 		}
 		return writeJSONAtomic(path, value)
@@ -287,7 +334,7 @@ func TestAutoTaskRunOnceNeverReusesReservedSequenceAfterPersistentPostCreateFail
 	file := filepath.Join(dir, "tasks.json")
 	backend := &taskBackend{}
 	m := newAutoTaskManager(file, backend)
-	task := AliasTask{ID: "task_reserved", Enabled: true, AccountID: "a", IntervalMinutes: 60, BatchCount: 1, MaxTotal: 2, LabelPrefix: "x", NextNumber: 1}
+	task := AliasTask{ID: "task_reserved", Enabled: true, AccountID: "a", IntervalMinutes: 60, DailyLimit: 20, MaxTotal: 2, NextNumber: 1}
 	m.tasks[task.ID] = task
 	if err := m.saveLocked(); err != nil {
 		t.Fatal(err)
@@ -295,14 +342,14 @@ func TestAutoTaskRunOnceNeverReusesReservedSequenceAfterPersistentPostCreateFail
 	writes := 0
 	m.writeState = func(path string, value any) error {
 		writes++
-		if writes > 1 {
+		if writes > 2 {
 			return errors.New("persistent post-reservation failure")
 		}
 		return writeJSONAtomic(path, value)
 	}
 
 	out := m.runOnce(task.ID)
-	if len(backend.labels) != 1 || backend.labels[0] != "x001" {
+	if len(backend.labels) != 1 || backend.labels[0] != "GitHub" {
 		t.Fatalf("backend calls = %#v", backend.labels)
 	}
 	if out.Enabled || out.NextNumber != 2 || !strings.Contains(out.LastError, "persistent post-reservation failure") {
@@ -315,8 +362,9 @@ func TestAutoTaskRunOnceNeverReusesReservedSequenceAfterPersistentPostCreateFail
 	if !ok || persisted.NextNumber != 2 {
 		t.Fatalf("reserved sequence was not durable across restart: %+v", persisted)
 	}
+	restarted.creationGuards[task.AccountID] = creationGuard{LastAttempt: time.Now().Add(-minCreationCooldown).Format(time.RFC3339Nano)}
 	restarted.runOnce(task.ID)
-	if len(restartedBackend.labels) == 0 || restartedBackend.labels[0] != "x002" {
+	if len(restartedBackend.labels) == 0 || restartedBackend.labels[0] != "GitLab" {
 		t.Fatalf("restart reused consumed label sequence: %#v", restartedBackend.labels)
 	}
 }
@@ -324,7 +372,7 @@ func TestAutoTaskRunOnceNeverReusesReservedSequenceAfterPersistentPostCreateFail
 func TestAutoTaskRunOnceFinalStateFailurePersistsPause(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "tasks.json")
 	m := newAutoTaskManager(file, &taskBackend{})
-	task := AliasTask{ID: "task_final", Enabled: true, AccountID: "a", IntervalMinutes: 60, BatchCount: 1, MaxTotal: 2, LabelPrefix: "x", NextNumber: 1}
+	task := AliasTask{ID: "task_final", Enabled: true, AccountID: "a", IntervalMinutes: 60, DailyLimit: 20, MaxTotal: 2, NextNumber: 1}
 	m.tasks[task.ID] = task
 	if err := m.saveLocked(); err != nil {
 		t.Fatal(err)
@@ -332,7 +380,7 @@ func TestAutoTaskRunOnceFinalStateFailurePersistsPause(t *testing.T) {
 	writes := 0
 	m.writeState = func(path string, value any) error {
 		writes++
-		if writes == 3 {
+		if writes == 4 {
 			return errors.New("injected final state failure")
 		}
 		return writeJSONAtomic(path, value)

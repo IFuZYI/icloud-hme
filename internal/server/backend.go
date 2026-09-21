@@ -209,7 +209,9 @@ func (b *managerBackend) CreateAlias(accountID, label string) (*hme.CreateResult
 	if err != nil {
 		return nil, mapAccountErr(err)
 	}
-	result, err := client.CreateAlias(label, 5)
+	// 自动任务在任何上游提示后都必须立即暂停，因此单次创建不在
+	// 客户端内部重试；下一次尝试只能由用户显式恢复任务后发起。
+	result, err := client.CreateAlias(label, 1)
 	_ = b.mgr.SaveCookies(accountID, client.Cookies)
 	if err != nil {
 		return nil, classifyUpstreamErr("创建邮箱失败", err)

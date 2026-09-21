@@ -87,10 +87,11 @@ export interface AliasTask {
   enabled: boolean
   account_id: string
   interval_minutes: number
-  batch_count: number
+  daily_limit: number
   max_total: number
   created_count: number
-  label_prefix: string
+  daily_count: number
+  daily_date?: string
   last_run?: string
   next_run?: string
   last_success: number

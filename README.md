@@ -10,7 +10,7 @@
 - ✅ **创建 HME 别名** — 自动生成 iCloud 隐藏邮箱地址
 - ✅ **列出所有别名** — 查看账号下的所有 HME 别名
 - ✅ **批量管理别名** — 多选停用、启用或删除；长时间删除在后台执行并记录逐项结果
-- ✅ **定时自动创建** — 按间隔批量创建别名，支持自定义标签序号、总数上限、暂停/续跑与进度展示
+- ✅ **低频自动创建** — 设置目标数量、20–60 分钟周期与每日上限；每次仅创建一个，标签从常用服务名称库自动轮换，失败立即暂停
 - ✅ **收取邮件** — 通过 IMAP 或 Web API 读取发到 HME 别名的邮件
 - ✅ **双路径读信** — 邮件读取优先走 IMAP (App Password),无 App Password 时回退 Web API (Cookie)
 - ✅ **多账号管理** — 支持多个 iCloud 账号并行管理
@@ -198,7 +198,7 @@ export ICLOUD_HME_ADMIN_PASSWORD='your-strong-password'
 
 - **账号**：添加账号时可直接粘贴 Cookie JSON；区域下拉框支持全球区和中国区。
 - **别名**：支持搜索、状态筛选、创建时间排序和多选批量操作。确认批量删除后弹窗立即关闭，结果通过通知和任务日志反馈。
-- **自动任务**：按间隔自动创建别名，并展示进度、下次执行时间和失败原因。
+- **自动任务**：设置目标数量、创建周期和每日上限；每次只创建一个别名，展示进度、下次执行时间和失败原因。
 - **日志**：查看自动任务及批量操作的逐项成功/失败记录和详细原因。
 - **收件箱**：按账号、别名、数量和时间范围筛选邮件。
 
@@ -216,7 +216,7 @@ POST /api/create
 # 请求体
 {
   "account_id": "acc_1",      # 必填: 账号 ID
-  "label": "注册某网站"        # 可选: 别名标签
+  "label": "GitHub"           # 必填: 从名称库选择的标签
 }
 
 # 响应
@@ -224,7 +224,7 @@ POST /api/create
   "success": true,
   "data": {
     "email": "xyz123@icloud.com",
-    "label": "注册某网站",
+    "label": "GitHub",
     "created_at": "2024-01-15T10:30:00Z",
     "account_id": "acc_1"
   }
@@ -493,7 +493,7 @@ POST /api/aliases/batch
 
 ### 自动创建任务接口
 
-自动创建任务按固定间隔为指定账号批量创建 HME 别名，标签自动追加三位序号（如 `注册001`、`注册002`）。
+自动创建任务以低频方式为指定账号创建 HME 别名：每个周期只创建 1 个，周期限制为 20–60 分钟。标签由内置常用服务名称库自动轮换（如 GitHub、Google Workspace、Notion、Slack、淘宝），不会使用固定前缀或序号。
 
 | 接口 | 说明 |
 |---|---|
@@ -511,12 +511,10 @@ POST /api/alias-tasks
 
 # 请求体
 {
-  "enabled": true,
   "account_id": "acc_1",
   "interval_minutes": 60,
-  "batch_count": 5,
-  "max_total": 999,
-  "label_prefix": "注册"
+  "target_count": 20,
+  "daily_limit": 10
 }
 
 # 响应
@@ -527,11 +525,11 @@ POST /api/alias-tasks
     "enabled": true,
     "account_id": "acc_1",
     "interval_minutes": 60,
-    "batch_count": 5,
-    "max_total": 999,
+    "daily_limit": 10,
+    "max_total": 20,
     "created_count": 0,
-    "label_prefix": "注册",
     "next_number": 1,
+    "daily_count": 0,
     "next_run": "2026-09-10T12:00:00+08:00"
   }
 }
@@ -542,11 +540,9 @@ POST /api/alias-tasks
 | 字段 | 必填 | 说明 |
 |---|---|---|
 | `account_id` | ✅ | 目标账号 ID |
-| `label_prefix` | ✅ | 标签前缀，最长 180 字符，自动追加 `001`、`002`… 序号 |
-| `batch_count` | ✅ | 每轮创建数量（1–999） |
-| `max_total` | ✅ | 累计创建总数上限（1–999），达到后任务自动停止 |
-| `interval_minutes` | ✅ | 执行间隔（1–10080 分钟） |
-| `enabled` | | 是否启用；新建时忽略该字段，始终默认启用 |
+| `target_count` | ✅ | 累计创建目标（1–999），达到后任务自动停止 |
+| `daily_limit` | ✅ | 此任务每日上限（1–20）；同账号所有任务合计每天最多 20 个 |
+| `interval_minutes` | ✅ | 执行间隔（20、30、45 或 60 分钟） |
 
 #### 启用 / 暂停
 
@@ -558,11 +554,12 @@ POST /api/alias-tasks/:id/toggle
 
 #### 任务运行规则
 
-- 新建任务默认启用，保存后 **10 秒缓冲** 立即执行首轮，之后按 `interval_minutes` 间隔执行
-- 每轮内每个邮箱创建间隔 **3 秒**，避免触发 iCloud 风控
-- 本轮遇到第一个失败立即停止，不再继续创建
-- 失败时检测账号状态：账号正常则保留任务等待下一轮；账号异常（如 Cookie 失效）则自动暂停任务
-- 达到 `max_total` 后任务自动停止并清空 `next_run`
+- 新建任务默认启用，保存后 **10 秒缓冲** 执行首轮，之后按 `interval_minutes` 间隔执行
+- 每次调度只创建 **1 个**，避免批量创建
+- 任务使用内置名称库轮换标签；名称仅是本地标识，不代表已在对应服务注册
+- 任意创建失败或 iCloud 提示都会**立即暂停**任务并清空 `next_run`，须由用户检查后手动恢复
+- 达到 `daily_limit` 或账号每日总上限 20 时，推迟到次日 00:05 后继续
+- 达到 `target_count` 后任务自动停止并清空 `next_run`
 - 任务配置持久化在 `data/alias_task.json`，运行日志持久化在 `data/alias_task_logs.json`（重启后自动恢复）
 
 ## 认证方式
@@ -746,7 +743,7 @@ A local management tool for Apple iCloud Hide My Email (HME) aliases, supporting
 
 - Built-in management UI at `http://localhost:8081`
 - Create HME aliases automatically
-- Scheduled auto-creation tasks: custom label numbering, per-batch count, total cap, pause/resume and live progress
+- Low-frequency scheduled creation: choose a target count, a 20–60 minute interval and a daily cap; one alias per run, labels rotate from a common-service library, failures pause the task
 - Batch deactivate, reactivate, and delete with per-item audit logs; long deletions do not block the confirmation dialog
 - List all aliases for an account
 - Read emails sent to HME aliases via IMAP or Web API

@@ -113,6 +113,7 @@ func (s *Server) register() {
 			authed.DELETE("/accounts/:id", csrfCheck(s.auth), s.removeAccountHandler)
 
 			// ===== 核心接口 1: 创建邮箱 =====
+			authed.GET("/alias-labels", s.listAliasLabelsHandler)
 			authed.POST("/create", csrfCheck(s.auth), s.createAliasHandler)
 			authed.GET("/alias-tasks", s.listAliasTasksHandler)
 			authed.GET("/alias-task-logs", s.listAliasTaskLogsHandler)
@@ -174,6 +175,13 @@ type createAliasReq struct {
 	Label     string `json:"label"`
 }
 
+// listAliasLabelsHandler 返回内置的常用服务名称库，供人工创建时选择。
+func (s *Server) listAliasLabelsHandler(c *gin.Context) {
+	labels := make([]string, len(aliasLabelLibrary))
+	copy(labels, aliasLabelLibrary)
+	ok(c, labels)
+}
+
 func (s *Server) createAliasHandler(c *gin.Context) {
 	var req createAliasReq
 	if err := c.ShouldBindJSON(&req); err != nil || req.AccountID == "" {
@@ -184,9 +192,26 @@ func (s *Server) createAliasHandler(c *gin.Context) {
 		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "参数错误: label 最长 200 字符")
 		return
 	}
+	if !isKnownAliasLabel(req.Label) {
+		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "参数错误: 请从名称库选择标签")
+		return
+	}
+	if err := s.task.reserveManualCreation(req.AccountID); err != nil {
+		if errors.Is(err, errCreationCooldown) {
+			failCode(c, http.StatusTooManyRequests, "CREATION_COOLDOWN", "该账号刚发起过创建请求，请至少等待 20 分钟再试")
+			return
+		}
+		if errors.Is(err, errCreationDailyLimit) {
+			failCode(c, http.StatusTooManyRequests, "CREATION_LIMIT_REACHED", "该账号今日创建已达 20 个上限，请明日再试")
+			return
+		}
+		failCode(c, http.StatusInternalServerError, "INTERNAL_ERROR", "创建额度保存失败；为避免触发风控已停止创建")
+		return
+	}
 
 	result, err := s.be.CreateAlias(req.AccountID, req.Label)
 	if err != nil {
+		s.task.releaseManualCreation(req.AccountID)
 		backendFail(c, err)
 		return
 	}

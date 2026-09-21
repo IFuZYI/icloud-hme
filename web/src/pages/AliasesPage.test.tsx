@@ -195,7 +195,7 @@ describe('AliasesPage', () => {
     )
   })
 
-  it('创建别名:空标签/200 字符边界、成功后刷新并可复制邮箱', async () => {
+  it('创建别名:从名称库选择标签，成功后刷新并可复制邮箱', async () => {
     let created = false
     server.use(
       http.get('/api/accounts', () => HttpResponse.json({ success: true, data: accounts })),
@@ -210,6 +210,9 @@ describe('AliasesPage', () => {
               : aliases,
           },
         }),
+      ),
+      http.get('/api/alias-labels', () =>
+        HttpResponse.json({ success: true, data: ['GitHub', 'Notion'] }),
       ),
       http.post('/api/create', async () => {
         created = true
@@ -228,17 +231,14 @@ describe('AliasesPage', () => {
     await screen.findByText('alpha@icloud.com')
     const user = userEvent.setup()
     await user.click(screen.getByRole('button', { name: /创建别名/ }))
-    // 空标签提交被阻止
-    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: /创建/ }))
-    expect(screen.getByRole('dialog')).toBeInTheDocument()
-    // 200 字符边界:输入 201 字符被截断到 200
-    await user.type(
-      screen.getByLabelText(/标签/),
-      'x'.repeat(201),
-    )
-    expect((screen.getByLabelText(/标签/) as HTMLInputElement).value.length).toBe(200)
+    await screen.findByRole('button', { name: '选择标签' })
+    await user.click(screen.getByRole('button', { name: '选择标签' }))
+    await user.click(screen.getByRole('option', { name: 'Notion' }))
     await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: /创建/ }))
     expect(await screen.findByText('gamma@icloud.com')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: /创建别名/ }))
+    await waitFor(() => expect(screen.getByRole('button', { name: '选择标签' })).toHaveTextContent('GitHub'))
   })
 
   it('停用别名:显示目标邮箱并二次确认', async () => {

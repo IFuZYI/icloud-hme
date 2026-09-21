@@ -65,6 +65,7 @@ export default function AliasesPage() {
   const [filter, setFilter] = useState<'all' | 'active' | 'inactive'>('all')
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc')
   const [createOpen, setCreateOpen] = useState(false)
+  const [createSession, setCreateSession] = useState(0)
   const [confirm, setConfirm] = useState<{ type: 'deactivate' | 'reactivate' | 'delete'; alias: Alias } | null>(null)
   const [busy, setBusy] = useState(false)
   const [actionError, setActionError] = useState('')
@@ -222,6 +223,11 @@ export default function AliasesPage() {
 
   function handleCreated(email: string) { setCreateOpen(false); showCopyable(email); setRetryKey((k) => k + 1) }
 
+  function openCreateDialog() {
+    setCreateSession((session) => session + 1)
+    setCreateOpen(true)
+  }
+
   if (accounts.length === 0 && !loading && !error) {
     return <p className="empty-state">暂无账号，请先到「账号」页面添加账号</p>
   }
@@ -252,7 +258,7 @@ export default function AliasesPage() {
             <IconClock size={16} />
             自动创建任务
           </button>
-          <button className="aliases-primary-btn" onClick={() => setCreateOpen(true)} disabled={!accountId}>
+          <button className="aliases-primary-btn" onClick={openCreateDialog} disabled={!accountId}>
             <IconPlus size={16} />
             创建别名
           </button>
@@ -397,6 +403,7 @@ export default function AliasesPage() {
       </AsyncState>
 
       <CreateAliasDialog
+        key={createSession}
         accountId={accountId}
         open={createOpen}
         onClose={() => setCreateOpen(false)}

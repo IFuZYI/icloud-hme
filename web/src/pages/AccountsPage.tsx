@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { useNavigate } from 'react-router-dom'
 import { request, ApiError } from '../api/client'
 import type { AccountSummary } from '../api/types'
 import AsyncState from '../components/AsyncState'
@@ -9,6 +9,7 @@ import ICloudLoginDialog from '../components/ICloudLoginDialog'
 import AppPasswordDialog from '../components/AppPasswordDialog'
 import ProxyDialog from '../components/ProxyDialog'
 import MailboxDialog from '../components/MailboxDialog'
+import MoreActionsDropdown, { type AccountAction } from '../components/MoreActionsDropdown'
 import ConfirmDialog from '../components/ConfirmDialog'
 import { useToast } from '../components/ToastProvider'
 import {
@@ -18,8 +19,6 @@ import {
   IconPlus,
   IconEdit,
   IconTrash,
-  IconKey,
-  IconMail,
 } from '../components/icons'
 
 const statusMeta: Record<string, { text: string; badge: string; icon: typeof IconCheck }> = {
@@ -61,6 +60,7 @@ export default function AccountsPage() {
   // dialog 状态
   const [formOpen, setFormOpen] = useState(false)
   const [editing, setEditing] = useState<AccountSummary | null>(null)
+  const [formSession, setFormSession] = useState(0)
   const [cookieFor, setCookieFor] = useState<AccountSummary | null>(null)
   const [loginFor, setLoginFor] = useState<AccountSummary | null>(null)
   const [appPwdFor, setAppPwdFor] = useState<AccountSummary | null>(null)
@@ -70,6 +70,7 @@ export default function AccountsPage() {
   const [deleting, setDeleting] = useState(false)
 
   const { show } = useToast()
+  const navigate = useNavigate()
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -124,6 +125,18 @@ export default function AccountsPage() {
     }
   }
 
+  function handleMoreAction(account: AccountSummary, action: AccountAction) {
+    switch (action) {
+      case 'cookies': setCookieFor(account); break
+      case 'login': setLoginFor(account); break
+      case 'password': setAppPwdFor(account); break
+      case 'mailbox': setMailboxFor(account); break
+      case 'proxy': setProxyFor(account); break
+      case 'aliases': navigate(`/aliases?account_id=${encodeURIComponent(account.id)}`); break
+      case 'inbox': navigate(`/inbox?account_id=${encodeURIComponent(account.id)}`); break
+    }
+  }
+
   return (
     <section>
       <div className="page-header">
@@ -135,6 +148,7 @@ export default function AccountsPage() {
           className="primary"
           onClick={() => {
             setEditing(null)
+            setFormSession((session) => session + 1)
             setFormOpen(true)
           }}
         >
@@ -189,28 +203,16 @@ export default function AccountsPage() {
                   <td>{credText(acc)}</td>
                   <td>{acc.last_validated ? acc.last_validated : '—'}</td>
                   <td>
-                    <div className="row-actions">
-                      <button onClick={() => { setEditing(acc); setFormOpen(true) }}>
+                    <div className="account-row-actions">
+                      <button className="account-edit-button" onClick={() => { setEditing(acc); setFormSession((session) => session + 1); setFormOpen(true) }}>
                         <IconEdit size={14} />
                         编辑
                       </button>
-                      <button onClick={() => setCookieFor(acc)}>更新 Cookie</button>
-                      <button onClick={() => setLoginFor(acc)}>
-                        <IconKey size={14} />
-                        iCloud 登录
-                      </button>
-                      <button onClick={() => setAppPwdFor(acc)}>设置 App 密码</button>
-                      <button onClick={() => setMailboxFor(acc)}>接入收件邮箱</button>
-                      <button onClick={() => setProxyFor(acc)}>设置代理</button>
-                      <Link to={`/aliases?account_id=${acc.id}`}>别名</Link>
-                      <Link to={`/inbox?account_id=${acc.id}`}>
-                        <IconMail size={14} />
-                        收件箱
-                      </Link>
-                      <button className="danger" onClick={() => setDeleteFor(acc)}>
+                      <button className="account-delete-button" onClick={() => setDeleteFor(acc)}>
                         <IconTrash size={14} />
                         删除
                       </button>
+                      <MoreActionsDropdown accountName={acc.name} onAction={(action) => handleMoreAction(acc, action)} />
                     </div>
                   </td>
                 </tr>
@@ -221,6 +223,7 @@ export default function AccountsPage() {
       </AsyncState>
 
       <AccountFormDialog
+        key={formSession}
         open={formOpen}
         onClose={() => setFormOpen(false)}
         onSaved={() => {
@@ -244,9 +247,11 @@ export default function AccountsPage() {
       {loginFor && (
         <ICloudLoginDialog
           accountId={loginFor.id}
+          accountEmail={loginFor.icloud_email || loginFor.real_email}
           open
           onClose={() => setLoginFor(null)}
           onSaved={() => {
+            setLoginFor(null)
             show('登录成功')
             void load()
           }}

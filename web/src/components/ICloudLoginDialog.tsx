@@ -2,8 +2,11 @@ import { useState } from 'react'
 import Dialog from './Dialog'
 import { request, ApiError } from '../api/client'
 
+type LoginStep = 'PASSWORD_INPUT' | 'LOADING' | '2FA_INPUT' | 'SUCCESS' | 'FAIL'
+
 interface ICloudLoginDialogProps {
   accountId: string
+  accountEmail: string
   open: boolean
   onClose: () => void
   onSaved: () => void
@@ -12,19 +15,36 @@ interface ICloudLoginDialogProps {
 /** iCloud 密码登录对话框:支持 OTP 两阶段 */
 export default function ICloudLoginDialog({
   accountId,
+  accountEmail,
   open,
   onClose,
   onSaved,
 }: ICloudLoginDialogProps) {
   const [password, setPassword] = useState('')
   const [otp, setOtp] = useState('')
-  const [otpRequired, setOtpRequired] = useState(false)
+  const [step, setStep] = useState<LoginStep>('PASSWORD_INPUT')
   const [error, setError] = useState('')
-  const [submitting, setSubmitting] = useState(false)
+  const otpRequired = step === '2FA_INPUT'
+  const submitting = step === 'LOADING'
+
+  function reset() {
+    setPassword('')
+    setOtp('')
+    setStep('PASSWORD_INPUT')
+    setError('')
+  }
 
   async function handleSubmit() {
     if (submitting) return
-    setSubmitting(true)
+    if (!otpRequired && !password) {
+      setError('请输入 iCloud 密码')
+      return
+    }
+    if (otpRequired && otp.length !== 6) {
+      setError('请输入 6 位验证码')
+      return
+    }
+    setStep('LOADING')
     setError('')
     try {
       await request(`/api/accounts/${accountId}/login`, {
@@ -34,18 +54,17 @@ export default function ICloudLoginDialog({
           ...(otpRequired ? { otp_code: otp } : {}),
         }),
       })
+      setStep('SUCCESS')
       setPassword('')
       setOtp('')
-      setOtpRequired(false)
       onSaved()
     } catch (err) {
       if (err instanceof ApiError && err.code === 'OTP_REQUIRED') {
-        setOtpRequired(true)
+        setStep('2FA_INPUT')
       } else {
         setError(err instanceof ApiError ? err.message : '网络连接失败，请检查服务状态')
+        setStep(otpRequired ? '2FA_INPUT' : 'FAIL')
       }
-    } finally {
-      setSubmitting(false)
     }
   }
 
@@ -54,13 +73,11 @@ export default function ICloudLoginDialog({
       title="iCloud 登录"
       open={open}
       onClose={() => {
-        setPassword('')
-        setOtp('')
-        setOtpRequired(false)
-        setError('')
+        reset()
         onClose()
       }}
     >
+      <p className="login-account-context">正在登录：<strong>{accountEmail || accountId}</strong></p>
       {error && (
         <div className="alert-error" role="alert">
           {error}
@@ -75,6 +92,7 @@ export default function ICloudLoginDialog({
           <input
             id="icloud-login-password"
             type="password"
+            name="password"
             autoComplete="current-password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
@@ -88,6 +106,7 @@ export default function ICloudLoginDialog({
             id="icloud-login-otp"
             type="text"
             inputMode="numeric"
+            pattern="[0-9]*"
             maxLength={6}
             value={otp}
             onChange={(e) => setOtp(e.target.value.replace(/\D/g, ''))}
@@ -98,7 +117,7 @@ export default function ICloudLoginDialog({
       <div className="form-actions">
         <button onClick={onClose}>取消</button>
         <button className="primary" onClick={() => void handleSubmit()} disabled={submitting}>
-          {submitting ? '登录中…' : otpRequired ? '验证' : '登录'}
+          {submitting ? '登录中…' : otpRequired ? '验证并登录' : '登录'}
         </button>
       </div>
     </Dialog>

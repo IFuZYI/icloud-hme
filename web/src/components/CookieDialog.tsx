@@ -1,12 +1,7 @@
 import { useState } from 'react'
 import Dialog from './Dialog'
 import { request, ApiError } from '../api/client'
-
-const cookieExample = `{
-  "X-APPLE-WEBAUTH-TOKEN": "v=1:t=AQAAAAB...",
-  "X-APPLE-WEBAUTH-USER": "d=...:s=...",
-  "X_APPLE_WEB_KB": "..."
-}`
+import SmartCookieInput from './SmartCookieInput'
 
 interface CookieDialogProps {
   accountId: string
@@ -58,13 +53,12 @@ export default function CookieDialog({ accountId, open, onClose, onSaved }: Cook
         </div>
       )}
       <div className="form-field">
-        <label htmlFor="cookie-input">Cookie</label>
-        <textarea
+        <SmartCookieInput
           id="cookie-input"
           value={cookies}
-          onChange={(e) => setCookies(e.target.value)}
-          spellCheck={false}
-          placeholder={cookieExample}
+          onChange={setCookies}
+          required
+          disabled={submitting}
         />
         <ul className="cookie-help">
           <li><code>X-APPLE-DS-WEB-SESSION-TOKEN</code>：iCloud Web 端会话 Token，包含当前登录会话的权限。</li>

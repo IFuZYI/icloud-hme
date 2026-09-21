@@ -1,0 +1,41 @@
+/* 账号管理：常驻操作精简、可折叠高级配置与分组菜单 */
+.account-row-actions { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.account-edit-button, .account-delete-button { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; padding: 5px 9px; border: 1px solid transparent; border-radius: 8px; background: transparent; color: var(--color-text-secondary); font: inherit; font-size: var(--text-sm); cursor: pointer; }
+.account-edit-button:hover { background: var(--color-bg-subtle); color: var(--color-primary); }
+.account-delete-button { color: var(--color-danger); }
+.account-delete-button:hover { background: var(--color-danger-soft); }
+.account-more-button { display: inline-flex; align-items: center; justify-content: center; width: 32px; min-width: 32px; min-height: 32px; padding: 0; border: 0; border-radius: 8px; background: transparent; color: var(--color-text-tertiary); cursor: pointer; font-size: 0; }
+.account-more-button::before { content: '⋯'; font-size: 20px; line-height: 1; letter-spacing: 1px; }
+.account-more-button:hover:not(:disabled) { background: var(--color-bg-subtle); color: var(--color-text); }
+.account-more-button:focus-visible, .account-more-popover button:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
+.account-more-popover { position: fixed; z-index: var(--z-dialog); width: 208px; max-width: calc(100vw - 24px); padding: 6px; border: 1px solid var(--color-border); border-radius: var(--radius-lg); background: color-mix(in srgb, var(--color-bg-raised) 94%, transparent); box-shadow: var(--shadow-md); backdrop-filter: saturate(180%) blur(20px); -webkit-backdrop-filter: saturate(180%) blur(20px); animation: popover-enter 180ms var(--ease-apple) both; }
+.account-action-group > p { margin: 5px 10px 4px; color: var(--color-text-tertiary); font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.account-action-group button { display: flex; align-items: center; gap: 9px; width: 100%; min-height: 34px; padding: 8px 10px; border: 0; border-radius: 8px; background: transparent; color: var(--color-text); font: inherit; font-size: var(--text-sm); text-align: left; cursor: pointer; }
+.account-action-group button:hover { background: var(--color-bg-subtle); }
+.account-action-divider { height: 1px; margin: 6px 4px; background: var(--color-border); }
+
+.advanced-config { margin: var(--space-4) 0; border: 1px solid var(--color-border); border-radius: var(--radius-lg); background: var(--color-bg-subtle); }
+.advanced-config-toggle { display: flex; align-items: center; justify-content: space-between; width: 100%; min-height: 42px; padding: 0 var(--space-3); border: 0; border-radius: inherit; background: transparent; color: var(--color-text-secondary); font: inherit; font-size: var(--text-sm); font-weight: 600; cursor: pointer; text-align: left; }
+.advanced-config-toggle:hover { color: var(--color-text); background: color-mix(in srgb, var(--color-bg-raised) 55%, transparent); }
+.advanced-config-toggle span { color: var(--color-primary); font-size: 18px; }
+.advanced-config-panel { padding: var(--space-3); border-top: 1px solid var(--color-border); background: var(--color-bg-raised); }
+.proxy-config { display: flex; flex-wrap: wrap; gap: var(--space-3); margin: var(--space-4) 0 0; padding: var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius); }
+.proxy-config legend { padding: 0 5px; color: var(--color-text-secondary); font-size: var(--text-sm); }
+.proxy-config > label { display: inline-flex; align-items: center; gap: 6px; margin: 0; font-size: var(--text-sm); cursor: pointer; }
+.proxy-config input[type='radio'] { width: 16px; min-height: 16px; margin: 0; accent-color: var(--color-primary); }
+.proxy-config-input { width: 100%; margin: 0; }
+
+.smart-cookie-label-row { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
+.text-button { min-height: auto; padding: 3px 0; border: 0; background: transparent; color: var(--color-primary); font: inherit; font-size: var(--text-xs); cursor: pointer; }
+.text-button:hover:not(:disabled) { text-decoration: underline; }
+.smart-cookie-status { margin-top: var(--space-2); font-size: var(--text-xs); }
+.smart-cookie-status.is-valid { color: var(--color-success); }
+.smart-cookie-status.is-invalid { color: var(--color-danger); }
+.login-account-context { margin: 0 0 var(--space-4); padding: var(--space-2) var(--space-3); border-radius: var(--radius); background: var(--color-bg-subtle); color: var(--color-text-secondary); font-size: var(--text-sm); overflow-wrap: anywhere; }
+.login-account-context strong { color: var(--color-text); font-family: var(--font-mono); font-weight: 500; }
+
+@media (max-width: 640px) {
+  .account-row-actions { gap: 2px; }
+  .account-edit-button, .account-delete-button { padding: 5px 7px; }
+  .account-more-popover { width: min(208px, calc(100vw - 16px)); }
+}
