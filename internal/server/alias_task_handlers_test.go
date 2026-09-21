@@ -31,7 +31,7 @@ func TestAliasTaskHandlersClassifyDomainAndPersistenceErrors(t *testing.T) {
 	s.task.file = filepath.Join(t.TempDir(), "tasks.json")
 	s.task.logFile = filepath.Join(filepath.Dir(s.task.file), "logs.json")
 	session, csrf := login(t, ts, "admin-pass-2026-strong")
-	valid := `{"account_id":"acc_1","interval_minutes":20,"target_count":2,"daily_limit":2}`
+	valid := `{"account_id":"acc_1","mode":"scheduled","interval_minutes":20,"batch_count":1,"target_count":2}`
 
 	status, body := aliasTaskRequest(t, ts.URL, session, csrf, http.MethodPost, "/api/alias-tasks", `{"account_id":""}`)
 	if status != http.StatusBadRequest || !strings.Contains(body, `"code":"VALIDATION_ERROR"`) {
@@ -79,8 +79,8 @@ func TestCreateAliasRejectsManualCreationWhenAccountDailyLimitIsReached(t *testi
 	defer ts.Close()
 	today := time.Now().Format("2006-01-02")
 	s.task.tasks["task_daily_cap"] = AliasTask{
-		ID: "task_daily_cap", AccountID: "acc_1", Enabled: true, IntervalMinutes: 60,
-		DailyLimit: 20, MaxTotal: 100, DailyCount: 20, DailyDate: today,
+		ID: "task_daily_cap", AccountID: "acc_1", Enabled: true, Mode: taskModeScheduled, IntervalMinutes: 60, BatchCount: 1,
+		DailyLimit: maxTaskDailyLimit, MaxTotal: 100, DailyCount: maxTaskDailyLimit, DailyDate: today,
 	}
 	session, csrf := login(t, ts, "admin-pass-2026-strong")
 	status, body := aliasTaskRequest(t, ts.URL, session, csrf, http.MethodPost, "/api/create", `{"account_id":"acc_1","label":"GitHub"}`)

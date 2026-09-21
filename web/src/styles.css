@@ -427,7 +427,8 @@ button.ghost:hover:not(:disabled) {
 }
 
 /* ─── 表单 ─── */
-label {
+label,
+.field-label {
   display: block;
   margin-bottom: var(--space-1);
   font-weight: 500;

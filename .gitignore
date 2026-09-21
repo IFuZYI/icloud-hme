@@ -26,6 +26,7 @@ reverse_task/
 js
 accounts.json
 *.exe
+*.tmp
 build/
 /icloud-hme
 

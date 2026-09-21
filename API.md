@@ -231,7 +231,7 @@ X-CSRF-Token: <token>
 - `account_id` 必填
 - `label` 必填，必须来自 `GET /api/alias-labels` 返回的名称库
 - 同一账号任何两次创建尝试（成功或失败、人工或自动）至少相隔 20 分钟；过早请求返回 `429 CREATION_COOLDOWN`
-- 单个账号当天最多创建 20 个（人工创建与自动任务合并统计）；超过上限返回 `429 CREATION_LIMIT_REACHED`
+- 单个账号当天最多创建 50 个（人工创建与自动任务合并统计）；超过上限返回 `429 CREATION_LIMIT_REACHED`
 - 若上游创建失败，已预留的人工创建额度会归还
 
 **响应：**
@@ -397,7 +397,42 @@ X-CSRF-Token: <token>
 }
 ```
 
-### 18. 重新加载配置
+### 18. 自动创建任务
+
+自动任务为账号低频创建 HME 别名，达到 `target_count` 后自动停止。分两类：
+
+- **自主任务（`mode: auto`）**：`daily_limit` 设定每天创建数量（取值 5/10/…/50），系统按 24 小时自动分摊执行时刻，每次 1 个。`interval_minutes` 由系统推算（24×60 ÷ 每日数量，不低于 20），无需填写。
+- **定时任务（`mode: scheduled`）**：每隔 `interval_minutes`（20–1440）创建 `batch_count`（1–20）个；`daily_limit` 固定为账号每日安全上限 50。
+
+标签由 `label_mode` 决定：`library`（名称库轮换）/ `sequential`（`label_prefix` + 补零序号）/ `hash`（`label_prefix` + `hash_length` 位随机哈希，4–8）。
+
+```http
+GET    /api/alias-tasks              # 列出任务（含进度与 next_run）
+POST   /api/alias-tasks              # 新建（默认启用，10 秒后首轮）
+PATCH  /api/alias-tasks/:id          # 编辑（保存后自动重新启用）
+POST   /api/alias-tasks/:id/toggle   # 启用 / 暂停
+DELETE /api/alias-tasks/:id          # 删除
+GET    /api/alias-task-logs          # 运行日志（逐邮箱成功/失败）
+X-CSRF-Token: <token>                # 非 GET 请求需要
+```
+
+**新建请求体（字段校验）：**
+
+| 字段 | 必填 | 说明 |
+|---|---|---|
+| `account_id` | ✅ | 目标账号 ID |
+| `target_count` | ✅ | 累计创建目标（1–999） |
+| `mode` | ⭕ | `auto`（默认）/ `scheduled` |
+| `daily_limit` | auto 必填 | 每天创建数量，取值 5/10/…/50 |
+| `interval_minutes` | scheduled 必填 | 间隔分钟（20–1440） |
+| `batch_count` | scheduled 必填 | 每周期数量（1–20） |
+| `label_mode` | ⭕ | `library`（默认）/ `sequential` / `hash` |
+| `label_prefix` | sequential/hash 必填 | 标签前缀（最长 32 字符） |
+| `hash_length` | ⭕ | hash 后缀长度（4–8，默认 4） |
+
+参数不合法返回 `400 VALIDATION_ERROR`，任务不存在返回 `404 TASK_NOT_FOUND`。任意创建失败会立即暂停任务并清空 `next_run`。旧版任务向后兼容：缺 `mode` 视为 `scheduled`，缺 `label_mode` 视为 `library`。
+
+### 19. 重新加载配置
 
 ```http
 POST /api/reload
@@ -482,7 +517,7 @@ curl -b cookies.txt "$BASE/api/inbox?account_id=acc_1&limit=10"
 
 ## 限制
 
-- **创建频率**：同账号所有创建尝试至少相隔 20 分钟；自动任务限制为 20–60 分钟一次、每次 1 个，并对人工与自动创建合计执行每账号每天 20 个上限；上游失败不自动重试，自动任务会暂停等待人工确认。
+- **创建频率**：同账号所有创建尝试至少相隔 20 分钟；自动任务分自主（每天 5–50 个自动分摊时刻）与定时（每 20–1440 分钟创建 1–20 个）两类，并对人工与自动创建合计执行每账号每天 50 个上限；上游失败不自动重试，自动任务会暂停等待人工确认。
 - **Cookie 有效期**：约 24 小时，需定期更新
 - **邮件读取**：依赖 IMAP 连接，超时默认 30 秒
 - **请求体上限**：1 MiB

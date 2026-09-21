@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link, useSearchParams, useNavigate } from 'react-router-dom'
 import { request, ApiError } from '../api/client'
+import { fetchAccounts } from '../api/cache'
 import type { AccountSummary, Alias } from '../api/types'
 import AsyncState from '../components/AsyncState'
 import CreateAliasDialog from '../components/CreateAliasDialog'
@@ -75,10 +76,10 @@ export default function AliasesPage() {
   const navigate = useNavigate()
   const { show, showCopyable } = useToast()
 
-  // 加载账号列表
+  // 加载账号列表(共享缓存: 换页时瞬时命中, 后台静默刷新)
   useEffect(() => {
     let cancelled = false
-    request<AccountSummary[]>('/api/accounts')
+    fetchAccounts<AccountSummary[]>()
       .then((data) => {
         if (cancelled) return
         setAccounts(data)
@@ -122,8 +123,10 @@ export default function AliasesPage() {
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase()
+    // 预解析时间戳一次: 排序比较是 O(n log n) 次, 若每次比较都重新解析日期
+    // (含正则与多分支)会放大成千上万次解析; 先算好存入行内, 排序只做数值比较。
     return aliases
-      .map((alias, index) => ({ alias, index }))
+      .map((alias, index) => ({ alias, index, time: dateTimestamp(alias.createdAt) }))
       .filter(({ alias }) => {
         if (filter === 'active' && !alias.active) return false
         if (filter === 'inactive' && alias.active) return false
@@ -131,8 +134,8 @@ export default function AliasesPage() {
         return alias.email.toLowerCase().includes(q) || alias.label.toLowerCase().includes(q)
       })
       .sort((left, right) => {
-        const leftTime = dateTimestamp(left.alias.createdAt)
-        const rightTime = dateTimestamp(right.alias.createdAt)
+        const leftTime = left.time
+        const rightTime = right.time
         if (leftTime === null || rightTime === null) {
           if (leftTime === rightTime) return left.index - right.index
           return leftTime === null ? 1 : -1

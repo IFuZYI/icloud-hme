@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { request, ApiError } from '../api/client'
+import { fetchAccounts, invalidateAccounts } from '../api/cache'
 import type { AccountSummary } from '../api/types'
 import AsyncState from '../components/AsyncState'
 import AccountFormDialog from '../components/AccountFormDialog'
@@ -72,10 +73,13 @@ export default function AccountsPage() {
   const { show } = useToast()
   const navigate = useNavigate()
 
+  // 账号页是写操作入口: 每次刷新都让共享缓存失效并重新拉取,
+  // 保证别名/收件箱/任务页下次读取拿到最新账号数据。
   const load = useCallback(async () => {
     setLoading(true)
     try {
-      const data = await request<AccountSummary[]>('/api/accounts')
+      invalidateAccounts()
+      const data = await fetchAccounts<AccountSummary[]>()
       setAccounts(data)
       setError('')
     } catch (err) {
@@ -87,7 +91,7 @@ export default function AccountsPage() {
 
   useEffect(() => {
     let cancelled = false
-    request<AccountSummary[]>('/api/accounts')
+    fetchAccounts<AccountSummary[]>()
       .then((data) => {
         if (cancelled) return
         setAccounts(data)
@@ -107,6 +111,7 @@ export default function AccountsPage() {
 
   function handleRetry() {
     setLoading(true)
+    invalidateAccounts()
     setRetryKey((k) => k + 1)
   }
 
@@ -260,9 +265,11 @@ export default function AccountsPage() {
       {appPwdFor && (
         <AppPasswordDialog
           accountId={appPwdFor.id}
+          accountEmail={appPwdFor.icloud_email || appPwdFor.real_email}
           open
           onClose={() => setAppPwdFor(null)}
           onSaved={() => {
+            setAppPwdFor(null)
             show('App 专用密码已设置')
             void load()
           }}

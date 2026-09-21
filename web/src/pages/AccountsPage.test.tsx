@@ -219,11 +219,13 @@ describe('AccountsPage', () => {
     const user = userEvent.setup()
     await user.click(screen.getAllByRole('button', { name: /更多操作/ })[0])
     await user.click(screen.getByRole('menuitem', { name: 'App 专用密码' }))
-    await user.type(screen.getByLabelText(/邮箱/), 'app@icloud.com')
+    // 邮箱自动填充为账号的 iCloud 邮箱
+    expect((screen.getByLabelText(/邮箱/) as HTMLInputElement).value).toBe('active@icloud.com')
     await user.type(screen.getByLabelText('App 专用密码'), 'xxxx-xxxx-xxxx-xxxx')
     await user.click(screen.getByRole('button', { name: /保存/ }))
-    await waitFor(() => expect(pwdBody).toContain('app@icloud.com'))
-    expect((screen.getByLabelText('App 专用密码') as HTMLInputElement).value).toBe('')
+    await waitFor(() => expect(pwdBody).toContain('active@icloud.com'))
+    // 保存成功后对话框自动关闭
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
   })
 
   it('代理从不回显:保存后输入清空,关闭再打开仍为空', async () => {
