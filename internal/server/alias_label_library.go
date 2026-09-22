@@ -3,6 +3,7 @@ package server
 import (
 	"crypto/rand"
 	"fmt"
+	mrand "math/rand/v2"
 )
 
 // aliasLabelLibrary 是内置的常用服务名称库。自动生成标签的任务按顺序循环取用，
@@ -194,14 +195,28 @@ func buildAliasLabelSet() map[string]struct{} {
 	return set
 }
 
-func aliasLabelFor(index int) string {
-	if len(aliasLabelLibrary) == 0 {
+// shuffledLibraryIndices 返回名称库下标 [0,N) 的一个确定性随机排列，由
+// (seed, round) 唯一决定。同一任务在同一轮内取到的是一个完整排列，因此走完
+// 整轮才会重复；进入下一轮时 round 递增，重新洗牌避免与上一轮同序。
+func shuffledLibraryIndices(seed, round uint64) []int {
+	r := mrand.New(mrand.NewPCG(seed, round))
+	return r.Perm(len(aliasLabelLibrary))
+}
+
+// libraryLabelForSeed 按任务种子取第 ordinal 个名称（ordinal 从 0 开始）。
+// 相比顺序循环，不同 seed 产生彼此错开的抽取序列，显著降低跨任务撞名概率；
+// 单任务在抽满整个名称库之前不会重复。定位仍只依赖已持久化的 ordinal，
+// 无需额外的进度状态，重启后用同一 seed 可无缝续上。
+func libraryLabelForSeed(seed uint64, ordinal int) string {
+	n := len(aliasLabelLibrary)
+	if n == 0 {
 		return "服务账号"
 	}
-	if index < 0 {
-		index = 0
+	if ordinal < 0 {
+		ordinal = 0
 	}
-	return aliasLabelLibrary[index%len(aliasLabelLibrary)]
+	perm := shuffledLibraryIndices(seed, uint64(ordinal/n))
+	return aliasLabelLibrary[perm[ordinal%n]]
 }
 
 func isKnownAliasLabel(label string) bool {
@@ -247,7 +262,7 @@ func randomHash(n int) string {
 }
 
 // labelFor 按任务的标签模式生成第 number 个别名的标签（number 从 1 开始）。
-//   - library:    从内置名称库按序循环取用；
+//   - library:    按任务种子从内置名称库随机抽取（单任务整轮不重复，跨任务错开）；
 //   - sequential: 前缀 + 补零序号（如 主邮箱001）；
 //   - hash:       前缀 + 随机哈希后缀（如 主邮箱-k7m9）。
 func (t AliasTask) labelFor(number int) string {
@@ -260,6 +275,48 @@ func (t AliasTask) labelFor(number int) string {
 	case labelModeHash:
 		return t.LabelPrefix + randomHash(t.HashLength)
 	default:
-		return aliasLabelFor(number - 1)
+		return libraryLabelForSeed(t.librarySeed(), number-1)
 	}
+}
+
+// librarySeed 返回名称库抽取所用的任务种子。优先用持久化的 LabelSeed；旧任务
+// 未写入该字段（值为 0）时退化为按 ID 派生，既保证不同任务错开，又稳定可复现。
+func (t AliasTask) librarySeed() uint64 {
+	if t.LabelSeed != 0 {
+		return t.LabelSeed
+	}
+	return fnv64(t.ID)
+}
+
+// fnv64 是 FNV-1a 64 位哈希，用于从任务 ID 派生稳定种子（避免额外依赖）。
+func fnv64(s string) uint64 {
+	const (
+		offset uint64 = 14695981039346656037
+		prime  uint64 = 1099511628211
+	)
+	h := offset
+	for i := 0; i < len(s); i++ {
+		h ^= uint64(s[i])
+		h *= prime
+	}
+	// 避免返回 0：0 是 LabelSeed 的“未设置”哨兵，派生值撞上时偏移到 1。
+	if h == 0 {
+		return 1
+	}
+	return h
+}
+
+// newLabelSeed 用 crypto/rand 生成一个非零的名称库抽取种子。随机源不可用时
+// 回退到一个固定非零值，调用方仍可正常抽取（退化为可复现序列而非 panic）。
+func newLabelSeed() uint64 {
+	buf := make([]byte, 8)
+	if _, err := rand.Read(buf); err != nil {
+		return 1
+	}
+	seed := uint64(buf[0]) | uint64(buf[1])<<8 | uint64(buf[2])<<16 | uint64(buf[3])<<24 |
+		uint64(buf[4])<<32 | uint64(buf[5])<<40 | uint64(buf[6])<<48 | uint64(buf[7])<<56
+	if seed == 0 {
+		return 1
+	}
+	return seed
 }
