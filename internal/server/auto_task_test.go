@@ -136,7 +136,7 @@ func TestAutoTaskUsesLabelLibraryAndEnforcesDailyCap(t *testing.T) {
 	if len(be.labels) != 1 {
 		t.Fatalf("created %d aliases, want only the remaining daily capacity", len(be.labels))
 	}
-	if be.labels[0] != "GitHub" {
+	if !isKnownAliasLabel(be.labels[0]) {
 		t.Fatalf("label should come from the built-in library, got %v", be.labels)
 	}
 	if task.CreatedCount != 20 || !task.Enabled {
@@ -425,9 +425,14 @@ func TestAutoTaskRunOnceNeverReusesReservedSequenceAfterPersistentPostCreateFail
 		return writeJSONAtomic(path, value)
 	}
 
+	// 期望标签由任务种子确定：第 1 个用 ordinal 0，重启后续第 2 个用 ordinal 1。
+	seed := task.librarySeed()
+	wantFirst := libraryLabelForSeed(seed, 0)
+	wantSecond := libraryLabelForSeed(seed, 1)
+
 	out := m.runOnce(task.ID)
-	if len(backend.labels) != 1 || backend.labels[0] != "GitHub" {
-		t.Fatalf("backend calls = %#v", backend.labels)
+	if len(backend.labels) != 1 || backend.labels[0] != wantFirst {
+		t.Fatalf("backend calls = %#v, want first label %q", backend.labels, wantFirst)
 	}
 	if out.Enabled || out.NextNumber != 2 || !strings.Contains(out.LastError, "persistent post-reservation failure") {
 		t.Fatalf("run result did not pause and report persistent failure: %+v", out)
@@ -441,8 +446,8 @@ func TestAutoTaskRunOnceNeverReusesReservedSequenceAfterPersistentPostCreateFail
 	}
 	restarted.creationGuards[task.AccountID] = creationGuard{LastAttempt: time.Now().Add(-minCreationCooldown).Format(time.RFC3339Nano)}
 	restarted.runOnce(task.ID)
-	if len(restartedBackend.labels) == 0 || restartedBackend.labels[0] != "GitLab" {
-		t.Fatalf("restart reused consumed label sequence: %#v", restartedBackend.labels)
+	if len(restartedBackend.labels) == 0 || restartedBackend.labels[0] != wantSecond {
+		t.Fatalf("restart reused consumed label sequence: %#v, want next label %q", restartedBackend.labels, wantSecond)
 	}
 }
 

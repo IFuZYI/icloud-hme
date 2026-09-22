@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	mrand "math/rand/v2"
 	"os"
 	"path/filepath"
 	"strings"
@@ -31,6 +32,14 @@ const (
 
 	// scheduled 任务单个周期允许创建的数量上限（防止一次性爆发）。
 	maxBatchPerInterval = 20
+
+	// 自主任务的拟人活动窗口：仅在 [autoActiveStartHour, autoActiveEndHour) 内创建，
+	// 避免凌晨等间隔创建暴露机器特征。窗口过窄容纳不下当日数量时会自动前移起点。
+	autoActiveStartHour = 8
+	autoActiveEndHour   = 24
+	// autoJitterSigma 为创建间隔的乘性扰动幅度：实际间隔 = 基准 × (1 ± sigma)。
+	// 取三角分布，使多数间隔落在基准附近、偶尔明显偏长或偏短，更接近真人节奏。
+	autoJitterSigma = 0.4
 )
 
 // allowedDailyCounts 是自主任务可选的每日创建数量。
@@ -70,7 +79,10 @@ type AliasTask struct {
 	// LabelPrefix 为手动标签前缀（sequential/hash 模式使用）。
 	LabelPrefix string `json:"label_prefix,omitempty"`
 	// HashLength 为哈希后缀长度（hash 模式使用）。
-	HashLength   int    `json:"hash_length,omitempty"`
+	HashLength int `json:"hash_length,omitempty"`
+	// LabelSeed 为 library 模式的名称库抽取种子。每个任务独立随机生成，使不同
+	// 任务的抽取序列彼此错开，降低跨任务撞名概率；为 0 时按任务 ID 派生（兼容旧任务）。
+	LabelSeed    uint64 `json:"label_seed,omitempty"`
 	MaxTotal     int    `json:"max_total"`
 	CreatedCount int    `json:"created_count"`
 	NextNumber   int    `json:"next_number"`
@@ -134,6 +146,9 @@ type autoTaskManager struct {
 	batchDelay     time.Duration
 	writeState     func(string, any) error
 	writeLogs      func(string, any) error
+	// now 与 jitter 可注入，便于测试确定化。jitter 返回以 1.0 为中心的乘性因子。
+	now    func() time.Time
+	jitter func() float64
 }
 
 func normalizeAliasTask(in aliasTaskInput) (AliasTask, error) {
@@ -150,6 +165,8 @@ func normalizeAliasTask(in aliasTaskInput) (AliasTask, error) {
 		AccountID:  strings.TrimSpace(in.AccountID),
 		MaxTotal:   in.TargetCount,
 		NextNumber: 1,
+		// 为名称库抽取分配独立随机种子，使不同任务的序列彼此错开。
+		LabelSeed: newLabelSeed(),
 	}
 
 	mode := in.Mode
@@ -164,7 +181,8 @@ func normalizeAliasTask(in aliasTaskInput) (AliasTask, error) {
 		}
 		task.Mode = taskModeAuto
 		task.DailyLimit = in.DailyLimit
-		// 自主任务的执行间隔由系统按每日数量自动分摊（见 autoIntervalMinutes）。
+		// 自主任务的实际执行间隔由 nextAutoDelay 在每次调度时按活动窗口+剩余预算
+		// +随机扰动动态计算；此处仅存一个按每日数量分摊的基准值作为 NextRun 初值估算。
 		task.IntervalMinutes = autoIntervalMinutes(in.DailyLimit)
 		task.BatchCount = 1
 	case taskModeScheduled:
@@ -232,8 +250,77 @@ func autoIntervalMinutes(dailyCount int) int {
 	}
 	return interval
 }
+
+// autoActiveWindow 返回 now 所在自然日的拟人活动窗口 [start, end)。
+// 当窗口时长不足以在最小冷却间隔内容纳 remaining 个创建时，自动向前扩展起点，
+// 保证当日目标仍可达成（宁可放宽作息也不违反 20 分钟冷却红线）。
+func autoActiveWindow(now time.Time, remaining int) (time.Time, time.Time) {
+	end := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location()).Add(autoActiveEndHour * time.Hour)
+	start := time.Date(now.Year(), now.Month(), now.Day(), autoActiveStartHour, 0, 0, 0, now.Location())
+	if remaining < 1 {
+		return start, end
+	}
+	// 至少要留出 remaining 段最小冷却；不够则把起点前移（不早于 0 点）。
+	needed := time.Duration(remaining) * minCreationCooldown
+	if earliest := end.Add(-needed); earliest.Before(start) {
+		start = earliest
+		if dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location()); start.Before(dayStart) {
+			start = dayStart
+		}
+	}
+	return start, end
+}
+
+// nextAutoDelay 计算自主任务下一次创建前应等待的时长。三层叠加：
+//  1. 剩余预算配速：base = 窗口剩余时长 / 当日剩余数量，天然自校正，使当日总数收敛到目标；
+//  2. 乘性随机扰动：base × jitter()（以 1.0 为中心的三角分布），制造不规则的真人节奏；
+//  3. 昼夜窗口 + 冷却地板：窗口外顺延到窗口起点或次日；结果不低于 minCreationCooldown。
+func (m *autoTaskManager) nextAutoDelay(t AliasTask, now time.Time) time.Duration {
+	remaining := t.DailyLimit - t.DailyCount
+	if remaining <= 0 {
+		// 当日额度用尽，睡到次日窗口起点附近。
+		return nextDailyRun(now).Sub(now)
+	}
+	start, end := autoActiveWindow(now, remaining)
+	if now.Before(start) {
+		return start.Sub(now)
+	}
+	if !now.Before(end) {
+		return nextDailyRun(now).Sub(now)
+	}
+	base := end.Sub(now) / time.Duration(remaining)
+	delay := time.Duration(float64(base) * m.jitterFactor())
+	if delay < minCreationCooldown {
+		delay = minCreationCooldown
+	}
+	return delay
+}
+
+// jitterFactor 返回本次调度的乘性扰动因子，注入缺省时退化为无扰动的 1.0。
+func (m *autoTaskManager) jitterFactor() float64 {
+	if m.jitter == nil {
+		return 1.0
+	}
+	return m.jitter()
+}
+
+// nowFunc 返回可注入的时钟，缺省为 time.Now。
+func (m *autoTaskManager) nowFunc() time.Time {
+	if m.now == nil {
+		return time.Now()
+	}
+	return m.now()
+}
+
+// triangularJitter 返回区间 [1-sigma, 1+sigma]、众数为 1.0 的三角分布采样，
+// 只依赖 math/rand/v2 的全局源（无需额外种子管理）。
+func triangularJitter() float64 {
+	// 两个均匀随机数之和的一半服从三角分布，均值 0.5、范围 [0,1]。
+	u := (mrand.Float64() + mrand.Float64()) / 2
+	return 1 + autoJitterSigma*(2*u-1)
+}
 func newAutoTaskManager(file string, backend Backend) *autoTaskManager {
-	m := &autoTaskManager{file: file, logFile: filepath.Join(filepath.Dir(file), "alias_task_logs.json"), backend: backend, tasks: map[string]AliasTask{}, stops: map[string]chan struct{}{}, done: map[string]chan struct{}{}, creating: map[string]bool{}, manualDaily: map[string]dailyCreationCounter{}, creationGuards: map[string]creationGuard{}, batchDelay: 3 * time.Second, writeState: writeJSONAtomic, writeLogs: writeJSONAtomic}
+	m := &autoTaskManager{file: file, logFile: filepath.Join(filepath.Dir(file), "alias_task_logs.json"), backend: backend, tasks: map[string]AliasTask{}, stops: map[string]chan struct{}{}, done: map[string]chan struct{}{}, creating: map[string]bool{}, manualDaily: map[string]dailyCreationCounter{}, creationGuards: map[string]creationGuard{}, batchDelay: 3 * time.Second, writeState: writeJSONAtomic, writeLogs: writeJSONAtomic, now: time.Now, jitter: triangularJitter}
 	m.load()
 	m.loadLogs()
 	return m
@@ -257,6 +344,11 @@ func (m *autoTaskManager) load() {
 			}
 			if t.NextNumber < 1 {
 				t.NextNumber = 1
+			}
+			// 兼容旧任务：未写入抽取种子时按 ID 派生一个稳定非零种子，
+			// 使其从顺序抽取切换到与其它任务错开的随机抽取。
+			if t.LabelSeed == 0 {
+				t.LabelSeed = fnv64(t.ID)
 			}
 			// 兼容旧任务：旧记录没有 mode 字段，按定时任务解释。
 			if t.Mode == "" {
@@ -365,6 +457,8 @@ func (m *autoTaskManager) update(id string, in aliasTaskInput) (AliasTask, error
 	n.ID = id
 	n.Enabled = true
 	n.NextNumber = old.NextNumber
+	// 保留原有抽取种子，使更新任务不改变名称库抽取序列（避免与已创建标签重叠）。
+	n.LabelSeed = old.LabelSeed
 	n.CreatedCount = old.CreatedCount
 	n.DailyCount = old.DailyCount
 	n.DailyDate = old.DailyDate
@@ -491,32 +585,79 @@ func (m *autoTaskManager) ensureRunning(id string) error {
 	done := make(chan struct{})
 	m.stops[id] = stop
 	m.done[id] = done
-	interval := time.Duration(t.IntervalMinutes) * time.Minute
+	// 自主任务用带随机扰动的动态间隔（更接近真人节奏）；定时任务保持精确固定间隔。
+	auto := t.Mode == taskModeAuto
+	var firstDelay time.Duration
+	if auto {
+		firstDelay = m.nextAutoDelay(t, m.nowFunc())
+	} else {
+		firstDelay = time.Duration(t.IntervalMinutes) * time.Minute
+	}
 	// 从「启用时刻 + 间隔」推算下次执行,而不是沿用暂停前的绝对时刻。
-	t.NextRun = time.Now().Add(interval).Format(time.RFC3339)
+	t.NextRun = m.nowFunc().Add(firstDelay).Format(time.RFC3339)
 	m.tasks[id] = t
 	saveErr := m.saveLocked()
 	if saveErr != nil {
 		m.tasks[id] = old
 	}
 	m.mu.Unlock()
-	go func() {
-		defer close(done)
-		timer := time.NewTicker(interval)
-		defer timer.Stop()
-		for {
-			select {
-			case <-timer.C:
-				m.runOnce(id)
-			case <-stop:
-				m.mu.Lock()
-				delete(m.stops, id)
-				m.mu.Unlock()
-				return
-			}
-		}
-	}()
+	if auto {
+		go m.runAutoLoop(id, stop, done, firstDelay)
+	} else {
+		go m.runScheduledLoop(id, stop, done, firstDelay)
+	}
 	return saveErr
+}
+
+// runScheduledLoop 以固定间隔精确触发定时任务，直到收到停止信号。
+func (m *autoTaskManager) runScheduledLoop(id string, stop, done chan struct{}, interval time.Duration) {
+	defer close(done)
+	timer := time.NewTicker(interval)
+	defer timer.Stop()
+	for {
+		select {
+		case <-timer.C:
+			m.runOnce(id)
+		case <-stop:
+			m.mu.Lock()
+			delete(m.stops, id)
+			m.mu.Unlock()
+			return
+		}
+	}
+}
+
+// runAutoLoop 用自重排定时器驱动自主任务：每次创建后按 nextAutoDelay 重新计算
+// 下一次的扰动间隔，而非固定周期，从而呈现不规则的拟人创建节奏。
+func (m *autoTaskManager) runAutoLoop(id string, stop, done chan struct{}, firstDelay time.Duration) {
+	defer close(done)
+	timer := time.NewTimer(firstDelay)
+	defer timer.Stop()
+	for {
+		select {
+		case <-timer.C:
+			m.runOnce(id)
+			// 重排下一次：读取最新任务状态计算扰动间隔并回写 NextRun。
+			m.mu.Lock()
+			t, ok := m.tasks[id]
+			if !ok || !t.Enabled || t.CreatedCount >= t.MaxTotal {
+				m.mu.Unlock()
+				// 任务已终止；runOnce 内已 requestStop，此处等待停止信号。
+				continue
+			}
+			next := m.nextAutoDelay(t, m.nowFunc())
+			t.NextRun = m.nowFunc().Add(next).Format(time.RFC3339)
+			m.tasks[id] = t
+			_ = m.saveLocked()
+			m.mu.Unlock()
+			timer.Reset(next)
+		case <-stop:
+			m.mu.Lock()
+			delete(m.stops, id)
+			m.mu.Unlock()
+			return
+		}
+	}
 }
 func (m *autoTaskManager) runOnce(id string) AliasTask {
 	m.mu.Lock()
@@ -680,10 +821,15 @@ func (m *autoTaskManager) runOnce(id string) AliasTask {
 		t.Enabled = false
 	}
 	// 仅当任务仍启用且未达上限时,按「本轮结束 + 间隔」推算下次执行;否则清空。
+	// 自主任务使用带扰动的动态间隔,定时任务使用固定间隔。
 	if t.Enabled && t.CreatedCount < t.MaxTotal && t.DailyCount >= t.DailyLimit {
 		t.NextRun = nextDailyRun(time.Now()).Format(time.RFC3339)
 	} else if t.Enabled && t.CreatedCount < t.MaxTotal {
-		t.NextRun = time.Now().Add(time.Duration(t.IntervalMinutes) * time.Minute).Format(time.RFC3339)
+		if t.Mode == taskModeAuto {
+			t.NextRun = m.nowFunc().Add(m.nextAutoDelay(t, m.nowFunc())).Format(time.RFC3339)
+		} else {
+			t.NextRun = time.Now().Add(time.Duration(t.IntervalMinutes) * time.Minute).Format(time.RFC3339)
+		}
 	} else {
 		t.NextRun = ""
 	}
