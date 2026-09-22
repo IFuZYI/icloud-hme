@@ -12,3 +12,8 @@ const dateTimeFormatter = new Intl.DateTimeFormat('zh-CN', {
 export function formatDateTime(date: Date): string {
   return dateTimeFormatter.format(date)
 }
+
+/** 把分钟数格式化为 "N 小时"(整点)或 "N 分钟"。任务表单与任务列表共用。 */
+export function formatIntervalMinutes(minutes: number): string {
+  return minutes % 60 === 0 ? `${minutes / 60} 小时` : `${minutes} 分钟`
+}
