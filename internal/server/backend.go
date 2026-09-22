@@ -172,7 +172,10 @@ func (b *managerBackend) LoginAccount(id, password, otpCode string) (account.Sum
 	if err != nil {
 		return account.Summary{}, classifyLoginErr(err)
 	}
-	_ = client
+	// 登录后立即按真实别名列表刷新计数,避免账号管理页停留在 0/0。
+	if aliases, listErr := client.ListAliases(); listErr == nil {
+		_ = b.mgr.UpdateAliasCounts(id, aliases)
+	}
 	sum, ok := b.mgr.GetAccount(id)
 	if !ok {
 		return account.Summary{}, &BackendError{Status: http.StatusNotFound, Code: "ACCOUNT_NOT_FOUND", Message: "账号不存在"}
@@ -220,6 +223,9 @@ func (b *managerBackend) CreateAlias(accountID, label string) (*hme.CreateResult
 }
 
 // ListAliases 列出账号的 HME 别名。
+//
+// 顺带按最新列表刷新账号的别名总数/活跃数:别名页在创建/删除/停用后都会重新
+// 拉取本接口,因此这里回写计数即可让账号管理页的显示持续与真实状态一致。
 func (b *managerBackend) ListAliases(accountID string) ([]hme.Alias, error) {
 	client, err := b.mgr.HMEClient(accountID, false)
 	if err != nil {
@@ -230,6 +236,7 @@ func (b *managerBackend) ListAliases(accountID string) ([]hme.Alias, error) {
 	if err != nil {
 		return nil, classifyUpstreamErr("获取别名列表失败", err)
 	}
+	_ = b.mgr.UpdateAliasCounts(accountID, aliases)
 	return aliases, nil
 }
 

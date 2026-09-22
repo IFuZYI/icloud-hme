@@ -310,12 +310,7 @@ func (a *Account) validateCookies() {
 		}
 	}
 	if aliases, err := client.ListAliases(); err == nil {
-		a.AliasTotal = len(aliases)
-		for _, al := range aliases {
-			if al.Active {
-				a.AliasActive++
-			}
-		}
+		a.AliasTotal, a.AliasActive = countAliases(aliases)
 	}
 	a.LastValidated = time.Now().Format(time.RFC3339)
 }
@@ -754,6 +749,34 @@ func (m *Manager) SaveCookies(id string, cookies map[string]string) error {
 	return m.save()
 }
 
+// UpdateAliasCounts 按最新别名列表重算账号的别名总数/活跃数并持久化。
+//
+// 计数以传入列表为准整体覆盖(非累加),因此在列别名/创建/删除/停用别名或
+// 会话重新校验后调用,都能让账号管理页的显示与真实状态一致。
+func (m *Manager) UpdateAliasCounts(id string, aliases []hme.Alias) error {
+	total, active := countAliases(aliases)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	acc, ok := m.accounts[id]
+	if !ok {
+		return fmt.Errorf("账号不存在: %s", id)
+	}
+	acc.AliasTotal = total
+	acc.AliasActive = active
+	return m.save()
+}
+
+// countAliases 返回别名总数与其中的活跃数。
+func countAliases(aliases []hme.Alias) (total, active int) {
+	total = len(aliases)
+	for _, al := range aliases {
+		if al.Active {
+			active++
+		}
+	}
+	return total, active
+}
+
 // UpdateCookies 更新指定账号的 Cookie,并自动校验会话有效性。
 func (m *Manager) UpdateCookies(id string, cookies map[string]string) error {
 	if len(cookies) == 0 {
@@ -796,6 +819,10 @@ func (m *Manager) UpdateCookies(id string, cookies map[string]string) error {
 				snap.ICloudEmail = deriveICloudEmail(info)
 			}
 		}
+		// 会话恢复后按真实别名列表重算计数,让账号管理页显示与实际一致。
+		if aliases, listErr := client.ListAliases(); listErr == nil {
+			snap.AliasTotal, snap.AliasActive = countAliases(aliases)
+		}
 	}
 
 	m.mu.Lock()
@@ -809,6 +836,8 @@ func (m *Manager) UpdateCookies(id string, cookies map[string]string) error {
 	cur.LastValidated = snap.LastValidated
 	cur.LastError = snap.LastError
 	cur.RealEmail = snap.RealEmail
+	cur.AliasTotal = snap.AliasTotal
+	cur.AliasActive = snap.AliasActive
 	if cur.ICloudEmail == "" {
 		cur.ICloudEmail = snap.ICloudEmail
 	}
