@@ -18,19 +18,10 @@ interface CacheEntry<T> {
   inflight?: Promise<T>
 }
 
-type Listener = () => void
-
 const store = new Map<string, CacheEntry<unknown>>()
-const listeners = new Map<string, Set<Listener>>()
 
 /** 默认新鲜期: 10 秒内的缓存直接命中, 不发网络。 */
 const DEFAULT_TTL = 10_000
-
-function notify(key: string): void {
-  const subs = listeners.get(key)
-  if (!subs) return
-  for (const fn of subs) fn()
-}
 
 /**
  * 拉取并写入缓存(带并发去重)。已有 inflight 时复用同一 Promise。
@@ -42,14 +33,12 @@ function fetchInto<T>(key: string, path: string): Promise<T> {
   const inflight = request<T>(path)
     .then((data) => {
       store.set(key, { data, updatedAt: Date.now() })
-      notify(key)
       return data
     })
     .catch((error) => {
       const prev = store.get(key) as CacheEntry<T> | undefined
       // 保留旧数据(SWR): 刷新失败不该抹掉可用的缓存, 只记录错误。
       store.set(key, { data: prev?.data, error, updatedAt: prev?.updatedAt ?? 0 })
-      notify(key)
       throw error
     })
 
@@ -57,15 +46,9 @@ function fetchInto<T>(key: string, path: string): Promise<T> {
   return inflight
 }
 
-/** 让某个缓存键失效: 清空数据, 下一次 read/hook 会重新拉取并通知订阅者。 */
+/** 让某个缓存键失效: 清空数据, 下一次读取会重新拉取。 */
 export function invalidate(key: string): void {
   store.delete(key)
-  notify(key)
-}
-
-/** 直接读取缓存数据(可能为 undefined)。 */
-export function peek<T>(key: string): T | undefined {
-  return (store.get(key) as CacheEntry<T> | undefined)?.data
 }
 
 /**
@@ -95,8 +78,7 @@ export function invalidateAccounts(): void {
   invalidate(ACCOUNTS_KEY)
 }
 
-/** 测试辅助: 清空整个缓存与订阅。 */
+/** 测试辅助: 清空整个缓存。 */
 export function __resetCache(): void {
   store.clear()
-  listeners.clear()
 }

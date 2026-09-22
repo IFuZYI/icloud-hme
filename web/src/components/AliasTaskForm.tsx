@@ -2,6 +2,7 @@ import { useState } from 'react'
 import Dialog from './Dialog'
 import { ApiError, request } from '../api/client'
 import SelectMenu from './SelectMenu'
+import { formatIntervalMinutes } from '../utils/datetime'
 import type { AccountSummary, AliasTask, LabelMode, TaskMode } from '../api/types'
 
 type Account = Pick<AccountSummary, 'id' | 'name'>
@@ -30,11 +31,6 @@ type FormState = {
 const DAILY_COUNTS = [5, 10, 15, 20, 25, 30, 35, 40, 45, 50]
 // 定时任务可选的创建间隔（分钟）。
 const INTERVALS = [20, 30, 45, 60, 90, 120, 180, 360, 720, 1440]
-
-function intervalLabel(minutes: number): string {
-  if (minutes % 60 === 0) return `${minutes / 60} 小时`
-  return `${minutes} 分钟`
-}
 
 function initialState(accounts: Account[], edit?: AliasTask): FormState {
   return {
@@ -169,7 +165,7 @@ export default function AliasTaskForm({ open, accounts, edit, onClose, onSaved }
               block
               ariaLabel="创建间隔"
               value={form.interval}
-              options={INTERVALS.map((value) => ({ value: String(value), label: intervalLabel(value) }))}
+              options={INTERVALS.map((value) => ({ value: String(value), label: formatIntervalMinutes(value) }))}
               onChange={(value) => update('interval', value)}
             />
           </div>

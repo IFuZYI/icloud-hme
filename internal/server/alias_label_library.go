@@ -182,6 +182,18 @@ func buildAliasLabelLibrary() []string {
 	return out
 }
 
+// aliasLabelSet 是名称库的集合视图，供 isKnownAliasLabel 做 O(1) 校验。
+// 名称库已扩充到 500+ 条，每次 /api/create 都线性扫描会成为热点路径浪费。
+var aliasLabelSet = buildAliasLabelSet()
+
+func buildAliasLabelSet() map[string]struct{} {
+	set := make(map[string]struct{}, len(aliasLabelLibrary))
+	for _, name := range aliasLabelLibrary {
+		set[name] = struct{}{}
+	}
+	return set
+}
+
 func aliasLabelFor(index int) string {
 	if len(aliasLabelLibrary) == 0 {
 		return "服务账号"
@@ -193,12 +205,8 @@ func aliasLabelFor(index int) string {
 }
 
 func isKnownAliasLabel(label string) bool {
-	for _, candidate := range aliasLabelLibrary {
-		if label == candidate {
-			return true
-		}
-	}
-	return false
+	_, ok := aliasLabelSet[label]
+	return ok
 }
 
 const (
