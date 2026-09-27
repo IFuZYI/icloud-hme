@@ -49,7 +49,7 @@ func NewWebClient(cookies map[string]string, dsid, host string) *WebClient {
 
 	c := &WebClient{
 		cookies:  cookies,
-		dsid:     dsid,
+		dsid:     strings.Trim(dsid, `"`),
 		clientID: uuid.New().String(),
 		host:     host,
 		httpc:    httpc,

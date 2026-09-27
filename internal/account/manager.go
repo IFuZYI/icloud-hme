@@ -683,15 +683,26 @@ func (m *Manager) WebMailClient(id string) (*mail.WebClient, error) {
 		return nil, fmt.Errorf("账号未配置 Cookie，无法读取邮件")
 	}
 	// 从 cookies 中获取 dsid
-	dsid := ""
-	if v, ok := snap.Cookies["X-APPLE-WEBAUTH-USER"]; ok {
-		// 解析 "v=1:s=1:d=22789132008" 格式
-		parts := strings.Split(v, ":d=")
-		if len(parts) == 2 {
-			dsid = parts[1]
-		}
-	}
+	dsid := dsidFromCookies(snap.Cookies)
 	return mail.NewWebClient(snap.Cookies, dsid, snap.Host), nil
+}
+
+// dsidFromCookies 从 X-APPLE-WEBAUTH-USER cookie 解析 dsid。
+//
+// cookie 值形如 "v=1:s=1:d=19657242416"(含包裹引号)。必须先去掉引号再按 :d= 切分,
+// 否则解析出的 dsid 会带尾随引号(如 19657242416"),拼进 dsid 查询参数后 iCloud
+// mccgateway 直接返回 400。
+func dsidFromCookies(cookies map[string]string) string {
+	v, ok := cookies["X-APPLE-WEBAUTH-USER"]
+	if !ok {
+		return ""
+	}
+	v = strings.Trim(v, `"`)
+	parts := strings.Split(v, ":d=")
+	if len(parts) != 2 {
+		return ""
+	}
+	return strings.Trim(parts[1], `"`)
 }
 
 // SetAppPassword 设置 iCloud 邮箱和 App 专用密码,并测试 IMAP 连接。
