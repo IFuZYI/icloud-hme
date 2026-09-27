@@ -8,7 +8,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"mime"
 	"sort"
 	"strings"
@@ -747,7 +747,7 @@ func extractBodyDepth(r io.Reader, depth int, maxBytes int64) (body, contentType
 	mr, err := gomail.CreateReader(r)
 	if err != nil && !message.IsUnknownCharset(err) {
 		// 损坏的邮件不致命(详情页显示"无正文"), 但留一条日志便于定位
-		log.Printf("mail: 解析 MIME 正文失败: %v", err)
+		slog.Debug("解析 MIME 正文失败", "err", err.Error())
 		return "", ""
 	}
 	defer mr.Close()
@@ -768,7 +768,7 @@ func extractBodyDepth(r io.Reader, depth int, maxBytes int64) (body, contentType
 			break
 		}
 		if perr != nil && !message.IsUnknownCharset(perr) {
-			log.Printf("mail: 读取 MIME 部分失败: %v", perr)
+			slog.Debug("读取 MIME 部分失败", "err", perr.Error())
 			break
 		}
 		if part == nil {

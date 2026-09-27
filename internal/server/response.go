@@ -2,6 +2,7 @@
 package server
 
 import (
+	"log/slog"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -21,7 +22,13 @@ func ok(c *gin.Context, data any) {
 }
 
 // failCode 返回统一失败响应。
+//
+// 每个失败响应都会记一条 debug 日志(含状态码、错误码、路径与客户端 IP),
+// 便于线上排查诸如「莫名跳回登录页」这类由某个 401/403 触发的问题。
 func failCode(c *gin.Context, status int, code, message string) {
+	slog.Debug("API 返回失败",
+		"status", status, "code", code, "message", message,
+		"method", c.Request.Method, "path", c.Request.URL.Path, "ip", c.ClientIP())
 	c.AbortWithStatusJSON(status, apiResp{Success: false, Code: code, Message: message})
 }
 

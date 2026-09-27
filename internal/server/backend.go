@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -395,7 +395,8 @@ func (b *managerBackend) ListInbox(q InboxQuery) (InboxResult, error) {
 	if err != nil {
 		// 两条路径都失败时把上游原因写进服务日志, 便于定位(Cookie 过期/
 		// 网络不通等), 响应仍保持稳定的错误码与文案。
-		log.Printf("mail: IMAP 与 Web API 均失败 account=%s imap=%v webapi=%v", q.AccountID, poolErr, err)
+		slog.Error("读取邮件失败: IMAP 与 Web API 均失败",
+			"account", q.AccountID, "imap_err", poolErr.Error(), "webapi_err", err.Error())
 		return InboxResult{}, &BackendError{Status: http.StatusBadGateway, Code: "UPSTREAM_FAILURE", Message: "读取邮件失败"}
 	}
 	messages, total := slicePage(fetched, q.Offset, q.Limit)

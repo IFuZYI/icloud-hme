@@ -92,6 +92,8 @@ cat > .env <<'EOF'
 ICLOUD_HME_ADMIN_PASSWORD='your-strong-password'
 ICLOUD_HME_SESSION_TTL=12h
 ICLOUD_HME_SECURE_COOKIE=false
+ICLOUD_HME_LOG_LEVEL=info
+ICLOUD_HME_LOG_FORMAT=text
 ICLOUD_HME_PORT=8081
 TZ=Asia/Shanghai
 EOF
@@ -126,7 +128,8 @@ docker compose down
 
 说明：
 
-- **配置持久化**：`./data` 目录挂载到容器 `/app/data`，`accounts.json`、自动任务配置 `alias_task.json` 与运行日志 `alias_task_logs.json` 都保存在宿主机的 `./data` 下，容器重建不丢失。
+- **配置持久化**：`./data` 目录挂载到容器 `/app/data`，`accounts.json`、自动任务配置 `alias_task.json`、运行日志 `alias_task_logs.json` 与应用日志 `logs/app.log` 都保存在宿主机的 `./data` 下，容器重建不丢失。
+- **应用日志持久化**：服务日志默认写入 `./data/logs/app.log`（同时输出到容器 `stdout/stderr` 供 `docker compose logs` 采集），按大小滚动（单文件 10MB，保留 5 份历史 `app.log.1`…`app.log.5`）。根文件系统只读不影响写入——日志目录位于可写的 `data` 卷内。可用 `ICLOUD_HME_LOG_DIR` 改目录，设为空串则只保留容器日志、不落盘。
 - **时区**：默认 `Asia/Shanghai`，可在 `.env` 中通过 `TZ` 修改。
 - **端口**：默认映射 `8081:8081`；在 `.env` 设置 `ICLOUD_HME_PORT=9090` 可改为从宿主机 `9090` 访问。
 - **HTTPS 反代部署**：置于 TLS 反向代理后时，将 `ICLOUD_HME_SECURE_COOKIE` 设为 `true`。
@@ -144,6 +147,9 @@ docker compose down
 | `ICLOUD_HME_ADMIN_PASSWORD` | 管理员密码，**必填**，至少 8 字符 | 无（缺失时拒绝启动） |
 | `ICLOUD_HME_SESSION_TTL` | 会话有效期 | `12h`（范围 `15m`–`168h`） |
 | `ICLOUD_HME_SECURE_COOKIE` | 通过 TLS 反向代理部署时设为 `true` | `false` |
+| `ICLOUD_HME_LOG_LEVEL` | 日志级别 `debug`/`info`/`warn`/`error`；排查问题时设为 `debug` 可看到每个请求与每次认证失败的详细日志 | `info` |
+| `ICLOUD_HME_LOG_FORMAT` | 日志格式 `text`（易读）或 `json`（便于日志系统采集） | `text` |
+| `ICLOUD_HME_LOG_DIR` | 应用日志持久化目录，按大小滚动（10MB×5）；设为空串则只输出到容器日志、不落盘 | `<数据目录>/logs`（Docker 下为 `/app/data/logs`） |
 
 > **Breaking Change（v0.3+）**：升级后未设置 `ICLOUD_HME_ADMIN_PASSWORD` 将拒绝启动；
 > 原有匿名 API 调用将收到 `401 AUTH_REQUIRED`。管理员会话只存内存，进程重启即失效。
@@ -833,6 +839,8 @@ cat > .env <<'EOF'
 ICLOUD_HME_ADMIN_PASSWORD=your-strong-password
 ICLOUD_HME_SESSION_TTL=12h
 ICLOUD_HME_SECURE_COOKIE=false
+ICLOUD_HME_LOG_LEVEL=info
+ICLOUD_HME_LOG_FORMAT=text
 ICLOUD_HME_PORT=8081
 TZ=Asia/Shanghai
 EOF
@@ -863,6 +871,9 @@ go build -o icloud-hme .
 | `ICLOUD_HME_ADMIN_PASSWORD` | Admin password, **required**, min 8 chars | none (refuses to start) |
 | `ICLOUD_HME_SESSION_TTL` | Session TTL | `12h` (range `15m`–`168h`) |
 | `ICLOUD_HME_SECURE_COOKIE` | Set `true` when deployed behind TLS | `false` |
+| `ICLOUD_HME_LOG_LEVEL` | Log level `debug`/`info`/`warn`/`error`; set `debug` to trace every request and auth failure | `info` |
+| `ICLOUD_HME_LOG_FORMAT` | Log format `text` (human-readable) or `json` (for log pipelines) | `text` |
+| `ICLOUD_HME_LOG_DIR` | Directory for persisted app logs, size-rotated (10MB×5); empty string disables file output (container logs only) | `<data dir>/logs` (`/app/data/logs` in Docker) |
 
 > **Breaking change (v0.3+)**: without `ICLOUD_HME_ADMIN_PASSWORD` the server refuses to start; all API endpoints now require login (`401 AUTH_REQUIRED`). Admin sessions are in-memory only and are lost on restart.
 
