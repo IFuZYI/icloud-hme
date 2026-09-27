@@ -523,13 +523,19 @@ func mapAccountErr(err error) *BackendError {
 }
 
 // classifyUpstreamErr 把上游 (iCloud) 错误映射为稳定错误,不拼接上游响应体。
+//
+// 对客户端保持稳定的错误码与固定文案(不泄露上游细节),但把真实原因写进服务日志:
+// 会话失效记 warn,其余上游故障记 error。这样线上出现 502/401 时,可从日志直接看到
+// 底层是连接失败、超时、无效响应还是缺少服务端点,而无需改动对外契约。
 func classifyUpstreamErr(fixedMsg string, err error) *BackendError {
 	if err == nil {
 		return nil
 	}
 	if isSessionError(err.Error()) {
+		slog.Warn("上游会话失效", "action", fixedMsg, "err", capUpstreamReason(err))
 		return &BackendError{Status: http.StatusUnauthorized, Code: "UPSTREAM_UNAUTHORIZED", Message: "iCloud 会话失效,请更新 Cookie"}
 	}
+	slog.Error("上游请求失败", "action", fixedMsg, "err", capUpstreamReason(err))
 	return &BackendError{Status: http.StatusBadGateway, Code: "UPSTREAM_FAILURE", Message: fixedMsg}
 }
 
