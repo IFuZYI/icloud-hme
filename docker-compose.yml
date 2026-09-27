@@ -14,6 +14,12 @@ services:
       ICLOUD_HME_ADMIN_PASSWORD: "${ICLOUD_HME_ADMIN_PASSWORD:?请通过 .env 或环境变量设置 ICLOUD_HME_ADMIN_PASSWORD}"
       ICLOUD_HME_SESSION_TTL: "${ICLOUD_HME_SESSION_TTL:-12h}"
       ICLOUD_HME_SECURE_COOKIE: "${ICLOUD_HME_SECURE_COOKIE:-false}"
+      # 日志:级别 debug/info/warn/error,格式 text/json。排查问题时设为 debug。
+      # 日志默认持久化到 /app/data/logs(随下方 data 卷落盘,按大小滚动 10MB×5)。
+      # 设为空字符串可关闭文件输出、只保留容器 stdout/stderr(docker logs)。
+      ICLOUD_HME_LOG_LEVEL: "${ICLOUD_HME_LOG_LEVEL:-info}"
+      ICLOUD_HME_LOG_FORMAT: "${ICLOUD_HME_LOG_FORMAT:-text}"
+      ICLOUD_HME_LOG_DIR: "${ICLOUD_HME_LOG_DIR:-/app/data/logs}"
       TZ: "${TZ:-Asia/Shanghai}"
     volumes:
       # 账号配置 (accounts.json)、自动任务配置与日志持久化

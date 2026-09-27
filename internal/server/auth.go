@@ -4,6 +4,7 @@
 package server
 
 import (
+	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
@@ -31,10 +32,14 @@ func requireSession(mgr *authManager) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		sessionID := sessionIDFromCookie(c)
 		if sessionID == "" {
+			slog.Debug("会话校验失败: 请求缺少会话 Cookie",
+				"path", c.Request.URL.Path, "method", c.Request.Method, "ip", c.ClientIP())
 			failCode(c, http.StatusUnauthorized, "AUTH_REQUIRED", "请先登录")
 			return
 		}
 		if _, ok := mgr.Validate(sessionID); !ok {
+			slog.Debug("会话校验失败: 会话不存在或已过期",
+				"path", c.Request.URL.Path, "method", c.Request.Method, "ip", c.ClientIP())
 			failCode(c, http.StatusUnauthorized, "AUTH_REQUIRED", "会话已失效,请重新登录")
 			return
 		}
@@ -88,11 +93,13 @@ func (s *Server) handleLogin(c *gin.Context) {
 
 	sessionID, sess, valid := s.auth.Login(req.Password)
 	if !valid {
+		slog.Info("登录失败: 管理员密码错误", "ip", ip)
 		failCode(c, http.StatusUnauthorized, "INVALID_CREDENTIALS", "管理员密码错误")
 		return
 	}
 	s.limiter.Success(ip)
 	setSessionCookie(c, sessionID, sess.ExpiresAt, s.cfg.SecureCookie)
+	slog.Info("登录成功", "ip", ip, "expires_at", sess.ExpiresAt.Format(time.RFC3339))
 	ok(c, gin.H{
 		"csrf_token": sess.CSRFToken,
 		"expires_at": sess.ExpiresAt.Format(time.RFC3339),

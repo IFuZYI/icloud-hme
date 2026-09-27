@@ -75,7 +75,8 @@ func newWithBackend(be Backend, cfg Config) *Server {
 		TTL:      cfg.SessionTTL,
 	})
 	s.r = gin.New()
-	s.r.Use(gin.Logger(), gin.Recovery(), securityHeadersMiddleware())
+	// 用结构化日志中间件替代 gin.Logger:统一走 slog,受 ICLOUD_HME_LOG_LEVEL 控制。
+	s.r.Use(requestLogMiddleware(), gin.Recovery(), securityHeadersMiddleware())
 	// 不信任任意代理头,登录限流使用真实连接 IP
 	_ = s.r.SetTrustedProxies(nil)
 	s.register()
