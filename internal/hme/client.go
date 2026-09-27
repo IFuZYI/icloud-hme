@@ -114,36 +114,16 @@ func NewClient(cookies map[string]string, host, proxy string, verbose bool) (*Cl
 		clientID: uuid.New().String(),
 	}
 
-	// 把传入的 Cookie 灌入 jar,后续请求自动携带。
+	// request() 自行管理 Cookie:手动设置带引号的 Cookie 头(iCloud 严格匹配),并手动把
+	// 响应 Set-Cookie 回收到 c.Cookies。底层 fhttp 在 Jar 非空时,会在每次请求把 jar 里的
+	// cookie 逐个 AddCookie 追加到同一个 Cookie 头后面,并把响应 Set-Cookie 回灌 jar,导致
+	// 下一次请求的 Cookie 头 = 手动一份 + jar 一份。真实账号(22 个 cookie/4480B)翻倍后
+	// 触发 Apple 边缘的 "400 Request Header Or Cookie Too Large"。
+	//
+	// 因此业务客户端(构造时已带 cookie,只走 request())直接摘掉 jar,纯手动路径不会翻倍;
+	// jar 仅保留给登录流程(NewClient(nil)+Login),其 idmsa→icloud 跨域 cookie 复制依赖它。
 	if len(cookies) > 0 {
-		// 设置 Cookie 到所有可能的域名
-		domains := []string{
-			"https://www.icloud.com",
-			"https://www.icloud.com.cn",
-			"https://setup.icloud.com",
-			"https://setup.icloud.com.cn",
-			"https://" + c.Host,
-		}
-
-		// 添加 serviceURL 的域名（如果已知）
-		if c.serviceURL != "" {
-			if u, err := url.Parse(c.serviceURL); err == nil {
-				domains = append(domains, u.Scheme+"://"+u.Host)
-			}
-		}
-
-		for _, domain := range domains {
-			u, _ := url.Parse(domain)
-			httpCookies := make([]*http.Cookie, 0, len(cookies))
-			for k, v := range cookies {
-				httpCookies = append(httpCookies, &http.Cookie{
-					Name:  k,
-					Value: v,
-					Path:  "/",
-				})
-			}
-			jar.SetCookies(u, httpCookies)
-		}
+		c.httpc.SetCookieJar(nil)
 	}
 	return c, nil
 }

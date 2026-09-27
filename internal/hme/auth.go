@@ -118,6 +118,12 @@ func (c *Client) Login(username, password string, otpProvider OTPProvider) error
 	// 11. 保存 Cookie 到 Client
 	cookies := c.extractSessionCookies()
 	c.Cookies = cookies
+	// SRP 登录流程依赖 jar 跨步骤(idmsa→icloud)携带会话 cookie,到此已全部提取完毕。
+	// 之后该 client 只走 request() 做业务调用,而 request() 手动设置 Cookie 头并手动回收
+	// Set-Cookie。若继续保留 jar,fhttp 会在每次请求把 jar cookie 追加到手动头之后 → cookie
+	// 翻倍、头体积翻倍,触发 Apple 边缘的 "400 Request Header Or Cookie Too Large"。
+	// 因此登录完成后立即摘掉 jar,与 NewClient(带 cookie) 路径保持一致。
+	c.httpc.SetCookieJar(nil)
 	c.log("登录成功,获取到 %d 个 Cookie", len(cookies))
 	return nil
 }
