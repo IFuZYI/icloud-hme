@@ -13,7 +13,7 @@ import (
 
 func TestCreateAliasAcceptsCustomLabel(t *testing.T) {
 	f := &fakeBackend{created: &hme.CreateResult{Email: "new@icloud.com", Label: "我的标签"}}
-	_, ts := newTestServer(f)
+	_, ts := newTestServer(t, f)
 	defer ts.Close()
 	session, csrf := login(t, ts, "admin-pass-2026-strong")
 
@@ -28,7 +28,7 @@ func TestCreateAliasAcceptsCustomLabel(t *testing.T) {
 
 func TestCreateAliasRejectsEmptyLabel(t *testing.T) {
 	f := &fakeBackend{created: &hme.CreateResult{Email: "new@icloud.com"}}
-	_, ts := newTestServer(f)
+	_, ts := newTestServer(t, f)
 	defer ts.Close()
 	session, csrf := login(t, ts, "admin-pass-2026-strong")
 
@@ -42,7 +42,7 @@ func TestCreateAliasRejectsEmptyLabel(t *testing.T) {
 
 func TestCreateAliasRejectsOverlongLabel(t *testing.T) {
 	f := &fakeBackend{created: &hme.CreateResult{Email: "new@icloud.com"}}
-	_, ts := newTestServer(f)
+	_, ts := newTestServer(t, f)
 	defer ts.Close()
 	session, csrf := login(t, ts, "admin-pass-2026-strong")
 

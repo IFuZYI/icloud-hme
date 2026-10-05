@@ -32,8 +32,7 @@ type InboxQuery struct {
 	Alias     string
 	Limit     int
 	Offset    int
-	Days      int
-	// DateRange 是日期区间(优先于 Days); 零值表示不限。
+	// DateRange 是日期区间; 零值表示不限。
 	DateRange mail.DateRange
 }
 
@@ -68,9 +67,9 @@ type Backend interface {
 	SetAliasActive(string, string, bool) (bool, error)
 	DeleteAlias(string, string) error
 	ListInbox(InboxQuery) (InboxResult, error)
-	FetchPreviews(string, []uint32) (map[string]string, error)
-	GetMessage(string, uint32) (*mail.FullMessage, error)
-	DeleteMessage(string, uint32) error
+	FetchPreviews(string, []string) (map[string]string, error)
+	GetMessage(string, string) (*mail.FullMessage, error)
+	DeleteMessage(string, string) error
 	Reload() error
 }
 
@@ -196,6 +195,9 @@ func classifyLoginErr(err error) *BackendError {
 	}
 	if strings.Contains(msg, "账号不存在") {
 		return &BackendError{Status: http.StatusNotFound, Code: "ACCOUNT_NOT_FOUND", Message: "账号不存在"}
+	}
+	if strings.Contains(msg, "未设置邮箱地址") {
+		return &BackendError{Status: http.StatusBadRequest, Code: "VALIDATION_ERROR", Message: msg}
 	}
 	if isSessionError(msg) {
 		return &BackendError{Status: http.StatusUnauthorized, Code: "UPSTREAM_UNAUTHORIZED", Message: "iCloud 会话失效,请更新 Cookie"}
@@ -431,12 +433,21 @@ func slicePage(list []mail.Message, offset, limit int) ([]mail.Message, int) {
 }
 
 // FetchPreviews 批量补齐邮件摘要(渐进式加载第二阶段)。
-func (b *managerBackend) FetchPreviews(accountID string, uids []uint32) (map[string]string, error) {
+// ids 为列表接口返回的对外 ID(可能带文件夹前缀), 逐个解析后按文件夹批量拉取。
+func (b *managerBackend) FetchPreviews(accountID string, ids []string) (map[string]string, error) {
+	refs := make([]mail.MessageRef, 0, len(ids))
+	for _, id := range ids {
+		folder, uid, err := mail.ParseMessageID(id)
+		if err != nil {
+			return nil, &BackendError{Status: http.StatusBadRequest, Code: "VALIDATION_ERROR", Message: "参数错误: 邮件 ID 无效"}
+		}
+		refs = append(refs, mail.MessageRef{Folder: folder, UID: uid})
+	}
 	previews := map[string]string{}
 	err := withIMAPTimeout(imapOverallTimeout, func() error {
 		return b.mgr.WithMailClient(accountID, func(mc *mail.Client) error {
 			var e error
-			previews, e = mc.FetchPreviews(uids)
+			previews, e = mc.FetchPreviewsRefs(refs)
 			return e
 		})
 	})
@@ -473,7 +484,11 @@ func capUpstreamReason(err error) string {
 	return string(runes[:upstreamReasonLimit]) + "…"
 }
 
-func (b *managerBackend) GetMessage(accountID string, uid uint32) (*mail.FullMessage, error) {
+func (b *managerBackend) GetMessage(accountID, id string) (*mail.FullMessage, error) {
+	folder, uid, perr := mail.ParseMessageID(id)
+	if perr != nil {
+		return nil, &BackendError{Status: http.StatusBadRequest, Code: "VALIDATION_ERROR", Message: "参数错误: 邮件 ID 无效"}
+	}
 	mc, err := b.mgr.MailClient(accountID)
 	if err != nil {
 		return nil, mapAccountErr(err)
@@ -482,14 +497,18 @@ func (b *managerBackend) GetMessage(accountID string, uid uint32) (*mail.FullMes
 		return nil, &BackendError{Status: http.StatusBadGateway, Code: "UPSTREAM_FAILURE", Message: "读取邮件失败"}
 	}
 	defer mc.Disconnect()
-	message, err := mc.GetFull(uid)
+	message, err := mc.GetFullFrom(folder, uid)
 	if err != nil {
 		return nil, &BackendError{Status: http.StatusBadGateway, Code: "UPSTREAM_FAILURE", Message: "读取邮件详情失败"}
 	}
 	return message, nil
 }
 
-func (b *managerBackend) DeleteMessage(accountID string, uid uint32) error {
+func (b *managerBackend) DeleteMessage(accountID, id string) error {
+	folder, uid, perr := mail.ParseMessageID(id)
+	if perr != nil {
+		return &BackendError{Status: http.StatusBadRequest, Code: "VALIDATION_ERROR", Message: "参数错误: 邮件 ID 无效"}
+	}
 	mc, err := b.mgr.MailClient(accountID)
 	if err != nil {
 		return mapAccountErr(err)
@@ -498,7 +517,7 @@ func (b *managerBackend) DeleteMessage(accountID string, uid uint32) error {
 		return &BackendError{Status: http.StatusBadGateway, Code: "UPSTREAM_FAILURE", Message: "删除邮件失败"}
 	}
 	defer mc.Disconnect()
-	if err := mc.Delete(uid); err != nil {
+	if err := mc.DeleteFrom(folder, uid); err != nil {
 		return &BackendError{Status: http.StatusBadGateway, Code: "UPSTREAM_FAILURE", Message: "删除邮件失败"}
 	}
 	return nil
@@ -542,9 +561,12 @@ func classifyUpstreamErr(fixedMsg string, err error) *BackendError {
 }
 
 // isSessionError 判断错误是否由会话失效引起。
+// 421 Misdirected Request 是 iCloud 邮件侧在 Cookie 失效时的返回码,
+// 必须与会话错误同类处理,否则会被误报为 502 UPSTREAM_FAILURE。
 func isSessionError(msg string) bool {
 	m := strings.ToLower(msg)
 	return strings.Contains(m, "401") || strings.Contains(m, "403") ||
+		strings.Contains(m, "421") ||
 		strings.Contains(m, "session") || strings.Contains(m, "cookie") ||
 		strings.Contains(m, "unauthorized") || strings.Contains(m, "认证") ||
 		strings.Contains(m, "会话校验失败")

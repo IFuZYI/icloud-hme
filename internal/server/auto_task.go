@@ -79,7 +79,9 @@ type AliasTask struct {
 	DailyLimit int `json:"daily_limit"`
 	// TodayQuota 是「今日」实际可创建数量的上限。自主任务创建/跨天时按当天
 	// 剩余时间折算(见 firstDayQuota): 中午启动只生成半天目标,避免首日过密。
-	TodayQuota int `json:"today_quota,omitempty"`
+	// 0 是合法值(深夜创建时折算不足 1 个 → 今日不排), 因此不能 omitempty;
+	// 与「旧任务未设置」的区别由 load 按 JSON 键是否存在判定。
+	TodayQuota int `json:"today_quota"`
 	// LabelMode 为标签生成方式：library(名称库自动) / sequential(顺序) / hash(哈希)。
 	LabelMode string `json:"label_mode"`
 	// LabelPrefix 为手动标签前缀（sequential/hash 模式使用）。
@@ -404,10 +406,10 @@ func (m *autoTaskManager) nextAutoDelay(t AliasTask, now time.Time) time.Duratio
 }
 
 // effectiveDailyQuota 返回任务「今日」实际可创建数量的上限。
-// 自主任务优先用 TodayQuota(创建/跨天时按剩余时间折算);
-// 旧任务或定时任务没有该字段时退回 DailyLimit。
+// 自主任务用 TodayQuota(创建/跨天时按剩余时间折算), 0 表示今日不排
+// (深夜创建等), 不得回退到 DailyLimit; 定时任务用 DailyLimit。
 func (t AliasTask) effectiveDailyQuota() int {
-	if t.Mode == taskModeAuto && t.TodayQuota > 0 {
+	if t.Mode == taskModeAuto {
 		return t.TodayQuota
 	}
 	return t.DailyLimit
@@ -465,7 +467,13 @@ func (m *autoTaskManager) load() {
 		if f.CreationGuards != nil {
 			m.creationGuards = f.CreationGuards
 		}
-		for _, t := range f.Tasks {
+		// 逐任务探测 today_quota 键是否存在: 显式 0(今日不排)必须保留,
+		// 只有旧格式(该字段引入前保存)才回填满额。
+		var probe struct {
+			Tasks []map[string]json.RawMessage `json:"tasks"`
+		}
+		_ = json.Unmarshal(raw, &probe)
+		for i, t := range f.Tasks {
 			if t.ID == "" {
 				t.ID = "task_" + uuid.New().String()[:8]
 			}
@@ -491,8 +499,9 @@ func (m *autoTaskManager) load() {
 			if t.DailyLimit < 1 || t.DailyLimit > maxTaskDailyLimit {
 				t.DailyLimit = maxTaskDailyLimit
 			}
-			// 兼容旧任务：缺 TodayQuota 时按满额补齐(跨天逻辑会再校正)。
-			if t.Mode == taskModeAuto && t.TodayQuota <= 0 {
+			// 兼容旧任务：仅在旧格式(无 today_quota 键)时按满额补齐；
+			// 显式写入的 0 是合法配额(今日不排), 必须保留。
+			if t.Mode == taskModeAuto && !taskHasQuotaKey(probe.Tasks, i) {
 				t.TodayQuota = t.DailyLimit
 			}
 			if t.IntervalMinutes < minTaskIntervalMinutes || t.IntervalMinutes > maxTaskIntervalMinutes {
@@ -593,6 +602,11 @@ func (m *autoTaskManager) update(id string, in aliasTaskInput) (AliasTask, error
 	n.CreatedCount = old.CreatedCount
 	n.DailyCount = old.DailyCount
 	n.DailyDate = old.DailyDate
+	// 同日编辑保留当日已定配额(避免深夜编辑把中午折算的配额重置为 0 或满额);
+	// 跨天编辑(旧任务停在昨天)才按当前时刻重新折算。
+	if n.Mode == taskModeAuto && old.DailyDate == taskDate(m.nowFunc()) {
+		n.TodayQuota = old.TodayQuota
+	}
 	n.LastRun = old.LastRun
 	n.LastSuccess = old.LastSuccess
 	n.LastError = old.LastError
@@ -1006,6 +1020,16 @@ func (m *autoTaskManager) requestStop(id string) {
 }
 
 func taskDate(now time.Time) string { return now.Format("2006-01-02") }
+
+// taskHasQuotaKey 判断持久化记录里是否显式写有 today_quota 键。
+// 用于区分「显式 0(今日不排, 必须保留)」与「旧任务未设置(需回填)」。
+func taskHasQuotaKey(probes []map[string]json.RawMessage, i int) bool {
+	if i >= len(probes) || probes[i] == nil {
+		return false
+	}
+	_, ok := probes[i]["today_quota"]
+	return ok
+}
 
 // resetDailyCount 在跨天时清零当日计数,并重算自主任务的今日配额
 // (满额恢复,首日折算只影响创建当天)。

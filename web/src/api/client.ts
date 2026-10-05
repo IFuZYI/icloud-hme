@@ -34,11 +34,16 @@ interface RequestOptions extends Omit<RequestInit, 'body'> {
   signal?: AbortSignal
 }
 
+/** 业务级 401 白名单: 这些错误码不表示管理会话失效, 不应触发全局登出。 */
+const BUSINESS_401_CODES = new Set(['OTP_INVALID', 'UPSTREAM_UNAUTHORIZED'])
+
 /**
  * 唯一的 fetch 入口。
  *
  * 统一设置 Accept、JSON Content-Type 与 credentials: same-origin;
- * 非 GET/HEAD/OPTIONS 自动携带 X-CSRF-Token;401 触发 onUnauthorized 回调。
+ * 非 GET/HEAD/OPTIONS 自动携带 X-CSRF-Token;
+ * 401 触发登出回调——但业务级 401(如验证码输错)除外, 否则会把管理员
+ * 从 2FA 对话框直接踢回登录页, 使其无法重试。
  */
 export async function request<T>(
   path: string,
@@ -71,16 +76,21 @@ export async function request<T>(
     throw new ApiError(0, 'NETWORK_ERROR', '网络连接失败，请检查服务状态')
   }
 
-  if (resp.status === 401) {
-    onUnauthorized?.()
-    unauthorizedHandler?.()
-  }
-
   let payload: ApiResponse<T>
   try {
     payload = (await resp.json()) as ApiResponse<T>
   } catch {
+    // 无法解析响应体时按会话失效处理(401 且无 JSON 说明多半来自代理层)。
+    if (resp.status === 401) {
+      onUnauthorized?.()
+      unauthorizedHandler?.()
+    }
     throw new ApiError(resp.status, 'INVALID_RESPONSE', '网络连接失败，请检查服务状态')
+  }
+
+  if (resp.status === 401 && !BUSINESS_401_CODES.has(payload.code ?? '')) {
+    onUnauthorized?.()
+    unauthorizedHandler?.()
   }
 
   if (!resp.ok || payload.success === false) {

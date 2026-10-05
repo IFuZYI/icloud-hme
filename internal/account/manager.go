@@ -484,6 +484,17 @@ func (m *Manager) HMEClient(id string, verbose bool) (*hme.Client, error) {
 // 返回的会话由调用方驱动两段式登录:Begin → (可选 CompleteOTP/CompleteSMS) →
 // Summary。密码等敏感信息只存在于内存,不落盘。
 func (m *Manager) NewLoginSession(id string) (*HMELoginSession, error) {
+	email, client, err := m.loginClientSnapshot(id)
+	if err != nil {
+		return nil, err
+	}
+	return &HMELoginSession{mgr: m, id: id, email: email, client: client}, nil
+}
+
+// loginClientSnapshot 取账号快照并构造一个新的登录用 hme.Client。
+// 两条登录路径(两段式 NewLoginSession 与一次性 HMEClientWithPassword)
+// 共用同一份账号读取/邮箱回退/客户端构造逻辑,避免行为漂移。
+func (m *Manager) loginClientSnapshot(id string) (email string, client *hme.Client, err error) {
 	m.mu.RLock()
 	acc, ok := m.accounts[id]
 	var snap *Account
@@ -492,22 +503,74 @@ func (m *Manager) NewLoginSession(id string) (*HMELoginSession, error) {
 	}
 	m.mu.RUnlock()
 	if !ok {
-		return nil, fmt.Errorf("账号不存在: %s", id)
+		return "", nil, fmt.Errorf("账号不存在: %s", id)
 	}
 
-	email := snap.ICloudEmail
+	email = snap.ICloudEmail
 	if email == "" {
 		email = snap.RealEmail
 	}
 	if email == "" {
-		return nil, fmt.Errorf("账号未设置邮箱地址")
+		return "", nil, fmt.Errorf("账号未设置邮箱地址")
 	}
 
-	client, err := hme.NewClient(nil, snap.Host, snap.Proxy, true)
+	client, err = hme.NewClient(nil, snap.Host, snap.Proxy, true)
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
-	return &HMELoginSession{mgr: m, id: id, email: email, client: client}, nil
+	return email, client, nil
+}
+
+// persistLogin 把登录得到的 Cookie 落库(含 validate 刷新)、刷新别名计数,
+// 并返回脱敏摘要。两段式(HMELoginSession.Summary)与一次性
+// (HMEClientWithPassword)登录路径共用同一持久化语义,避免行为漂移。
+func (m *Manager) persistLogin(id string, client *hme.Client) (Summary, error) {
+	// 先保存 accountLogin 返回的 Cookie,随后通过 validate 刷新会话并再次持久化。
+	// 国区与美区都走同一条刷新链路,避免只保存登录阶段的临时 token。
+	if err := m.SaveCookies(id, client.Cookies); err != nil {
+		return Summary{}, err
+	}
+	if err := client.ValidateSession(); err != nil {
+		// validate 的失败响应也可能携带 Set-Cookie,尽量保留服务端最新状态。
+		_ = m.SaveCookies(id, client.Cookies)
+		return Summary{}, err
+	}
+
+	m.mu.Lock()
+	cur, ok := m.accounts[id]
+	if !ok {
+		m.mu.Unlock()
+		return Summary{}, fmt.Errorf("账号不存在: %s", id)
+	}
+	cur.Cookies = cloneCookies(client.Cookies)
+	cur.Status = "active"
+	cur.LastValidated = time.Now().Format(time.RFC3339)
+	cur.LastError = ""
+	if info := client.AccountInfo(); info != nil {
+		cur.RealEmail = firstNonEmpty(info.AppleID, info.PrimaryEmail)
+		if cur.ICloudEmail == "" {
+			cur.ICloudEmail = deriveICloudEmail(info)
+		}
+	}
+	saveErr := m.save()
+	m.mu.Unlock()
+	if saveErr != nil {
+		return Summary{}, saveErr
+	}
+
+	// 登录后立即按真实别名列表刷新计数,避免账号管理页停留在 0/0。
+	// 必须在取摘要之前刷新, 否则本次响应里的计数仍是旧值。
+	if aliases, listErr := client.ListAliases(); listErr == nil {
+		_ = m.UpdateAliasCounts(id, aliases)
+	}
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	cur, ok = m.accounts[id]
+	if !ok {
+		return Summary{}, fmt.Errorf("账号不存在: %s", id)
+	}
+	return cur.Summary(), nil
 }
 
 // HMELoginSession 把 *hme.Client 的两段式登录与账号持久化绑在一起。
@@ -538,71 +601,13 @@ func (s *HMELoginSession) SendSMS(phoneID int) error { return s.client.SendSMS(p
 
 // Summary 把登录得到的 Cookie 落库(含 validate 刷新),并返回脱敏摘要。
 func (s *HMELoginSession) Summary() (Summary, error) {
-	// 先保存 accountLogin 返回的 Cookie,随后通过 validate 刷新会话并再次持久化。
-	// 国区与美区都走同一条刷新链路,避免只保存登录阶段的临时 token。
-	if err := s.mgr.SaveCookies(s.id, s.client.Cookies); err != nil {
-		return Summary{}, err
-	}
-	if err := s.client.ValidateSession(); err != nil {
-		// validate 的失败响应也可能携带 Set-Cookie,尽量保留服务端最新状态。
-		_ = s.mgr.SaveCookies(s.id, s.client.Cookies)
-		return Summary{}, err
-	}
-
-	m := s.mgr
-	m.mu.Lock()
-	cur, ok := m.accounts[s.id]
-	if !ok {
-		m.mu.Unlock()
-		return Summary{}, fmt.Errorf("账号不存在: %s", s.id)
-	}
-	cur.Cookies = cloneCookies(s.client.Cookies)
-	cur.Status = "active"
-	cur.LastValidated = time.Now().Format(time.RFC3339)
-	cur.LastError = ""
-	if info := s.client.AccountInfo(); info != nil {
-		cur.RealEmail = firstNonEmpty(info.AppleID, info.PrimaryEmail)
-		if cur.ICloudEmail == "" {
-			cur.ICloudEmail = deriveICloudEmail(info)
-		}
-	}
-	sum := cur.Summary()
-	saveErr := m.save()
-	m.mu.Unlock()
-	if saveErr != nil {
-		return Summary{}, saveErr
-	}
-
-	// 登录后立即按真实别名列表刷新计数,避免账号管理页停留在 0/0。
-	if aliases, listErr := s.client.ListAliases(); listErr == nil {
-		_ = s.mgr.UpdateAliasCounts(s.id, aliases)
-	}
-	return sum, nil
+	return s.mgr.persistLogin(s.id, s.client)
 }
 
 // HMEClientWithPassword 为指定账号创建一个新的 HME 客户端,使用账号密码登录。
 // 登录成功后会自动获取 Cookie 并保存到账号配置。
 func (m *Manager) HMEClientWithPassword(id, password string, otpProvider hme.OTPProvider) (*hme.Client, error) {
-	m.mu.RLock()
-	acc, ok := m.accounts[id]
-	var snap *Account
-	if ok {
-		snap = copyAccount(acc)
-	}
-	m.mu.RUnlock()
-	if !ok {
-		return nil, fmt.Errorf("账号不存在: %s", id)
-	}
-
-	email := snap.ICloudEmail
-	if email == "" {
-		email = snap.RealEmail
-	}
-	if email == "" {
-		return nil, fmt.Errorf("账号未设置邮箱地址")
-	}
-
-	client, err := hme.NewClient(nil, snap.Host, snap.Proxy, true)
+	email, client, err := m.loginClientSnapshot(id)
 	if err != nil {
 		return nil, err
 	}
@@ -610,41 +615,9 @@ func (m *Manager) HMEClientWithPassword(id, password string, otpProvider hme.OTP
 	if err := client.Login(email, password, otpProvider); err != nil {
 		return nil, err
 	}
-
-	// 先保存 accountLogin 返回的 Cookie，随后通过 validate 刷新会话并再次持久化。
-	// 国区与美区都走同一条刷新链路，避免只保存登录阶段的临时 token。
-	if err := m.SaveCookies(id, client.Cookies); err != nil {
+	if _, err := m.persistLogin(id, client); err != nil {
 		return nil, err
 	}
-	if err := client.ValidateSession(); err != nil {
-		// validate 的失败响应也可能携带 Set-Cookie，尽量保留服务端最新状态。
-		_ = m.SaveCookies(id, client.Cookies)
-		return nil, err
-	}
-
-	// 保存 validate 刷新后的 Cookie 和账号状态。
-	m.mu.Lock()
-	cur, ok := m.accounts[id]
-	if !ok {
-		m.mu.Unlock()
-		return nil, fmt.Errorf("账号不存在: %s", id)
-	}
-	cur.Cookies = cloneCookies(client.Cookies)
-	cur.Status = "active"
-	cur.LastValidated = time.Now().Format(time.RFC3339)
-	cur.LastError = ""
-	if info := client.AccountInfo(); info != nil {
-		cur.RealEmail = firstNonEmpty(info.AppleID, info.PrimaryEmail)
-		if cur.ICloudEmail == "" {
-			cur.ICloudEmail = deriveICloudEmail(info)
-		}
-	}
-	saveErr := m.save()
-	m.mu.Unlock()
-	if saveErr != nil {
-		return nil, saveErr
-	}
-
 	return client, nil
 }
 

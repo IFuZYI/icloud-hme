@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -141,7 +142,7 @@ func TestAutoTaskUsesLabelLibraryAndEnforcesDailyCap(t *testing.T) {
 	if len(be.labels) != 1 {
 		t.Fatalf("created %d aliases, want only the remaining daily capacity", len(be.labels))
 	}
-	if !isKnownAliasLabel(be.labels[0]) {
+	if !slices.Contains(aliasLabelLibrary, be.labels[0]) {
 		t.Fatalf("label should come from the built-in library, got %v", be.labels)
 	}
 	if task.CreatedCount != 20 || !task.Enabled {

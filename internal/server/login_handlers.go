@@ -81,16 +81,12 @@ func (s *Server) loginOTPHandler(c *gin.Context) {
 		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "参数错误: session_id, code 必填")
 		return
 	}
-	owner, session, err := s.logins.peek(req.SessionID)
-	if err != nil {
-		failCode(c, http.StatusGone, "LOGIN_SESSION_EXPIRED", err.Error())
-		return
-	}
-	if owner != id {
-		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "登录会话与账号不匹配")
+	session, ok2 := s.requireLoginSession(c, id, req.SessionID)
+	if !ok2 {
 		return
 	}
 
+	var err error
 	if req.Method == "sms" {
 		err = session.CompleteSMS(req.PhoneID, req.Code)
 	} else {
@@ -113,6 +109,21 @@ func (s *Server) loginOTPHandler(c *gin.Context) {
 	ok(c, gin.H{"status": "done", "account": sum})
 }
 
+// requireLoginSession 取出登录会话并校验归属(四个 handler 的公共前置)。
+// 失败时已写入响应, 返回 false。
+func (s *Server) requireLoginSession(c *gin.Context, accountID, sessionID string) (LoginSession, bool) {
+	owner, session, err := s.logins.peek(sessionID)
+	if err != nil {
+		failCode(c, http.StatusGone, "LOGIN_SESSION_EXPIRED", err.Error())
+		return nil, false
+	}
+	if owner != accountID {
+		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "登录会话与账号不匹配")
+		return nil, false
+	}
+	return session, true
+}
+
 type loginSMSReq struct {
 	SessionID string `json:"session_id"`
 	PhoneID   int    `json:"phone_id"`
@@ -125,13 +136,8 @@ func (s *Server) loginSMSHandler(c *gin.Context) {
 		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "参数错误: session_id, phone_id 必填")
 		return
 	}
-	owner, session, err := s.logins.peek(req.SessionID)
-	if err != nil {
-		failCode(c, http.StatusGone, "LOGIN_SESSION_EXPIRED", err.Error())
-		return
-	}
-	if owner != id {
-		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "登录会话与账号不匹配")
+	session, ok2 := s.requireLoginSession(c, id, req.SessionID)
+	if !ok2 {
 		return
 	}
 	if err := session.SendSMS(req.PhoneID); err != nil {
@@ -148,13 +154,8 @@ func (s *Server) loginPhonesHandler(c *gin.Context) {
 		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "参数缺失: session_id")
 		return
 	}
-	owner, session, err := s.logins.peek(sessionID)
-	if err != nil {
-		failCode(c, http.StatusGone, "LOGIN_SESSION_EXPIRED", err.Error())
-		return
-	}
-	if owner != id {
-		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "登录会话与账号不匹配")
+	session, ok2 := s.requireLoginSession(c, id, sessionID)
+	if !ok2 {
 		return
 	}
 	phones, err := session.TrustedPhones()
@@ -184,13 +185,8 @@ func (s *Server) loginResendHandler(c *gin.Context) {
 		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "参数错误: session_id 必填")
 		return
 	}
-	owner, session, err := s.logins.peek(req.SessionID)
-	if err != nil {
-		failCode(c, http.StatusGone, "LOGIN_SESSION_EXPIRED", err.Error())
-		return
-	}
-	if owner != id {
-		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "登录会话与账号不匹配")
+	session, ok2 := s.requireLoginSession(c, id, req.SessionID)
+	if !ok2 {
 		return
 	}
 	if err := session.ResendOTP(); err != nil {
@@ -201,16 +197,10 @@ func (s *Server) loginResendHandler(c *gin.Context) {
 }
 
 // mapLoginSessionErr 把账号级错误映射为稳定错误码。
+// 分类统一收敛到 classifyLoginErr, 避免多处各写一套「账号不存在」分支。
 func mapLoginSessionErr(err error) error {
 	if err == nil {
 		return nil
-	}
-	msg := err.Error()
-	if strings.Contains(msg, "账号不存在") {
-		return &BackendError{Status: http.StatusNotFound, Code: "ACCOUNT_NOT_FOUND", Message: "账号不存在"}
-	}
-	if strings.Contains(msg, "未设置邮箱地址") {
-		return &BackendError{Status: http.StatusBadRequest, Code: "VALIDATION_ERROR", Message: msg}
 	}
 	return classifyLoginErr(err)
 }

@@ -85,9 +85,9 @@ func TestPreviewE2EAgainstServer(t *testing.T) {
 	}
 
 	c := &Client{cli: cli}
-	msgs, total, err := c.ListInboxPage(2, 0, 0)
+	msgs, total, err := c.ListInboxPageRange(2, 0, DateRange{})
 	if err != nil {
-		t.Fatalf("ListInboxPage: %v", err)
+		t.Fatalf("ListInboxPageRange: %v", err)
 	}
 	if len(msgs) != 1 || total != 1 {
 		t.Fatalf("got %d msgs (total %d), want 1/1", len(msgs), total)

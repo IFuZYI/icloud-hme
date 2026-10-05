@@ -61,7 +61,14 @@ export default function ICloudLoginDialog({
           { method: 'POST', body: JSON.stringify({ password }) },
         )
         if (data.status === 'otp_required') {
-          setSessionId(data.session_id ?? '')
+          // otp_required 必须携带 session_id; 缺失说明服务端违背契约,
+          // 静默兜底成空串只会让下一步提交 {session_id: ''} 被 400。
+          if (!data.session_id) {
+            setError('服务端未返回登录会话，请重试')
+            setStep('FAIL')
+            return
+          }
+          setSessionId(data.session_id)
           setStep('2FA_INPUT')
           return
         }

@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"mime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -34,7 +35,16 @@ type Message struct {
 	Subject string `json:"subject"`
 	Date    string `json:"date"`
 	Preview string `json:"preview"`
+	// Folder 是邮件所在文件夹(INBOX / Junk)。IMAP 的 UID 按文件夹生效,
+	// 读正文/删除必须带上它才能定位到正确的邮件。
+	Folder string `json:"folder,omitempty"`
 }
+
+// MailFolders 是读信时扫描的文件夹。
+//
+// HME 转发到 iCloud 邮箱的邮件常被 iCloud 判为垃圾邮件(实测如此),
+// 只查 INBOX 会漏掉整箱验证码。扫描顺序无关紧要,结果按时间合并排序。
+var MailFolders = []string{"INBOX", "Junk"}
 
 // FullMessage 是一封邮件的完整内容(含正文)。
 type FullMessage struct {
@@ -132,18 +142,11 @@ func inboxWindow(total, offset, limit int) (from, to uint32, ok bool) {
 	return uint32(lo), uint32(hi), true
 }
 
-// ListInboxPage 拉取收件箱(新→旧)第 offset 页的邮件信封, 返回 (本页, 总数)。
-//
-// 渐进式加载第一阶段: 只拉 UID/ENVELOPE/INTERNALDATE(无正文),
-// Preview 留空, 由 FetchPreviews 按需补齐——大收件箱秒级出列表,
-// 正文摘要只在用户看到时才付费拉取。
-// days 用于服务端 SEARCH 过滤(0 表示不限制); 返回按时间倒序排列。
-// 需要任意起止日期时用 ListInboxPageRange。
-func (c *Client) ListInboxPage(limit, offset, days int) ([]Message, int, error) {
-	return c.ListInboxPageRange(limit, offset, DateRangeFromDays(days))
-}
-
 // ListInboxPageRange 是 ListInboxPage 的日期区间版本(闭区间,零值表示不限)。
+//
+// 同时扫描 MailFolders(INBOX + Junk): 转发邮件常被 iCloud 判为垃圾邮件,
+// 只查 INBOX 会漏掉整箱验证码。各文件夹先取符合日期的 UID 集合,
+// 合并后在「全量」上做新→旧分页, 保证 total 与翻页窗口跨文件夹一致。
 func (c *Client) ListInboxPageRange(limit, offset int, r DateRange) ([]Message, int, error) {
 	if c.cli == nil {
 		return nil, 0, fmt.Errorf("未连接")
@@ -155,50 +158,180 @@ func (c *Client) ListInboxPageRange(limit, offset int, r DateRange) ([]Message, 
 		offset = 0
 	}
 
-	mbox, err := c.cli.Select("INBOX", true)
-	if err != nil {
-		return nil, 0, err
+	// 各文件夹的 UID 集合(已按日期过滤), 记录 folder 以便读取时定位。
+	type folderUIDs struct {
+		folder string
+		uids   []uint32
 	}
-	if mbox.Messages == 0 {
-		return []Message{}, 0, nil
+	var perFolder []folderUIDs
+	total := 0
+	for _, folder := range MailFolders {
+		uids, err := c.folderUIDsRange(folder, r)
+		if err != nil {
+			// 文件夹不存在(如无 Junk 的账号)不算错误, 跳过继续。
+			if isNoSuchFolder(err) {
+				continue
+			}
+			return nil, 0, err
+		}
+		if len(uids) == 0 {
+			continue
+		}
+		perFolder = append(perFolder, folderUIDs{folder: folder, uids: uids})
+		total += len(uids)
 	}
-
-	// 日期过滤走服务端 SEARCH(按 INTERNALDATE), 拿到符合日期的 UID 列表
-	// (升序)后在本地做新→旧分页窗口; 比「全拉信封再本地过滤」少拉很多封。
-	uids, err := c.recentUIDsRange(r)
-	if err != nil {
-		return nil, 0, err
-	}
-	total := len(uids)
 	if total == 0 {
 		return []Message{}, 0, nil
 	}
 
-	// uids 升序; 新→旧第 offset+1 封 = uids[total-1-offset]
-	hiIdx := total - 1 - offset
-	if hiIdx < 0 {
-		return []Message{}, total, nil
+	// 各文件夹内部 UID 升序 ≈ 时间升序; 先各自取「最新的若干」,
+	// 合并排序后再切本页, 避免为翻页拉取全部邮件。
+	need := offset + limit
+	var all []folderUID
+	for _, fu := range perFolder {
+		// 该文件夹最新的 need 封(UID 升序 → 从尾部取)。
+		start := len(fu.uids) - need
+		if start < 0 {
+			start = 0
+		}
+		for _, uid := range fu.uids[start:] {
+			all = append(all, folderUID{folder: fu.folder, uid: uid})
+		}
 	}
-	loIdx := hiIdx - limit + 1
-	if loIdx < 0 {
-		loIdx = 0
-	}
-	window := uids[loIdx : hiIdx+1]
-
-	msgs, err := c.fetchEnvelopesByUID(window)
+	// 跨文件夹合并后拉信封, 再按时间新→旧排序。
+	msgs, err := c.fetchEnvelopesForCandidates(all)
 	if err != nil {
 		return nil, 0, err
 	}
-	// fetchEnvelopesByUID 返回按 UID 升序; 翻转成新→旧
-	for i, j := 0, len(msgs)-1; i < j; i, j = i+1, j-1 {
-		msgs[i], msgs[j] = msgs[j], msgs[i]
+	sort.SliceStable(msgs, func(i, j int) bool { return messageLess(msgs[i], msgs[j]) })
+	if offset >= len(msgs) {
+		return []Message{}, total, nil
 	}
-	return msgs, total, nil
+	end := offset + limit
+	if end > len(msgs) {
+		end = len(msgs)
+	}
+	return msgs[offset:end], total, nil
 }
 
-// recentUIDs 返回收件箱(可选按近 N 天过滤)的全部 UID, 升序。
-func (c *Client) recentUIDs(days int) ([]uint32, error) {
-	return c.recentUIDsRange(DateRangeFromDays(days))
+// messageTime 解析消息的显示时间(RFC3339 字符串)。跨文件夹合并排序必须用
+// 绝对时间比较——RFC3339 字符串跨时区直接比大小会错序。
+func messageTime(m Message) time.Time {
+	t, err := time.Parse(time.RFC3339, m.Date)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
+}
+
+// messageLess 是列表排序的比较函数: 时间新→旧; 同刻按文件夹/UID 稳定排序,
+// 保证分页在两次请求之间一致(避免同刻邮件在页间重复或漏出)。
+func messageLess(a, b Message) bool {
+	ta, tb := messageTime(a), messageTime(b)
+	if !ta.Equal(tb) {
+		return ta.After(tb)
+	}
+	if a.Folder != b.Folder {
+		return a.Folder < b.Folder
+	}
+	_, ua, ea := ParseMessageID(a.ID)
+	_, ub, eb := ParseMessageID(b.ID)
+	if ea == nil && eb == nil {
+		return ua > ub
+	}
+	return a.ID > b.ID
+}
+
+// MessageRef 是邮件的文件夹限定引用: IMAP UID 按文件夹生效, 跨文件夹操作必须成对。
+type MessageRef struct {
+	Folder string
+	UID    uint32
+}
+
+// CanonicalID 返回该引用的对外 ID(INBOX 省略文件夹前缀, 与列表返回的 id 一致)。
+func (r MessageRef) CanonicalID() string { return messageID(r.Folder, r.UID) }
+
+// messageID 构造对外可见的邮件 ID。
+//
+// INBOX 用纯 UID(与历史行为兼容), 其它文件夹用 "folder:uid"——
+// IMAP UID 按文件夹生效, 跨文件夹会撞号, 必须带文件夹消歧,
+// 否则打开/删除 Junk 邮件会误操作到 INBOX 里同 UID 的邮件。
+func messageID(folder string, uid uint32) string {
+	if folder == "" || folder == "INBOX" {
+		return fmt.Sprintf("%d", uid)
+	}
+	return fmt.Sprintf("%s:%d", folder, uid)
+}
+
+// ParseMessageID 把对外 ID 解析回 (folder, uid)。
+// 无冒号的 ID 视为 INBOX(兼容旧格式)。
+func ParseMessageID(id string) (string, uint32, error) {
+	folder := "INBOX"
+	raw := id
+	if i := strings.LastIndex(id, ":"); i >= 0 {
+		folder = id[:i]
+		raw = id[i+1:]
+	}
+	uid, err := strconv.ParseUint(raw, 10, 32)
+	if err != nil {
+		return "", 0, fmt.Errorf("邮件 ID 无效: %q", id)
+	}
+	return folder, uint32(uid), nil
+}
+
+// isNoSuchFolder 判断错误是否为「文件夹不存在」。
+func isNoSuchFolder(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "no such mailbox") || strings.Contains(msg, "does not exist")
+}
+
+// folderUIDsRange 返回指定文件夹中符合日期区间的 UID(升序)。
+func (c *Client) folderUIDsRange(folder string, r DateRange) ([]uint32, error) {
+	if _, err := c.cli.Select(folder, true); err != nil {
+		return nil, err
+	}
+	return c.cli.UidSearch(dateRangeSearchCriteria(r))
+}
+
+// folderUID 是「文件夹 + UID」对: IMAP UID 按文件夹生效, 定位邮件必须成对。
+type folderUID struct {
+	folder string
+	uid    uint32
+}
+
+// fetchEnvelopesForCandidates 按 (folder, uid) 列表拉取信封。
+// 每个文件夹只 SELECT 一次, 并在结果上标注来源 folder + 文件夹限定的对外 ID。
+func (c *Client) fetchEnvelopesForCandidates(cands []folderUID) ([]Message, error) {
+	byFolder := map[string][]uint32{}
+	for _, cd := range cands {
+		byFolder[cd.folder] = append(byFolder[cd.folder], cd.uid)
+	}
+	var out []Message
+	for folder, uids := range byFolder {
+		if _, err := c.cli.Select(folder, true); err != nil {
+			return nil, err
+		}
+		msgs, err := c.fetchEnvelopesByUID(uids)
+		if err != nil {
+			return nil, err
+		}
+		for i := range msgs {
+			stampFolder(&msgs[i], folder)
+		}
+		out = append(out, msgs...)
+	}
+	return out, nil
+}
+
+// stampFolder 标注消息来源文件夹, 并把 ID 重写为文件夹限定的形式。
+func stampFolder(m *Message, folder string) {
+	m.Folder = folder
+	if uid, err := strconv.ParseUint(m.ID, 10, 32); err == nil {
+		m.ID = messageID(folder, uint32(uid))
+	}
 }
 
 // recentUIDsRange 返回收件箱在日期区间内的全部 UID, 升序。
@@ -242,73 +375,96 @@ func (c *Client) InboxCount() (int, error) {
 	return int(mbox.Messages), nil
 }
 
-// FetchPreviews 按 UID 批量拉取正文摘要(partial fetch), 返回 id→摘要。
+// FetchPreviews 按 UID 批量拉取 INBOX 邮件的正文摘要(兼容旧调用方)。
 //
 // 渐进式加载第二阶段: 前端拿到信封列表后, 对可见邮件分批调用本接口
 // 补齐 Preview。每封最多传 previewPartLimit 字节(见 previewTextSection)。
 func (c *Client) FetchPreviews(uids []uint32) (map[string]string, error) {
+	refs := make([]MessageRef, 0, len(uids))
+	for _, uid := range uids {
+		refs = append(refs, MessageRef{Folder: "INBOX", UID: uid})
+	}
+	return c.FetchPreviewsRefs(refs)
+}
+
+// FetchPreviewsRefs 按 (folder, uid) 批量拉取正文摘要(partial fetch),
+// 返回 对外ID→摘要。每个文件夹只 SELECT 一次; UID 按文件夹生效, 必须成对传入。
+func (c *Client) FetchPreviewsRefs(refs []MessageRef) (map[string]string, error) {
 	if c.cli == nil {
 		return nil, fmt.Errorf("未连接")
 	}
-	if len(uids) == 0 {
+	if len(refs) == 0 {
 		return map[string]string{}, nil
 	}
-	if len(uids) > 20 {
-		uids = uids[:20] // 单批上限, 防止一次拉太多又退化成慢请求
+	if len(refs) > 20 {
+		refs = refs[:20] // 单批上限, 防止一次拉太多又退化成慢请求
 	}
-	seqset := new(imap.SeqSet)
-	for _, uid := range uids {
-		seqset.AddNum(uid)
-	}
-	messages := make(chan *imap.Message, len(uids))
-	done := make(chan error, 1)
-	go func() {
-		done <- c.cli.UidFetch(seqset, previewFetchItems, messages)
-	}()
-	out := make(map[string]string, len(uids))
-	for msg := range messages {
-		if msg == nil {
-			continue
+	byFolder := map[string][]uint32{}
+	for _, r := range refs {
+		folder := r.Folder
+		if folder == "" {
+			folder = "INBOX"
 		}
-		m := toMessageWithBody(msg)
-		if m.ID != "" {
-			out[m.ID] = m.Preview
-		}
+		byFolder[folder] = append(byFolder[folder], r.UID)
 	}
-	if err := <-done; err != nil {
-		return nil, err
+	out := make(map[string]string, len(refs))
+	for folder, uids := range byFolder {
+		if _, err := c.cli.Select(folder, true); err != nil {
+			return nil, err
+		}
+		seqset := new(imap.SeqSet)
+		for _, uid := range uids {
+			seqset.AddNum(uid)
+		}
+		messages := make(chan *imap.Message, len(uids))
+		done := make(chan error, 1)
+		go func() {
+			done <- c.cli.UidFetch(seqset, previewFetchItems, messages)
+		}()
+		for msg := range messages {
+			if msg == nil {
+				continue
+			}
+			m := toMessageWithBody(msg)
+			stampFolder(&m, folder)
+			if m.ID != "" {
+				out[m.ID] = m.Preview
+			}
+		}
+		if err := <-done; err != nil {
+			return nil, err
+		}
 	}
 	return out, nil
 }
 
-// FindByRecipient 查找发给指定隐私邮箱别名的最近 limit 封邮件(新→旧),
-// 返回 (本页, 符合条件的总数)。offset 用于「加载更多」翻页。
-func (c *Client) FindByRecipient(recipient string, limit, offset, days int) ([]Message, int, error) {
-	return c.FindByRecipientRange(recipient, limit, offset, DateRangeFromDays(days))
-}
-
 // FindByRecipientRange 是 FindByRecipient 的日期区间版本。
+//
+// 返回 (本页, 符合条件的总数)。总数由 forEachByRecipientRange 内部统计
+// (服务端 SEARCH 命中的 UID 数), 供前端「加载更多」判断是否还有下一页。
 func (c *Client) FindByRecipientRange(recipient string, limit, offset int, r DateRange) ([]Message, int, error) {
 	var out []Message
 	total := 0
 	err := c.forEachByRecipientRange(recipient, limit, offset, r, func(m Message) bool {
 		out = append(out, m)
 		return true
-	})
+	}, &total)
 	if err != nil {
 		return nil, 0, err
 	}
 	return out, total, nil
 }
 
-// ForEachByRecipient 按新→旧遍历发给 recipient 的邮件(分页版)。
-// onMsg 返回 false 时立即停止(用于 OTP 命中即返回)。
-func (c *Client) ForEachByRecipient(recipient string, limit, offset, days int, onMsg func(Message) bool) error {
-	return c.forEachByRecipientRange(recipient, limit, offset, DateRangeFromDays(days), onMsg)
-}
-
 // forEachByRecipientRange 是 ForEachByRecipient 的日期区间版本。
-func (c *Client) forEachByRecipientRange(recipient string, limit, offset int, r DateRange, onMsg func(Message) bool) error {
+//
+// 同时扫描 MailFolders(INBOX + Junk), 合并后按时间新→旧分页——转发邮件
+// 常被 iCloud 判为垃圾邮件, 只查 INBOX 会漏掉验证码。
+//
+// 各文件夹先用服务端 SEARCH 拿符合条件的 UID 集合; SEARCH 不可用时
+// 退化为扫最近信封本地过滤。本页邮件再按文件夹定位拉取完整摘要。
+//
+// totalOut 非 nil 时写回符合条件的邮件总数(不受本页 limit/offset 影响)。
+func (c *Client) forEachByRecipientRange(recipient string, limit, offset int, r DateRange, onMsg func(Message) bool, totalOut *int) error {
 	if c.cli == nil {
 		return fmt.Errorf("未连接")
 	}
@@ -322,30 +478,73 @@ func (c *Client) forEachByRecipientRange(recipient string, limit, offset int, r 
 		offset = 0
 	}
 
-	if _, err := c.cli.Select("INBOX", true); err != nil {
-		return err
-	}
-
-	// 服务端按 To + 日期搜索, 本地在 UID 列表上做新→旧分页
+	// 各文件夹按 To + 日期搜索(服务端 SEARCH)
 	criteria := dateRangeSearchCriteria(r)
 	criteria.Header.Add("To", recipient)
-	uids, err := c.cli.UidSearch(criteria)
-	if err != nil || len(uids) == 0 {
-		// SEARCH 不可用(或无结果): 退化为扫最近信封本地过滤
-		return c.forEachRecentMatchingRange(recipient, limit, offset, r, onMsg)
+	var all []folderUID
+	for _, folder := range MailFolders {
+		if _, err := c.cli.Select(folder, true); err != nil {
+			if isNoSuchFolder(err) {
+				continue
+			}
+			return err
+		}
+		uids, err := c.cli.UidSearch(criteria)
+		if err != nil {
+			// SEARCH 不可用: 退化为扫最近信封本地过滤
+			return c.forEachRecentMatchingRange(recipient, limit, offset, r, onMsg, totalOut)
+		}
+		for _, uid := range uids {
+			all = append(all, folderUID{folder: folder, uid: uid})
+		}
 	}
-	n := len(uids)
-	hiIdx := n - 1 - offset
-	if hiIdx < 0 {
+	if totalOut != nil {
+		// 各文件夹 SEARCH 命中数之和即符合条件总数(不受本页分页影响)。
+		*totalOut = len(all)
+	}
+	if len(all) == 0 {
 		return nil
 	}
-	loIdx := hiIdx - limit + 1
-	if loIdx < 0 {
-		loIdx = 0
+
+	// 跨文件夹合并需要真实时间排序: 只为「最新的 need 封」拉信封
+	// (文件夹内 UID 升序 ≈ 时间升序, 各取尾部 need 封是全局前 need 的超集),
+	// 排序后切出本页, 再按文件夹定位拉完整摘要。
+	need := offset + limit
+	if need > len(all) {
+		need = len(all)
 	}
-	// 新→旧遍历本页
-	for i := hiIdx; i >= loIdx; i-- {
-		m, ferr := c.fetchOneUID(uids[i])
+	byFolder := map[string][]uint32{}
+	for _, fu := range all {
+		byFolder[fu.folder] = append(byFolder[fu.folder], fu.uid)
+	}
+	var candidates []folderUID
+	for folder, uids := range byFolder {
+		start := len(uids) - need
+		if start < 0 {
+			start = 0
+		}
+		for _, uid := range uids[start:] {
+			candidates = append(candidates, folderUID{folder: folder, uid: uid})
+		}
+	}
+	envs, err := c.fetchEnvelopesForCandidates(candidates)
+	if err != nil {
+		return err
+	}
+	sort.SliceStable(envs, func(i, j int) bool { return messageLess(envs[i], envs[j]) })
+	if offset >= len(envs) {
+		return nil
+	}
+	end := offset + limit
+	if end > len(envs) {
+		end = len(envs)
+	}
+	for _, env := range envs[offset:end] {
+		folder, uid, perr := ParseMessageID(env.ID)
+		if perr != nil {
+			return perr
+		}
+		m, ferr := c.fetchOneUID(folder, uid)
 		if ferr != nil {
 			return ferr
 		}
@@ -356,77 +555,93 @@ func (c *Client) forEachByRecipientRange(recipient string, limit, offset int, r 
 	return nil
 }
 
-// forEachRecentMatching 拉取收件箱最近若干封(仅 envelope), 本地按 To 过滤后
-// 再取正文, 支持新→旧 offset 翻页。SEARCH 不可用时的回退路径。
-func (c *Client) forEachRecentMatching(recipient string, limit, offset, days int, onMsg func(Message) bool) error {
-	return c.forEachRecentMatchingRange(recipient, limit, offset, DateRangeFromDays(days), onMsg)
-}
-
 // forEachRecentMatchingRange 是 forEachRecentMatching 的日期区间版本。
-func (c *Client) forEachRecentMatchingRange(recipient string, limit, offset int, r DateRange, onMsg func(Message) bool) error {
-	mbox, err := c.cli.Select("INBOX", true)
-	if err != nil {
-		return err
-	}
-	if mbox.Messages == 0 {
-		return nil
-	}
-	// 只扫最近 scan 封, 避免全箱
-	scan := (offset + limit) * 4
-	if scan < 20 {
-		scan = 20
-	}
-	if scan > 120 {
-		scan = 120
-	}
-	if scan > int(mbox.Messages) {
-		scan = int(mbox.Messages)
-	}
-	from := mbox.Messages - uint32(scan) + 1
-	seqset := new(imap.SeqSet)
-	seqset.AddRange(from, mbox.Messages)
-
-	// 仅 envelope + date, 不拉 body
-	items := []imap.FetchItem{imap.FetchUid, imap.FetchEnvelope, imap.FetchInternalDate}
-	messages := make(chan *imap.Message, scan)
-	done := make(chan error, 1)
-	go func() {
-		done <- c.cli.Fetch(seqset, items, messages)
-	}()
-
+// 扫描 MailFolders 各文件夹的最近信封, 合并排序后分页。
+// totalOut 非 nil 时写回本地过滤命中的总数(仅统计扫描窗口内的, 这是回退路径的固有限制)。
+func (c *Client) forEachRecentMatchingRange(recipient string, limit, offset int, r DateRange, onMsg func(Message) bool, totalOut *int) error {
 	type cand struct {
-		uid  uint32
-		date time.Time
-		to   string
+		folder string
+		uid    uint32
+		date   time.Time
+		to     string
 	}
 	var cands []cand
 	recipient = strings.ToLower(recipient)
-	for msg := range messages {
-		if msg == nil || msg.Envelope == nil {
-			continue
-		}
-		to := ""
-		if len(msg.Envelope.To) > 0 {
-			parts := make([]string, 0, len(msg.Envelope.To))
-			for _, a := range msg.Envelope.To {
-				parts = append(parts, a.Address())
+
+	// 只扫各文件夹最近 scan 封, 避免全箱
+	scanBudget := (offset + limit) * 4
+	if scanBudget < 20 {
+		scanBudget = 20
+	}
+	if scanBudget > 120 {
+		scanBudget = 120
+	}
+
+	for _, folder := range MailFolders {
+		mbox, err := c.cli.Select(folder, true)
+		if err != nil {
+			if isNoSuchFolder(err) {
+				continue
 			}
-			to = strings.Join(parts, ", ")
+			return err
 		}
-		if !strings.Contains(strings.ToLower(to), recipient) {
+		if mbox.Messages == 0 {
 			continue
 		}
-		when := receivedDate(msg)
-		if !r.within(when) {
-			continue
+		scan := scanBudget
+		if scan > int(mbox.Messages) {
+			scan = int(mbox.Messages)
 		}
-		cands = append(cands, cand{uid: msg.Uid, date: when, to: to})
+		from := mbox.Messages - uint32(scan) + 1
+		seqset := new(imap.SeqSet)
+		seqset.AddRange(from, mbox.Messages)
+
+		// 仅 envelope + date, 不拉 body
+		items := []imap.FetchItem{imap.FetchUid, imap.FetchEnvelope, imap.FetchInternalDate}
+		messages := make(chan *imap.Message, scan)
+		done := make(chan error, 1)
+		go func() {
+			done <- c.cli.Fetch(seqset, items, messages)
+		}()
+
+		for msg := range messages {
+			if msg == nil || msg.Envelope == nil {
+				continue
+			}
+			to := ""
+			if len(msg.Envelope.To) > 0 {
+				parts := make([]string, 0, len(msg.Envelope.To))
+				for _, a := range msg.Envelope.To {
+					parts = append(parts, a.Address())
+				}
+				to = strings.Join(parts, ", ")
+			}
+			if !strings.Contains(strings.ToLower(to), recipient) {
+				continue
+			}
+			when := receivedDate(msg)
+			if !r.within(when) {
+				continue
+			}
+			cands = append(cands, cand{folder: folder, uid: msg.Uid, date: when, to: to})
+		}
+		if err := <-done; err != nil {
+			return err
+		}
 	}
-	if err := <-done; err != nil {
-		return err
+	if totalOut != nil {
+		*totalOut = len(cands)
 	}
-	// 新→旧
-	sort.SliceStable(cands, func(i, j int) bool { return cands[i].date.After(cands[j].date) })
+	// 新→旧; 同刻按文件夹/UID 稳定排序, 保证翻页一致。
+	sort.SliceStable(cands, func(i, j int) bool {
+		if !cands[i].date.Equal(cands[j].date) {
+			return cands[i].date.After(cands[j].date)
+		}
+		if cands[i].folder != cands[j].folder {
+			return cands[i].folder < cands[j].folder
+		}
+		return cands[i].uid > cands[j].uid
+	})
 	for idx, cd := range cands {
 		if idx < offset {
 			continue
@@ -434,7 +649,7 @@ func (c *Client) forEachRecentMatchingRange(recipient string, limit, offset int,
 		if idx >= offset+limit {
 			break
 		}
-		m, ferr := c.fetchOneUID(cd.uid)
+		m, ferr := c.fetchOneUID(cd.folder, cd.uid)
 		if ferr != nil {
 			return ferr
 		}
@@ -519,21 +734,37 @@ func (c *Client) fetchUIDItems(uid uint32, items []imap.FetchItem) (*imap.Messag
 	return msg, nil
 }
 
-// fetchOneUID 拉取单封邮件(含 body preview), 使用 BODY.PEEK 不标已读。
-func (c *Client) fetchOneUID(uid uint32) (Message, error) {
+// fetchOneUID 拉取指定文件夹内单封邮件(含 body preview), 使用 BODY.PEEK 不标已读。
+// UID 按文件夹生效, 拉取前必须先 SELECT 对应文件夹。
+func (c *Client) fetchOneUID(folder string, uid uint32) (Message, error) {
+	if _, err := c.cli.Select(folder, true); err != nil {
+		return Message{}, err
+	}
 	msg, err := c.fetchUIDPreview(uid)
 	if err != nil {
 		return Message{}, err
 	}
-	return toMessageWithBody(msg), nil
+	m := toMessageWithBody(msg)
+	stampFolder(&m, folder)
+	return m, nil
 }
 
 // GetFull 获取单封邮件的完整内容(含正文)。
+// GetFull 读取 INBOX 中指定 UID 的完整邮件(兼容旧调用方)。
 func (c *Client) GetFull(uid uint32) (*FullMessage, error) {
+	return c.GetFullFrom("INBOX", uid)
+}
+
+// GetFullFrom 读取指定文件夹中 UID 的完整邮件。
+// folder 为空时按 INBOX 处理; IMAP UID 按文件夹生效, 跨文件夹必须带 folder。
+func (c *Client) GetFullFrom(folder string, uid uint32) (*FullMessage, error) {
 	if c.cli == nil {
 		return nil, fmt.Errorf("未连接")
 	}
-	if _, err := c.cli.Select("INBOX", true); err != nil {
+	if folder == "" {
+		folder = "INBOX"
+	}
+	if _, err := c.cli.Select(folder, true); err != nil {
 		return nil, err
 	}
 
@@ -542,6 +773,35 @@ func (c *Client) GetFull(uid uint32) (*FullMessage, error) {
 		return nil, err
 	}
 	return toFullMessage(msg), nil
+}
+
+// Delete 删除 INBOX 中指定 UID 的邮件(兼容旧调用方)。
+func (c *Client) Delete(uid uint32) error {
+	return c.DeleteFrom("INBOX", uid)
+}
+
+// DeleteFrom 删除指定文件夹中 UID 的邮件。
+func (c *Client) DeleteFrom(folder string, uid uint32) error {
+	if c.cli == nil {
+		return fmt.Errorf("未连接")
+	}
+	if uid == 0 {
+		return fmt.Errorf("邮件 UID 无效")
+	}
+	if folder == "" {
+		folder = "INBOX"
+	}
+	if _, err := c.cli.Select(folder, false); err != nil {
+		return err
+	}
+
+	seqset := new(imap.SeqSet)
+	seqset.AddNum(uid)
+	item := imap.FormatFlagsOp(imap.AddFlags, true)
+	if err := c.cli.UidStore(seqset, item, []interface{}{imap.DeletedFlag}, nil); err != nil {
+		return err
+	}
+	return c.cli.Expunge(nil)
 }
 
 // toFullMessage 从已 fetch 的 IMAP 消息构造完整邮件(含正文)。
@@ -555,27 +815,6 @@ func toFullMessage(msg *imap.Message) *FullMessage {
 		full.Body, full.ContentType = extractBodyWithType(r)
 	}
 	return full
-}
-
-// Delete 删除收件箱中指定 UID 的邮件。
-func (c *Client) Delete(uid uint32) error {
-	if c.cli == nil {
-		return fmt.Errorf("未连接")
-	}
-	if uid == 0 {
-		return fmt.Errorf("邮件 UID 无效")
-	}
-	if _, err := c.cli.Select("INBOX", false); err != nil {
-		return err
-	}
-
-	seqset := new(imap.SeqSet)
-	seqset.AddNum(uid)
-	item := imap.FormatFlagsOp(imap.AddFlags, true)
-	if err := c.cli.UidStore(seqset, item, []interface{}{imap.DeletedFlag}, nil); err != nil {
-		return err
-	}
-	return c.cli.Expunge(nil)
 }
 
 // ---- 解析工具 ----
@@ -629,15 +868,6 @@ func receivedDate(msg *imap.Message) time.Time {
 		return msg.InternalDate
 	}
 	return messageDate(msg)
-}
-
-// withinDays 判断收件时间是否落在近 days 天内(days<=0 或时间缺失视为满足,
-// 宁可多显示也不误丢)。
-func withinDays(when time.Time, days int) bool {
-	if days <= 0 || when.IsZero() {
-		return true
-	}
-	return time.Since(when) <= time.Duration(days)*24*time.Hour
 }
 
 // previewLimit 是列表摘要保留的最大字符数(按 rune 计)。

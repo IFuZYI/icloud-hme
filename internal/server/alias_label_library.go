@@ -183,18 +183,6 @@ func buildAliasLabelLibrary() []string {
 	return out
 }
 
-// aliasLabelSet 是名称库的集合视图，供 isKnownAliasLabel 做 O(1) 校验。
-// 名称库已扩充到 500+ 条，每次 /api/create 都线性扫描会成为热点路径浪费。
-var aliasLabelSet = buildAliasLabelSet()
-
-func buildAliasLabelSet() map[string]struct{} {
-	set := make(map[string]struct{}, len(aliasLabelLibrary))
-	for _, name := range aliasLabelLibrary {
-		set[name] = struct{}{}
-	}
-	return set
-}
-
 // shuffledLibraryIndices 返回名称库下标 [0,N) 的一个确定性随机排列，由
 // (seed, round) 唯一决定。同一任务在同一轮内取到的是一个完整排列，因此走完
 // 整轮才会重复；进入下一轮时 round 递增，重新洗牌避免与上一轮同序。
@@ -217,11 +205,6 @@ func libraryLabelForSeed(seed uint64, ordinal int) string {
 	}
 	perm := shuffledLibraryIndices(seed, uint64(ordinal/n))
 	return aliasLabelLibrary[perm[ordinal%n]]
-}
-
-func isKnownAliasLabel(label string) bool {
-	_, ok := aliasLabelSet[label]
-	return ok
 }
 
 const (

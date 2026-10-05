@@ -10,7 +10,7 @@ import (
 // 收件箱接受日期区间参数 start/end(ISO 日期或 RFC3339),并解析为后端查询。
 func TestInboxAcceptsDateRange(t *testing.T) {
 	f := &fakeBackend{}
-	_, ts := newTestServer(f)
+	_, ts := newTestServer(t, f)
 	defer ts.Close()
 	session, csrf := login(t, ts, "admin-pass-2026-strong")
 
@@ -36,7 +36,7 @@ func TestInboxAcceptsDateRange(t *testing.T) {
 // end 应覆盖到当天最后一刻(含当天)。
 func TestInboxDateRangeEndIncludesWholeDay(t *testing.T) {
 	f := &fakeBackend{}
-	_, ts := newTestServer(f)
+	_, ts := newTestServer(t, f)
 	defer ts.Close()
 	session, csrf := login(t, ts, "admin-pass-2026-strong")
 
@@ -57,7 +57,7 @@ func TestInboxDateRangeEndIncludesWholeDay(t *testing.T) {
 // 无 start/end 时保持旧行为: days=7 → 近 7 天。
 func TestInboxFallsBackToDays(t *testing.T) {
 	f := &fakeBackend{}
-	_, ts := newTestServer(f)
+	_, ts := newTestServer(t, f)
 	defer ts.Close()
 	session, csrf := login(t, ts, "admin-pass-2026-strong")
 
@@ -79,7 +79,7 @@ func TestInboxFallsBackToDays(t *testing.T) {
 // 非法日期应 400。
 func TestInboxRejectsInvalidDate(t *testing.T) {
 	f := &fakeBackend{}
-	_, ts := newTestServer(f)
+	_, ts := newTestServer(t, f)
 	defer ts.Close()
 	session, csrf := login(t, ts, "admin-pass-2026-strong")
 

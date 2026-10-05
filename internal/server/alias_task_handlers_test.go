@@ -26,7 +26,7 @@ func aliasTaskRequest(t *testing.T, tsURL, session, csrf, method, path, body str
 }
 
 func TestAliasTaskHandlersClassifyDomainAndPersistenceErrors(t *testing.T) {
-	s, ts := newTestServer(&fakeBackend{})
+	s, ts := newTestServer(t, &fakeBackend{})
 	defer ts.Close()
 	s.task.file = filepath.Join(t.TempDir(), "tasks.json")
 	s.task.logFile = filepath.Join(filepath.Dir(s.task.file), "logs.json")
@@ -50,7 +50,7 @@ func TestAliasTaskHandlersClassifyDomainAndPersistenceErrors(t *testing.T) {
 }
 
 func TestToggleAliasTaskHandlerReturnsInternalErrorForAuditPersistenceFailure(t *testing.T) {
-	s, ts := newTestServer(&fakeBackend{})
+	s, ts := newTestServer(t, &fakeBackend{})
 	defer ts.Close()
 	s.task.file = filepath.Join(t.TempDir(), "tasks.json")
 	s.task.logFile = filepath.Join(filepath.Dir(s.task.file), "logs.json")
@@ -75,7 +75,7 @@ func TestToggleAliasTaskHandlerReturnsInternalErrorForAuditPersistenceFailure(t 
 
 func TestCreateAliasRejectsManualCreationWhenAccountDailyLimitIsReached(t *testing.T) {
 	f := &fakeBackend{created: &hme.CreateResult{Email: "new@icloud.com", Label: "GitHub"}}
-	s, ts := newTestServer(f)
+	s, ts := newTestServer(t, f)
 	defer ts.Close()
 	today := time.Now().Format("2006-01-02")
 	s.task.tasks["task_daily_cap"] = AliasTask{
@@ -100,7 +100,7 @@ func TestCreateAliasRejectsManualCreationWhenAccountDailyLimitIsReached(t *testi
 
 func TestAliasLabelLibraryEndpointAndManualValidation(t *testing.T) {
 	f := &fakeBackend{created: &hme.CreateResult{Email: "new@icloud.com", Label: "GitHub"}}
-	_, ts := newTestServer(f)
+	_, ts := newTestServer(t, f)
 	defer ts.Close()
 	session, csrf := login(t, ts, "admin-pass-2026-strong")
 
@@ -123,7 +123,7 @@ func TestAliasLabelLibraryEndpointAndManualValidation(t *testing.T) {
 
 func TestCreateAliasRejectsRequestsDuringAccountCooldown(t *testing.T) {
 	f := &fakeBackend{created: &hme.CreateResult{Email: "new@icloud.com", Label: "GitHub"}}
-	s, ts := newTestServer(f)
+	s, ts := newTestServer(t, f)
 	defer ts.Close()
 	s.task.creationGuards["acc_1"] = creationGuard{LastAttempt: time.Now().Add(-19 * time.Minute).Format(time.RFC3339Nano)}
 	session, csrf := login(t, ts, "admin-pass-2026-strong")

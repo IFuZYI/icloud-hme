@@ -383,6 +383,31 @@ describe('InboxPage', () => {
     await user.click(screen.getByRole('button', { name: /复制正文/ }))
     await waitFor(() => expect(writeText).toHaveBeenCalledWith('验证码：123456'))
   })
+  it('垃圾邮件箱(Junk)邮件显示来源角标', async () => {
+    server.use(
+      http.get('/api/accounts', () => HttpResponse.json({ success: true, data: accounts })),
+      http.get('/api/inbox', () =>
+        HttpResponse.json({
+          success: true,
+          data: {
+            ...inboxResult,
+            count: 2,
+            total: 2,
+            messages: [
+              { ...inboxResult.messages[0], id: 'Junk:1', subject: '垃圾箱里的验证码', folder: 'Junk' },
+              { ...inboxResult.messages[0], id: '2', subject: '普通邮件', folder: 'INBOX' },
+            ],
+          },
+        }),
+      ),
+    )
+    renderPage()
+    await screen.findByText('垃圾箱里的验证码')
+    // Junk 邮件有角标, INBOX 邮件没有
+    expect(screen.getByText('垃圾邮件')).toBeInTheDocument()
+    expect(screen.getAllByText('垃圾邮件')).toHaveLength(1)
+  })
+
   it('空收件箱仍展示摘要行(共 0 封 + 读取方式)', async () => {
     server.use(
       http.get('/api/accounts', () => HttpResponse.json({ success: true, data: accounts })),

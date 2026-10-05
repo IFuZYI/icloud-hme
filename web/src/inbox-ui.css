@@ -226,6 +226,18 @@
   font-style: italic;
 }
 
+/* 垃圾邮件箱来源角标(Junk 文件夹) */
+.inbox-page .inbox-junk-badge {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--color-warning-soft);
+  color: var(--color-warning);
+  font-size: var(--text-xs);
+  line-height: 1.6;
+  white-space: nowrap;
+}
+
 .inbox-page .inbox-item-date {
   grid-area: date;
   color: var(--color-text-tertiary);

@@ -53,6 +53,8 @@ export interface InboxMessage {
   subject: string
   date: string
   preview: string
+  /** 所在文件夹(INBOX / Junk); 缺省视为 INBOX。Junk 里的邮件来自垃圾邮件箱 */
+  folder?: string
 }
 
 export interface FullMessage extends InboxMessage {
@@ -96,7 +98,7 @@ export interface AliasTask {
   interval_minutes: number
   batch_count: number
   daily_limit: number
-  /** 今日实际配额(自主任务按当天剩余时间折算; 缺省视为等于 daily_limit) */
+  /** 今日实际配额(自主任务按当天剩余时间折算; 0 表示今日不排, 非缺省) */
   today_quota?: number
   label_mode: LabelMode
   label_prefix?: string

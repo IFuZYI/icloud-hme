@@ -59,7 +59,7 @@ func (f *fakeLoginSession) Summary() (account.Summary, error) {
 func newLoginTestServer(t *testing.T, session *fakeLoginSession) (*Server, *httptest.Server) {
 	t.Helper()
 	f := &fakeBackend{accounts: []account.Summary{{ID: "acc_1", Name: "主号", Status: "active"}}}
-	s, ts := newTestServer(f)
+	s, ts := newTestServer(t, f)
 	s.newLoginSession = func(accountID string) (LoginSession, error) {
 		if accountID != "acc_1" && accountID != "acc_secret" {
 			return nil, &BackendError{Status: http.StatusNotFound, Code: "ACCOUNT_NOT_FOUND", Message: "账号不存在"}
@@ -203,7 +203,7 @@ func TestLoginPhonesResendSMS(t *testing.T) {
 // 旧接口保持兼容: password+otp_code 一次性提交。
 func TestLegacyLoginEndpointStillWorks(t *testing.T) {
 	f := &fakeBackend{accounts: []account.Summary{{ID: "acc_secret", Name: "秘密账号", Status: "active"}}}
-	_, ts := newTestServer(f)
+	_, ts := newTestServer(t, f)
 	defer ts.Close()
 	session, csrf := login(t, ts, "admin-pass-2026-strong")
 

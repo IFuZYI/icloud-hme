@@ -23,6 +23,20 @@ function defaultDateRange(): [Dayjs, Dayjs] {
   return [dayjs().subtract(7, 'day').startOf('day'), dayjs().endOf('day')]
 }
 
+/** 从 URL 的 start/end(YYYY-MM-DD)还原日期区间; 缺失或非法时回退默认近 7 天。 */
+function hydrateDateRange(params: URLSearchParams): [Dayjs | null, Dayjs | null] {
+  const parse = (raw: string | null, endOfDay: boolean): Dayjs | null => {
+    if (!raw) return null
+    const d = dayjs(raw) // ISO 日期可被 dayjs 直接解析, 无需 customParseFormat
+    if (!d.isValid()) return null
+    return endOfDay ? d.endOf('day') : d.startOf('day')
+  }
+  const start = parse(params.get('start'), false)
+  const end = parse(params.get('end'), true)
+  if (!start && !end) return defaultDateRange()
+  return [start, end]
+}
+
 const dateFormatter = new Intl.DateTimeFormat('zh-CN', {
   year: 'numeric',
   month: '2-digit',
@@ -56,7 +70,11 @@ export default function InboxPage() {
   const [accountId, setAccountId] = useState('')
   const [alias, setAlias] = useState('')
   const [pageSize, setPageSize] = useState(20)
-  const [dateRange, setDateRange] = useState<[Dayjs | null, Dayjs | null] | null>(() => defaultDateRange())
+  const [searchParams, setSearchParams] = useSearchParams()
+  // 初始区间: 优先用 URL 的 start/end(刷新/分享链接可复现筛选), 否则默认近 7 天。
+  const [dateRange, setDateRange] = useState<[Dayjs | null, Dayjs | null] | null>(() =>
+    hydrateDateRange(searchParams),
+  )
 
   const [messages, setMessages] = useState<InboxMessage[]>([])
   const [total, setTotal] = useState(0)
@@ -72,7 +90,6 @@ export default function InboxPage() {
   const [deleteFor, setDeleteFor] = useState<InboxMessage | null>(null)
   const [deleting, setDeleting] = useState(false)
 
-  const [searchParams, setSearchParams] = useSearchParams()
   const abortRef = useRef<AbortController | null>(null)
   const { show } = useToast()
 
@@ -411,6 +428,8 @@ export default function InboxPage() {
                   <span className={`inbox-subject${m.subject ? '' : ' is-empty'}`} title={m.subject || undefined}>
                     {m.subject || '（无主题）'}
                   </span>
+                  {/* 垃圾邮件箱来源角标: iCloud 常把转发邮件判为垃圾, 标出来避免用户误以为丢失 */}
+                  {m.folder === 'Junk' && <span className="inbox-junk-badge">垃圾邮件</span>}
                 </span>
                 <span className="inbox-item-date">{formatRelativeDate(m.date)}</span>
                 <span className="inbox-preview">

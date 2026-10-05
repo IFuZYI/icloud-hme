@@ -17,7 +17,7 @@ func TestNextAutoDelayPacesRemainingBudgetWithinWindow(t *testing.T) {
 	m.jitter = func() float64 { return 1.0 }
 
 	// 每日 10 个，已创建 0 个，正处于窗口起点 08:00。
-	task := AliasTask{Mode: taskModeAuto, DailyLimit: 10, DailyCount: 0}
+	task := AliasTask{Mode: taskModeAuto, DailyLimit: 10, DailyCount: 0, TodayQuota: 10}
 	now := atHour(autoActiveStartHour, 0)
 	delay := m.nextAutoDelay(task, now)
 
@@ -36,7 +36,7 @@ func TestNextAutoDelaySelfCorrectsWhenBehind(t *testing.T) {
 
 	// 每日 10 个，已到 20:00 还剩 8 个未创建：剩余 4h/8 = 30 分钟基准,
 	// 比窗口起点(08:00)的基准更密 —— 配速随剩余预算自校正。
-	task := AliasTask{Mode: taskModeAuto, DailyLimit: 10, DailyCount: 2}
+	task := AliasTask{Mode: taskModeAuto, DailyLimit: 10, DailyCount: 2, TodayQuota: 10}
 	now := atHour(20, 0)
 	delay := m.nextAutoDelay(task, now)
 
@@ -71,7 +71,7 @@ func TestNextAutoDelayWaitsForWindowStart(t *testing.T) {
 	m.jitter = func() float64 { return 1.0 }
 
 	// 凌晨 03:00 处于窗口外，应顺延到窗口起点 08:00。
-	task := AliasTask{Mode: taskModeAuto, DailyLimit: 10, DailyCount: 0}
+	task := AliasTask{Mode: taskModeAuto, DailyLimit: 10, DailyCount: 0, TodayQuota: 10}
 	now := atHour(3, 0)
 	delay := m.nextAutoDelay(task, now)
 	want := atHour(autoActiveStartHour, 0).Sub(now)

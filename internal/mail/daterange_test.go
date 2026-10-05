@@ -48,6 +48,8 @@ func TestDateRangeFromDays(t *testing.T) {
 }
 
 // IMAP 条件: 区间两端都要进 SEARCH(Since + Before)。
+// Before 必须取 End 的次日零点——RFC 3501 的日期比较是日粒度且排他,
+// 直接传 End 会把 End 当天的邮件全部排除(单日区间返回空)。
 func TestDateRangeSearchCriteria(t *testing.T) {
 	start := time.Date(2026, 8, 1, 0, 0, 0, 0, time.Local)
 	end := time.Date(2026, 8, 10, 0, 0, 0, 0, time.Local)
@@ -55,12 +57,19 @@ func TestDateRangeSearchCriteria(t *testing.T) {
 	if criteria.Since.IsZero() || !criteria.Since.Equal(start) {
 		t.Fatalf("Since = %v, want %v", criteria.Since, start)
 	}
-	if criteria.Before.IsZero() || !criteria.Before.Equal(end) {
-		t.Fatalf("Before = %v, want %v", criteria.Before, end)
+	wantBefore := time.Date(2026, 8, 11, 0, 0, 0, 0, time.Local)
+	if criteria.Before.IsZero() || !criteria.Before.Equal(wantBefore) {
+		t.Fatalf("Before = %v, want %v(End 的次日零点)", criteria.Before, wantBefore)
 	}
 	// 零值区间不添加任何条件。
 	empty := dateRangeSearchCriteria(DateRange{})
 	if !empty.Since.IsZero() || !empty.Before.IsZero() {
 		t.Fatal("零值区间不应产生 SEARCH 条件")
+	}
+	// 带时间的 End(如 23:59:59)同样归一到次日零点, 保证含整天。
+	endLate := time.Date(2026, 8, 10, 23, 59, 59, 0, time.Local)
+	criteria2 := dateRangeSearchCriteria(DateRange{End: endLate})
+	if !criteria2.Before.Equal(wantBefore) {
+		t.Fatalf("带时间 End 的 Before = %v, want %v", criteria2.Before, wantBefore)
 	}
 }

@@ -13,7 +13,7 @@ import (
 
 func TestBatchDeleteAliasesWaitsAndWritesLogs(t *testing.T) {
 	f := &fakeBackend{}
-	s, ts := newTestServer(f)
+	s, ts := newTestServer(t, f)
 	defer ts.Close()
 	s.task.logFile = filepath.Join(t.TempDir(), "alias_task_logs.json")
 	s.task.logs = nil
@@ -62,7 +62,7 @@ func TestBatchDeleteAliasesWaitsAndWritesLogs(t *testing.T) {
 
 func TestBatchAliasActionValidatesInput(t *testing.T) {
 	f := &fakeBackend{}
-	_, ts := newTestServer(f)
+	_, ts := newTestServer(t, f)
 	defer ts.Close()
 	sess, csrf := login(t, ts, "admin-pass-2026-strong")
 
@@ -78,7 +78,7 @@ func TestBatchAliasActionValidatesInput(t *testing.T) {
 func TestBatchAliasActionTreatsFalseResultAsItemFailure(t *testing.T) {
 	operationSucceeded := false
 	f := &fakeBackend{aliasActResult: &operationSucceeded}
-	s, ts := newTestServer(f)
+	s, ts := newTestServer(t, f)
 	defer ts.Close()
 	s.task.logFile = filepath.Join(t.TempDir(), "alias_task_logs.json")
 	sess, csrf := login(t, ts, "admin-pass-2026-strong")
@@ -115,7 +115,7 @@ func TestBatchAliasActionTreatsFalseResultAsItemFailure(t *testing.T) {
 
 func TestBatchAliasActionReturnsErrorWhenLogPersistenceFails(t *testing.T) {
 	f := &fakeBackend{}
-	s, ts := newTestServer(f)
+	s, ts := newTestServer(t, f)
 	defer ts.Close()
 	dir := t.TempDir()
 	parentFile := filepath.Join(dir, "not-a-directory")
@@ -139,7 +139,7 @@ func TestBatchAliasActionReturnsErrorWhenLogPersistenceFails(t *testing.T) {
 
 func TestBatchAliasActionReturnsOutcomesWhenPostOperationLogFails(t *testing.T) {
 	f := &fakeBackend{}
-	s, ts := newTestServer(f)
+	s, ts := newTestServer(t, f)
 	defer ts.Close()
 	s.task.logFile = filepath.Join(t.TempDir(), "alias_task_logs.json")
 	s.task.logs = nil

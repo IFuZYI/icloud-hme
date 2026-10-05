@@ -134,3 +134,37 @@ describe('InboxPage 日期范围选择器', () => {
     })
   })
 })
+
+// URL 里的 start/end 必须在首次加载时水合回筛选状态——否则刷新/分享
+// 带区间的链接后, URL 显示区间而实际按默认近 7 天查询, 两者静默不一致。
+describe('InboxPage URL 日期区间水合', () => {
+  beforeEach(() => {
+    setCSRFToken('csrf-test')
+    server.resetHandlers()
+    server.use(
+      http.post('/api/inbox/previews', async ({ request }) => {
+        const body = (await request.json()) as { ids: string[] }
+        const previews = Object.fromEntries(body.ids.map((id) => [id, `预览 ${id}`]))
+        return HttpResponse.json({ success: true, data: previews })
+      }),
+    )
+  })
+
+  it('从 URL start/end 初始化查询参数', async () => {
+    let lastUrl = ''
+    server.use(
+      http.get('/api/accounts', () => HttpResponse.json({ success: true, data: accounts })),
+      http.get('/api/inbox', ({ request }) => {
+        lastUrl = request.url
+        return HttpResponse.json({ success: true, data: inboxResult })
+      }),
+    )
+    renderPage('/inbox?account_id=acc_1&start=2026-03-01&end=2026-03-05')
+    await screen.findByText('主题一')
+    await waitFor(() => {
+      const url = new URL(lastUrl)
+      expect(url.searchParams.get('start')).toBe('2026-03-01')
+      expect(url.searchParams.get('end')).toBe('2026-03-05')
+    })
+  })
+})

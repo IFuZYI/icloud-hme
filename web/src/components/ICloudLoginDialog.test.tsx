@@ -161,3 +161,19 @@ describe('ICloudLoginDialog', () => {
     resolveRequest?.()
   })
 })
+
+// otp_required 缺 session_id 时给出明确错误, 而不是提交空 session_id。
+it('begin 返回 otp_required 但缺 session_id 时提示重试', async () => {
+  server.use(
+    http.post('/api/accounts/:id/login/begin', () =>
+      HttpResponse.json({ success: true, data: { status: 'otp_required' } }),
+    ),
+  )
+  render(<ICloudLoginDialog accountId="acc_1" accountEmail="a@example.com" open onClose={() => {}} onSaved={() => {}} />)
+  const user = userEvent.setup()
+  await user.type(screen.getByLabelText('密码'), 'pw')
+  await user.click(screen.getByRole('button', { name: '登录' }))
+  expect(await screen.findByRole('alert')).toHaveTextContent('服务端未返回登录会话')
+  // 不应进入验证码步骤
+  expect(screen.queryByLabelText('验证码')).toBeNull()
+})

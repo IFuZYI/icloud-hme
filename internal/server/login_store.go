@@ -29,6 +29,58 @@ type LoginSession interface {
 // loginTTL 登录会话有效期。验证码通常几秒内送达,5 分钟足够。
 const loginTTL = 5 * time.Minute
 
+// lockedSession 用互斥锁串行化同一登录会话的所有方法调用。
+//
+// 同一 session_id 的并发请求(双击重试/网络重发)会同时驱动同一个 hme.Client:
+// authState 无锁读写、对 Apple 双发请求, 且 409 后两端各自推进状态机。
+// 经 store 取出的会话都是本包装, 上游调用因此自动互斥。
+type lockedSession struct {
+	mu  sync.Mutex
+	raw LoginSession
+}
+
+func (l *lockedSession) Begin(password string) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.raw.Begin(password)
+}
+
+func (l *lockedSession) CompleteOTP(code string) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.raw.CompleteOTP(code)
+}
+
+func (l *lockedSession) CompleteSMS(phoneID int, code string) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.raw.CompleteSMS(phoneID, code)
+}
+
+func (l *lockedSession) ResendOTP() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.raw.ResendOTP()
+}
+
+func (l *lockedSession) TrustedPhones() ([]hme.TrustedPhone, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.raw.TrustedPhones()
+}
+
+func (l *lockedSession) SendSMS(phoneID int) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.raw.SendSMS(phoneID)
+}
+
+func (l *lockedSession) Summary() (account.Summary, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.raw.Summary()
+}
+
 // loginEntry 一个等待 2FA 的登录会话。
 type loginEntry struct {
 	accountID string
@@ -52,7 +104,7 @@ func (s *loginStore) put(accountID string, session LoginSession) string {
 	id := newLoginSessionID()
 	s.mu.Lock()
 	s.gcLocked(time.Now())
-	s.entries[id] = &loginEntry{accountID: accountID, session: session, expiresAt: time.Now().Add(loginTTL)}
+	s.entries[id] = &loginEntry{accountID: accountID, session: &lockedSession{raw: session}, expiresAt: time.Now().Add(loginTTL)}
 	s.mu.Unlock()
 	return id
 }
@@ -62,7 +114,12 @@ func (s *loginStore) peek(id string) (string, LoginSession, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	e, ok := s.entries[id]
-	if !ok || time.Now().After(e.expiresAt) {
+	if !ok {
+		return "", nil, fmt.Errorf("登录会话不存在或已过期,请重新发起登录")
+	}
+	if time.Now().After(e.expiresAt) {
+		// 惰性清理: 无新会话写入时过期条目不再永久驻留。
+		delete(s.entries, id)
 		return "", nil, fmt.Errorf("登录会话不存在或已过期,请重新发起登录")
 	}
 	return e.accountID, e.session, nil
@@ -73,7 +130,11 @@ func (s *loginStore) consume(id string) (string, LoginSession, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	e, ok := s.entries[id]
-	if !ok || time.Now().After(e.expiresAt) {
+	if !ok {
+		return "", nil, fmt.Errorf("登录会话不存在或已过期,请重新发起登录")
+	}
+	if time.Now().After(e.expiresAt) {
+		delete(s.entries, id)
 		return "", nil, fmt.Errorf("登录会话不存在或已过期,请重新发起登录")
 	}
 	delete(s.entries, id)
