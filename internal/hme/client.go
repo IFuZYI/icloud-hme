@@ -21,6 +21,11 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+// defaultUserAgent 是访问 Apple 端点统一使用的浏览器 UA。
+// 唯一事实来源: 登录(auth.go)与 Web API(client.go)必须一致, 且与
+// sec-ch-ua 头(Chrome/147)同步——版本不一致会制造可疑的风控信号。
+const defaultUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
+
 const (
 	// ClientBuildNumber 是 iCloud Web 客户端构建号,从浏览器抓包获取。
 	// maildomainws (HME 别名管理) 专用。
@@ -260,7 +265,7 @@ func (c *Client) request(method, rawURL string, body any, timeout time.Duration,
 		req.Header.Set("sec-ch-ua", `"Google Chrome";v="147", "Not.A/Brand";v="8", "Chromium";v="147"`)
 		req.Header.Set("sec-ch-ua-mobile", "?0")
 		req.Header.Set("sec-ch-ua-platform", `"Windows"`)
-		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36")
+		req.Header.Set("User-Agent", defaultUserAgent)
 
 		// 手动添加 Cookie 头（确保跨域也能传递）
 		// 浏览器发送的 Cookie 值带双引号,iCloud 严格匹配

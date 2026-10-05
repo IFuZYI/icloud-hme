@@ -12,6 +12,25 @@ import (
 // maxBodyBytes 是 JSON 请求体上限。
 const maxBodyBytes = 1 << 20 // 1 MiB
 
+// bodyLimitMiddleware 拒绝超过 maxBodyBytes 的请求体。
+//
+// 所有 API 请求都是小 JSON(最大的是批量别名 200 项的 id 列表),
+// 1 MiB 上限对正常使用绰绰有余; 超限直接 413, 避免超大 body 进入解析。
+// Content-Length 不可信(可分块传输), 因此同时用 MaxBytesReader 兜底:
+// handler 读取超限时得到错误, 这里统一转成 413 响应。
+func bodyLimitMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if c.Request.ContentLength > maxBodyBytes {
+			failCode(c, http.StatusRequestEntityTooLarge, "VALIDATION_ERROR", "请求体过大")
+			return
+		}
+		if c.Request.Body != nil {
+			c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxBodyBytes)
+		}
+		c.Next()
+	}
+}
+
 // securityHeaders 是全局安全响应头。
 var securityHeaders = map[string]string{
 	"Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",

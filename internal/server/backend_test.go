@@ -6,7 +6,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -152,19 +151,19 @@ func (f *fakeBackend) ListInbox(q InboxQuery) (InboxResult, error) {
 	}, nil
 }
 
-func (f *fakeBackend) FetchPreviews(accountID string, uids []uint32) (map[string]string, error) {
+func (f *fakeBackend) FetchPreviews(accountID string, ids []string) (map[string]string, error) {
 	previews := map[string]string{}
-	for _, uid := range uids {
-		previews[fmt.Sprintf("%d", uid)] = fmt.Sprintf("预览 %d", uid)
+	for _, id := range ids {
+		previews[id] = fmt.Sprintf("预览 %s", id)
 	}
 	return previews, nil
 }
 
-func (f *fakeBackend) GetMessage(accountID string, uid uint32) (*mail.FullMessage, error) {
-	return &mail.FullMessage{Message: mail.Message{ID: fmt.Sprint(uid)}}, nil
+func (f *fakeBackend) GetMessage(accountID, id string) (*mail.FullMessage, error) {
+	return &mail.FullMessage{Message: mail.Message{ID: id}}, nil
 }
 
-func (f *fakeBackend) DeleteMessage(accountID string, uid uint32) error { return nil }
+func (f *fakeBackend) DeleteMessage(accountID, id string) error { return nil }
 
 func (f *fakeBackend) Reload() error {
 	f.reloadCount++
@@ -172,9 +171,11 @@ func (f *fakeBackend) Reload() error {
 }
 
 // newTestServer 构造带固定密码与 fake backend 的测试 Server。
-// AutoTaskFile 指向临时目录,保证创建额度的持久化路径可写。
-func newTestServer(f *fakeBackend) (*Server, *httptest.Server) {
-	dir, _ := os.MkdirTemp("", "icloud-hme-server-test-*")
+// AutoTaskFile 指向 t.TempDir(), 保证创建额度的持久化路径可写且测试结束自动清理
+// (此前用 os.MkdirTemp 且从不清理, 每次跑测试套件泄漏 30+ 个临时目录)。
+func newTestServer(t *testing.T, f *fakeBackend) (*Server, *httptest.Server) {
+	t.Helper()
+	dir := t.TempDir()
 	cfg := Config{
 		Debug:         false,
 		AdminPassword: "admin-pass-2026-strong",
@@ -256,7 +257,7 @@ func TestInboxPaginationAndPreviews(t *testing.T) {
 			},
 		},
 	}
-	_, ts := newTestServer(f)
+	_, ts := newTestServer(t, f)
 	cookie, csrf := login(t, ts, "admin-pass-2026-strong")
 
 	// 第一页: offset=0 limit=2 → m3,m2(新→旧) + total=3

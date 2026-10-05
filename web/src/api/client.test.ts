@@ -58,6 +58,37 @@ describe('api client', () => {
     await vi.waitFor(() => expect(onUnauthorized).toHaveBeenCalled())
   })
 
+  it('业务级 401(验证码错误/上游会话失效)不触发全局登出', async () => {
+    // 回归背景: OTP 输错返回 401 OTP_INVALID, 全局登出会把管理员从
+    // 2FA 对话框直接踢回登录页, "保留会话可重试"的承诺失效。
+    const onUnauthorized = vi.fn()
+    server.use(
+      http.post('/api/accounts/acc_1/login/otp', () =>
+        HttpResponse.json(
+          { success: false, code: 'OTP_INVALID', message: 'OTP 验证码错误' },
+          { status: 401 },
+        ),
+      ),
+    )
+    await expect(
+      request('/api/accounts/acc_1/login/otp', { method: 'POST' }, onUnauthorized),
+    ).rejects.toMatchObject({ code: 'OTP_INVALID' })
+    expect(onUnauthorized).not.toHaveBeenCalled()
+
+    server.use(
+      http.get('/api/accounts', () =>
+        HttpResponse.json(
+          { success: false, code: 'UPSTREAM_UNAUTHORIZED', message: 'iCloud 会话失效,请更新 Cookie' },
+          { status: 401 },
+        ),
+      ),
+    )
+    await expect(
+      request('/api/accounts', undefined, onUnauthorized),
+    ).rejects.toMatchObject({ code: 'UPSTREAM_UNAUTHORIZED' })
+    expect(onUnauthorized).not.toHaveBeenCalled()
+  })
+
   it('GET 不带 CSRF,POST 自动带 CSRF', async () => {
     setCSRFToken('csrf-token-123')
     let getHeaders: Headers | undefined

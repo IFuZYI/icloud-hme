@@ -304,7 +304,17 @@ GET /api/inbox?account_id=acc_1&alias=xyz123@icloud.com&limit=20&start=2026-08-0
         "to": "xyz123@icloud.com",
         "subject": "[GitHub] Please verify your email address",
         "date": "2026-07-09T14:32:10+08:00",
-        "preview": "Almost done! To finish setting up your account..."
+        "preview": "Almost done! To finish setting up your account...",
+        "folder": "INBOX"
+      },
+      {
+        "id": "Junk:88",
+        "from": "noreply@example.com",
+        "to": "xyz123@icloud.com",
+        "subject": "验证码",
+        "date": "2026-07-09T15:01:00+08:00",
+        "preview": "您的验证码是 123456",
+        "folder": "Junk"
       }
     ]
   }
@@ -312,6 +322,8 @@ GET /api/inbox?account_id=acc_1&alias=xyz123@icloud.com&limit=20&start=2026-08-0
 ```
 
 `method` 为 `imap` 或 `web_api`。IMAP 路径支持服务端按收件人搜索；Web API 路径拉取后本地过滤。
+
+**文件夹与消息 ID**：IMAP 读取同时扫描收件箱与垃圾邮件箱（iCloud 常把转发邮件判为垃圾），`folder` 字段标出来源。IMAP 的 UID 按文件夹生效，因此非 INBOX 邮件的 `id` 带文件夹前缀（`Junk:88`），INBOX 保持纯数字（`1042`，兼容旧格式）。`GET /api/inbox/:message_id`、`DELETE /api/inbox/:message_id` 与 `POST /api/inbox/previews` 的 `ids` 均接受这两种格式，原样回传列表里的 `id` 即可。
 
 IMAP 不可用而回退到 Web API 时，响应会额外带 `warning` 字段说明降级原因（缺省表示走 IMAP 成功）：
 
@@ -417,7 +429,7 @@ X-CSRF-Token: <token>
 
 自动任务为账号低频创建 HME 别名，达到 `target_count` 后自动停止。分两类：
 
-- **自主任务（`mode: auto`）**：`daily_limit` 设定每天创建数量（1–50 任意整数，缺省 20），系统按当天剩余时间分摊执行时刻，每次 1 个。`interval_minutes` 由系统推算（24×60 ÷ 每日数量，不低于 20），无需填写。创建当天按剩余时间折算今日配额 `today_quota`（如每日 20 个、中午 12 点创建 → 今日 10 个），次日跨天恢复满额。
+- **自主任务（`mode: auto`）**：`daily_limit` 设定每天创建数量（1–50 任意整数，缺省 20），系统按当天剩余时间分摊执行时刻，每次 1 个。`interval_minutes` 由系统推算（24×60 ÷ 每日数量，不低于 20），无需填写。创建当天按剩余时间折算今日配额 `today_quota`（如每日 20 个、中午 12 点创建 → 今日 10 个），次日跨天恢复满额。`today_quota=0` 是合法值，表示当天剩余时间不足 1 个（如深夜创建），当日不排、次日恢复；该字段始终随响应下发，前端直接读取即可。
 - **定时任务（`mode: scheduled`）**：每隔 `interval_minutes`（20–1440）创建 `batch_count`（1–20）个；`daily_limit` 固定为账号每日安全上限 50。
 
 标签由 `label_mode` 决定：`library`（名称库轮换）/ `sequential`（`label_prefix` + 补零序号）/ `hash`（`label_prefix` + `hash_length` 位随机哈希，4–8）。

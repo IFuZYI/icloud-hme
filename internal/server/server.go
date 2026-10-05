@@ -14,6 +14,7 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"net/http"
 	"os"
@@ -85,7 +86,7 @@ func newWithBackend(be Backend, cfg Config) *Server {
 	})
 	s.r = gin.New()
 	// 用结构化日志中间件替代 gin.Logger:统一走 slog,受 ICLOUD_HME_LOG_LEVEL 控制。
-	s.r.Use(requestLogMiddleware(), gin.Recovery(), securityHeadersMiddleware())
+	s.r.Use(requestLogMiddleware(), gin.Recovery(), securityHeadersMiddleware(), bodyLimitMiddleware())
 	// 不信任任意代理头,登录限流使用真实连接 IP
 	_ = s.r.SetTrustedProxies(nil)
 	s.register()
@@ -242,7 +243,7 @@ func (s *Server) createAliasHandler(c *gin.Context) {
 		return
 	}
 	if len([]rune(label)) > maxManualLabelLen {
-		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "参数错误: label 最长 200 字符")
+		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", fmt.Sprintf("参数错误: label 最长 %d 字符", maxManualLabelLen))
 		return
 	}
 	req.Label = label
@@ -275,10 +276,12 @@ func (s *Server) createAliasHandler(c *gin.Context) {
 
 // ====================================================================
 // 核心接口 2: 读取邮件
-//   GET /api/inbox?account_id=acc_xxx[&alias=xxx@icloud.com][&limit=20][&days=7]
+//   GET /api/inbox?account_id=acc_xxx[&alias=xxx@icloud.com][&limit=20]
+//                 [&start=YYYY-MM-DD][&end=YYYY-MM-DD][&days=7]
 //
-//   - 不传 alias: 返回该账号收件箱最近邮件
+//   - 不传 alias: 返回该账号收件箱最近邮件(含垃圾邮件箱 Junk)
 //   - 传 alias:   只返回发给该 HME 别名的邮件
+//   - start/end 日期区间优先; 都不传时回退 days(默认近 7 天)
 //
 //   认证优先级: IMAP (App Password) 优先 > Web API (Cookie) 回退
 // ====================================================================
@@ -300,18 +303,19 @@ func (s *Server) listInboxHandler(c *gin.Context) {
 		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "参数错误: offset 需为非负整数")
 		return
 	}
-	days, err := parseInboxInt(c.DefaultQuery("days", "7"), 0, 3650)
-	if err != nil {
-		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "参数错误: days 需为 0-3650 的整数(0 表示不限)")
-		return
-	}
 	// 日期区间优先: 前端日期选择器直接传 start/end(YYYY-MM-DD 或 RFC3339)。
 	dateRange, err := parseDateRange(c.Query("start"), c.Query("end"))
 	if err != nil {
 		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
 		return
 	}
+	// days 仅在未提供区间时解析(区间优先时非法 days 不应误报 400)。
 	if dateRange.Start.IsZero() && dateRange.End.IsZero() {
+		days, err := parseInboxInt(c.DefaultQuery("days", "7"), 0, 3650)
+		if err != nil {
+			failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "参数错误: days 需为 0-3650 的整数(0 表示不限)")
+			return
+		}
 		dateRange = mail.DateRangeFromDays(days)
 	}
 
@@ -320,7 +324,6 @@ func (s *Server) listInboxHandler(c *gin.Context) {
 		Alias:     alias,
 		Limit:     limit,
 		Offset:    offset,
-		Days:      days,
 		DateRange: dateRange,
 	})
 	if err != nil {
@@ -349,16 +352,16 @@ func (s *Server) fetchPreviewsHandler(c *gin.Context) {
 	if len(req.IDs) > 20 {
 		req.IDs = req.IDs[:20]
 	}
-	uids := make([]uint32, 0, len(req.IDs))
+	// 只做格式校验(uid 或 folder:uid), 解析交给后端, 避免两处规则漂移。
+	ids := make([]string, 0, len(req.IDs))
 	for _, id := range req.IDs {
-		uid, err := strconv.ParseUint(id, 10, 32)
-		if err != nil {
+		if _, _, err := mail.ParseMessageID(id); err != nil {
 			failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "参数错误: 邮件 ID 无效")
 			return
 		}
-		uids = append(uids, uint32(uid))
+		ids = append(ids, id)
 	}
-	previews, err := s.be.FetchPreviews(accountID, uids)
+	previews, err := s.be.FetchPreviews(accountID, ids)
 	if err != nil {
 		backendFail(c, err)
 		return
@@ -368,12 +371,16 @@ func (s *Server) fetchPreviewsHandler(c *gin.Context) {
 
 func (s *Server) getMessageHandler(c *gin.Context) {
 	accountID := c.Query("account_id")
-	uid, err := strconv.ParseUint(c.Param("message_id"), 10, 32)
-	if accountID == "" || err != nil {
+	id := c.Param("message_id")
+	if accountID == "" {
 		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "account_id 或邮件 ID 无效")
 		return
 	}
-	message, err := s.be.GetMessage(accountID, uint32(uid))
+	if _, _, err := mail.ParseMessageID(id); err != nil {
+		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "account_id 或邮件 ID 无效")
+		return
+	}
+	message, err := s.be.GetMessage(accountID, id)
 	if err != nil {
 		backendFail(c, err)
 		return
@@ -383,16 +390,20 @@ func (s *Server) getMessageHandler(c *gin.Context) {
 
 func (s *Server) deleteMessageHandler(c *gin.Context) {
 	accountID := c.Query("account_id")
-	uid, err := strconv.ParseUint(c.Param("message_id"), 10, 32)
-	if accountID == "" || err != nil {
+	id := c.Param("message_id")
+	if accountID == "" {
 		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "account_id 或邮件 ID 无效")
 		return
 	}
-	if err := s.be.DeleteMessage(accountID, uint32(uid)); err != nil {
+	if _, _, err := mail.ParseMessageID(id); err != nil {
+		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "account_id 或邮件 ID 无效")
+		return
+	}
+	if err := s.be.DeleteMessage(accountID, id); err != nil {
 		backendFail(c, err)
 		return
 	}
-	ok(c, gin.H{"id": c.Param("message_id")})
+	ok(c, gin.H{"id": id})
 }
 
 // parseInboxInt 解析整数参数,非法或越界返回错误(不再静默变成 0)。

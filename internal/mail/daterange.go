@@ -44,14 +44,19 @@ func DateRangeFromDays(days int) DateRange {
 }
 
 // dateRangeSearchCriteria 把区间翻译为 IMAP SEARCH 条件。
-// 使用 Since(>=) 与 Before(<) —— 两者均为服务端日期条件,避免全量拉取。
+//
+// 关键语义: RFC 3501 的日期条件按「日粒度、忽略时间与时区」比较, 且 BEFORE
+// 是排他的。因此 BEFORE 必须取「End 所在日的次日零点」——直接传 End
+// (哪怕是 23:59:59)会让最后一天整天的邮件被排除, 单日区间直接返回空。
 func dateRangeSearchCriteria(r DateRange) *imap.SearchCriteria {
 	criteria := imap.NewSearchCriteria()
 	if !r.Start.IsZero() {
 		criteria.Since = r.Start
 	}
 	if !r.End.IsZero() {
-		criteria.Before = r.End
+		// End 当天要含在内: BEFORE <次日零点> 恰好覆盖 [.., End 当天]。
+		y, m, d := r.End.Date()
+		criteria.Before = time.Date(y, m, d, 0, 0, 0, 0, r.End.Location()).AddDate(0, 0, 1)
 	}
 	return criteria
 }

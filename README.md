@@ -249,6 +249,7 @@ GET /api/inbox?account_id=acc_1&alias=xyz123@icloud.com&limit=20&start=2026-08-0
 #   limit      - 可选: 返回邮件数量 (默认 20)
 #   start/end  - 可选: 日期区间 (YYYY-MM-DD 或 RFC3339; end 含当天)
 #   days       - 可选: 旧的"最近 N 天"参数, 无 start/end 时生效 (默认 7)
+# 注: 同时扫描收件箱与垃圾邮件箱(Junk); 非 INBOX 邮件的 id 形如 "Junk:88"
 
 # 响应
 {
@@ -503,7 +504,7 @@ POST /api/aliases/batch
 
 自动创建任务分为两种类型，均以低频方式为指定账号创建 HME 别名，达到目标总数（`target_count`，1–999）后自动停止：
 
-- **自主任务（`mode: auto`）**：手动输入每天创建数量 `daily_limit`（1–50，默认 20），系统按当天剩余时间分摊执行时刻，每次创建 1 个；创建当天按剩余时间折算今日配额（`today_quota`）。
+- **自主任务（`mode: auto`）**：手动输入每天创建数量 `daily_limit`（1–50，默认 20），系统按当天剩余时间分摊执行时刻，每次创建 1 个；创建当天按剩余时间折算今日配额（`today_quota`，`0` 表示当天不排、次日恢复）。
 - **定时任务（`mode: scheduled`）**：每隔 `interval_minutes`（20–1440 分钟）创建 `batch_count` 个（1–20）。
 
 标签可用三种方式生成（`label_mode`）：

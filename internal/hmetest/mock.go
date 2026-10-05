@@ -29,16 +29,13 @@ type Server struct {
 	mu sync.Mutex
 
 	CompleteBody    map[string]any
-	CompleteHeaders http.Header
 	VerifyCode      string
-	VerifyHeaders   http.Header
 	TrustHits       int
 	AccountLoginHit int
 	ValidateHits    int
 	ResendMethod    string
 	SMSSendBody     map[string]any
 	SMSVerifyBody   map[string]any
-	PhoneListHits   int
 }
 
 // New 启动 mock 服务,测试结束自动关闭。
@@ -101,7 +98,6 @@ func New(t testing.TB) *Server {
 		_ = json.Unmarshal(body, &payload)
 		m.mu.Lock()
 		m.CompleteBody = payload
-		m.CompleteHeaders = r.Header.Clone()
 		requireOTP := m.RequireOTP
 		m.mu.Unlock()
 
@@ -144,7 +140,6 @@ func New(t testing.TB) *Server {
 			code, _ = sc["code"].(string)
 		}
 		m.mu.Lock()
-		m.VerifyHeaders = r.Header.Clone()
 		m.VerifyCode = code
 		expected := m.ExpectedCode
 		m.mu.Unlock()
@@ -182,7 +177,6 @@ func New(t testing.TB) *Server {
 
 	mux.HandleFunc("/appleauth/auth", func(w http.ResponseWriter, r *http.Request) {
 		m.mu.Lock()
-		m.PhoneListHits++
 		m.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"phoneNumberVerification":{"trustedPhoneNumbers":[{"id":2,"numberWithDialCode":"+86 138****1234"}]}}`))

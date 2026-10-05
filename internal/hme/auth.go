@@ -53,8 +53,10 @@ const (
 	authPhoneCode    = idmsaBase + "/appleauth/auth/verify/phone/securitycode"
 )
 
-// webUserAgent 与 X-Apple-I-FD-Client-Info 中的 U 保持一致。
-const webUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+// webUserAgent 是登录与 Web API 共用的浏览器标识, 与 X-Apple-I-FD-Client-Info
+// 的 U 字段、sec-ch-ua 头保持一致(版本漂移会让同一客户端对不同 Apple 端点
+// 声称不同浏览器版本, 风控行为不可预测)。
+const webUserAgent = defaultUserAgent
 
 // ErrOTPRequired 表示账号启用了双重认证,需要调用 CompleteOTP 提交验证码。
 var ErrOTPRequired = errors.New("账号启用了双重认证,需要提供 2FA 验证码")
@@ -224,19 +226,28 @@ func (c *Client) BeginLogin(username, password string) error {
 //
 // 必须在 BeginLogin 返回 ErrOTPRequired 之后、对同一个 *Client 调用。
 func (c *Client) CompleteOTP(code string) error {
-	state := c.pendingAuth
-	if state == nil {
-		return fmt.Errorf("无待验证的登录会话,请重新发起登录")
+	state, err := c.pending()
+	if err != nil {
+		return err
 	}
 	ep := c.endpoints()
 	if err := c.submitSecurityCode(state, ep, code); err != nil {
 		return err
 	}
-	err := c.finishLogin(state, ep)
-	if err == nil {
-		c.pendingAuth = nil
+	if err := c.finishLogin(state, ep); err != nil {
+		return err
 	}
-	return err
+	c.pendingAuth = nil
+	return nil
+}
+
+// pending 返回进行中的登录会话; 无会话时给出统一错误。
+// 五个入口(CompleteOTP/CompleteSMS/SendSMS/TrustedPhones/ResendOTP)共用。
+func (c *Client) pending() (*authState, error) {
+	if c.pendingAuth == nil {
+		return nil, fmt.Errorf("无待验证的登录会话,请重新发起登录")
+	}
+	return c.pendingAuth, nil
 }
 
 // finishLogin 登录收尾: 信任设备 → 获取 Web Cookie → 保存到 Client。
@@ -266,7 +277,7 @@ func (c *Client) authStart(state *authState, ep authEndpoints) error {
 	state.frameId = strings.ToLower(uuid.New().String())
 	state.clientId = OAuthClientID
 
-	req, err := http.NewRequest("GET", fmt.Sprintf(ep.startFmt, state.frameId, state.clientId, c.oauthRedirectURI()), nil)
+	req, err := http.NewRequest("GET", fmt.Sprintf(ep.startFmt, state.frameId, state.clientId, c.Origin()), nil)
 	if err != nil {
 		return err
 	}
@@ -361,14 +372,19 @@ func (c *Client) authInit(state *authState, ep authEndpoints, a string) (*authIn
 	return &result, nil
 }
 
-// captureSessionHeaders 从响应中捕获 scnt / X-Apple-ID-Session-Id。
-// 每次响应(包括错误响应)都可能轮换这两个值,必须总是取最新的。
+// captureSessionHeaders 从响应中捕获 scnt / X-Apple-ID-Session-Id /
+// X-Apple-Session-Token。一律「非空才覆盖」——Apple 并非每个响应都带全部
+// 头部, 无条件赋值会把此前捕获的值清空, 导致后续 MFA 请求缺头被拒。
+// 每次响应(包括错误响应)都可能轮换这些值, 必须总是取最新的非空值。
 func (c *Client) captureSessionHeaders(state *authState, resp *http.Response) {
 	if scnt := resp.Header.Get("scnt"); scnt != "" {
 		state.scnt = scnt
 	}
 	if sessionID := resp.Header.Get("X-Apple-ID-Session-Id"); sessionID != "" {
 		state.sessionID = sessionID
+	}
+	if token := resp.Header.Get("X-Apple-Session-Token"); token != "" {
+		state.authToken = token
 	}
 }
 
@@ -410,10 +426,8 @@ func (c *Client) authComplete(state *authState, ep authEndpoints, m1, m2 string)
 	case 200:
 		return nil
 	case 409:
-		// 需要 2FA: 409 响应下发的 session token 是后续 MFA 请求的必需头部。
-		state.sessionID = resp.Header.Get("X-Apple-ID-Session-Id")
-		state.scnt = resp.Header.Get("scnt")
-		state.authToken = resp.Header.Get("X-Apple-Session-Token")
+		// 需要 2FA: 409 响应下发的 session token 是后续 MFA 请求的必需头部,
+		// 已由上方 captureSessionHeaders 按「非空才覆盖」捕获。
 		return ErrOTPRequired
 	case 403:
 		return fmt.Errorf("用户名或密码错误")
@@ -427,9 +441,9 @@ func (c *Client) authComplete(state *authState, ep authEndpoints, m1, m2 string)
 
 // TrustedPhones 获取账号的受信任手机号列表。必须在 BeginLogin 返回 ErrOTPRequired 之后调用。
 func (c *Client) TrustedPhones() ([]TrustedPhone, error) {
-	state := c.pendingAuth
-	if state == nil {
-		return nil, fmt.Errorf("无待验证的登录会话,请重新发起登录")
+	state, err := c.pending()
+	if err != nil {
+		return nil, err
 	}
 	ep := c.endpoints()
 	req, err := http.NewRequest("GET", ep.info, nil)
@@ -468,9 +482,9 @@ func (c *Client) TrustedPhones() ([]TrustedPhone, error) {
 
 // SendSMS 向指定受信任手机号发送短信验证码 (PUT /verify/phone, 成功 200)。
 func (c *Client) SendSMS(phoneID int) error {
-	state := c.pendingAuth
-	if state == nil {
-		return fmt.Errorf("无待验证的登录会话,请重新发起登录")
+	state, err := c.pending()
+	if err != nil {
+		return err
 	}
 	ep := c.endpoints()
 	body, _ := json.Marshal(map[string]interface{}{
@@ -498,9 +512,9 @@ func (c *Client) SendSMS(phoneID int) error {
 
 // CompleteSMS 提交短信验证码 (POST /verify/phone/securitycode, 成功 200),完成登录。
 func (c *Client) CompleteSMS(phoneID int, code string) error {
-	state := c.pendingAuth
-	if state == nil {
-		return fmt.Errorf("无待验证的登录会话,请重新发起登录")
+	state, err := c.pending()
+	if err != nil {
+		return err
 	}
 	ep := c.endpoints()
 	body, _ := json.Marshal(map[string]interface{}{
@@ -536,9 +550,9 @@ func (c *Client) CompleteSMS(phoneID int, code string) error {
 // 409 之后 Apple 通常会自动推送一次,本方法用于手动重发。该端点在不同账号/
 // 区域的行为不一致,因此按候选组合依次探测,任一返回 2xx 即视为成功。
 func (c *Client) ResendOTP() error {
-	state := c.pendingAuth
-	if state == nil {
-		return fmt.Errorf("无待验证的登录会话,请重新发起登录")
+	state, err := c.pending()
+	if err != nil {
+		return err
 	}
 	ep := c.endpoints()
 	candidates := []struct{ method, url string }{
@@ -720,7 +734,7 @@ func (c *Client) updateAuthHeaders(header http.Header, state *authState) http.He
 
 	header.Set("X-Apple-OAuth-Client-Id", state.clientId)
 	header.Set("X-Apple-OAuth-Client-Type", "firstPartyAuth")
-	header.Set("X-Apple-OAuth-Redirect-URI", c.oauthRedirectURI())
+	header.Set("X-Apple-OAuth-Redirect-URI", c.Origin())
 	header.Set("X-Apple-OAuth-Require-Grant-Code", "true")
 	header.Set("X-Apple-OAuth-Response-Mode", "web_message")
 	header.Set("X-Apple-OAuth-Response-Type", "code")
@@ -743,11 +757,6 @@ func (c *Client) updateAuthHeaders(header http.Header, state *authState) http.He
 	return header
 }
 
-// oauthRedirectURI 按账号区域返回 OAuth 回调 URI (国区 www.icloud.com.cn)。
-func (c *Client) oauthRedirectURI() string {
-	return "https://www." + c.Host
-}
-
 // fdClientInfo 生成与浏览器格式一致的 X-Apple-I-FD-Client-Info 指纹 JSON。
 // F 字段是客户端生成的随机标识,Apple 不校验具体内容,但格式必须像。
 func fdClientInfo() string {
@@ -755,13 +764,18 @@ func fdClientInfo() string {
 	return fmt.Sprintf(`{"U":%q,"L":"zh-CN","Z":"GMT+08:00","V":"1.1","F":%q}`, webUserAgent, f)
 }
 
-// randToken 生成指定长度的随机标识串 (字母数字与 _ -)。
+// randToken 生成指定长度的随机标识串 (字母数字与 _ -), 用于设备指纹。
+// 随机源失败时回退为确定性占位串(与仓库 randomHash 的约定一致):
+// 指纹只影响风控评分, 不值得让整个进程 panic。
 func randToken(n int) string {
 	const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
 	b := make([]byte, n)
 	rnd := make([]byte, n)
 	if _, err := rand.Read(rnd); err != nil {
-		panic(err)
+		for i := range b {
+			b[i] = alphabet[i%len(alphabet)]
+		}
+		return string(b)
 	}
 	for i := range b {
 		b[i] = alphabet[int(rnd[i])%len(alphabet)]
