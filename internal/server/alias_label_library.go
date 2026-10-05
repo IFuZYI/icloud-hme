@@ -235,6 +235,8 @@ const (
 	minHashLength      = 4
 	maxHashLength      = 8
 	maxLabelPrefixLen  = 32
+	// maxManualLabelLen 是手动创建别名时自定义标签的最大长度(rune)。
+	maxManualLabelLen = 200
 )
 
 // hashAlphabet 是哈希后缀使用的字符集（去除易混淆的 0/o/1/l/i）。

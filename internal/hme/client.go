@@ -76,6 +76,8 @@ type Client struct {
 	dsid        string // 从 validate 响应提取
 	clientID    string // UUID,每次会话生成
 	accountInfo *AccountInfo
+	// pendingAuth 保存等待 2FA 的登录会话(BeginLogin 写入,CompleteOTP 消费)。
+	pendingAuth *authState
 }
 
 // NewClient 创建一个新的 HME 客户端,底层使用 Chrome TLS 指纹。

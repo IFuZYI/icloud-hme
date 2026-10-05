@@ -96,6 +96,8 @@ export interface AliasTask {
   interval_minutes: number
   batch_count: number
   daily_limit: number
+  /** 今日实际配额(自主任务按当天剩余时间折算; 缺省视为等于 daily_limit) */
+  today_quota?: number
   label_mode: LabelMode
   label_prefix?: string
   hash_length?: number

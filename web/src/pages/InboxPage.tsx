@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
+import { DatePicker } from 'antd'
+import type { Dayjs } from 'dayjs'
+import dayjs from 'dayjs'
+import 'dayjs/locale/zh-cn'
 import { request, ApiError } from '../api/client'
 import { fetchAccounts } from '../api/cache'
 import type { AccountSummary, Alias, FullMessage, InboxResult, InboxMessage } from '../api/types'
@@ -11,6 +15,13 @@ import { useToast } from '../components/ToastProvider'
 import { copyText } from '../utils/clipboard'
 import { formatDateTime } from '../utils/datetime'
 import { IconAlert, IconCopy, IconKey, IconMail, IconRefresh, IconTrash } from '../components/icons'
+
+dayjs.locale('zh-cn')
+
+/** 默认时间范围: 近 7 天(与后端 days 默认值一致)。 */
+function defaultDateRange(): [Dayjs, Dayjs] {
+  return [dayjs().subtract(7, 'day').startOf('day'), dayjs().endOf('day')]
+}
 
 const dateFormatter = new Intl.DateTimeFormat('zh-CN', {
   year: 'numeric',
@@ -45,7 +56,7 @@ export default function InboxPage() {
   const [accountId, setAccountId] = useState('')
   const [alias, setAlias] = useState('')
   const [pageSize, setPageSize] = useState(20)
-  const [days, setDays] = useState(7)
+  const [dateRange, setDateRange] = useState<[Dayjs | null, Dayjs | null] | null>(() => defaultDateRange())
 
   const [messages, setMessages] = useState<InboxMessage[]>([])
   const [total, setTotal] = useState(0)
@@ -96,8 +107,9 @@ export default function InboxPage() {
         account_id: accountId,
         limit: String(pageSize),
         offset: String(offset),
-        days: String(days),
       })
+      if (dateRange?.[0]) params.set('start', dateRange[0].format('YYYY-MM-DD'))
+      if (dateRange?.[1]) params.set('end', dateRange[1].format('YYYY-MM-DD'))
       if (alias) params.set('alias', alias)
       try {
         const data = await request<InboxResult>(`/api/inbox?${params.toString()}`, {
@@ -125,7 +137,7 @@ export default function InboxPage() {
         setRefreshing(false)
       }
     },
-    [accountId, alias, pageSize, days, fillPreviews],
+    [accountId, alias, pageSize, dateRange, fillPreviews],
   )
 
   async function openMessage(message: InboxMessage) {
@@ -186,8 +198,10 @@ export default function InboxPage() {
           }
           const qLimit = searchParams.get('limit')
           if (qLimit) next.limit = qLimit
-          const qDays = searchParams.get('days')
-          if (qDays) next.days = qDays
+          const qStart = searchParams.get('start')
+          const qEnd = searchParams.get('end')
+          if (qStart) next.start = qStart
+          if (qEnd) next.end = qEnd
           setSearchParams(next, { replace: true })
         }
       })
@@ -231,13 +245,14 @@ export default function InboxPage() {
     const t = window.setTimeout(() => void loadPage(0, false), 0)
     return () => window.clearTimeout(t)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [accountId, alias, pageSize, days, retryKey])
+  }, [accountId, alias, pageSize, dateRange, retryKey])
 
   function runQuery() {
     const next: Record<string, string> = { account_id: accountId }
     if (alias) next.alias = alias
     next.limit = String(pageSize)
-    next.days = String(days)
+    if (dateRange?.[0]) next.start = dateRange[0].format('YYYY-MM-DD')
+    if (dateRange?.[1]) next.end = dateRange[1].format('YYYY-MM-DD')
     setSearchParams(next, { replace: true })
     setDetail(null)
     // 保留现有列表, 只让刷新按钮进入忙碌态(loading 会让整块变成骨架屏)
@@ -325,21 +340,15 @@ export default function InboxPage() {
             onChange={(v) => setPageSize(Number(v))}
           />
         </div>
-        <div className="inbox-field">
-          <label htmlFor="inbox-days">时间范围</label>
-          <SelectMenu
-            id="inbox-days"
-            block
-            ariaLabel="时间范围"
-            value={String(days)}
-            options={[
-              { value: '1', label: '近 1 天' },
-              { value: '7', label: '近 7 天' },
-              { value: '30', label: '近 30 天' },
-              { value: '90', label: '近 90 天' },
-              { value: '0', label: '全部' },
-            ]}
-            onChange={(v) => setDays(Number(v))}
+        <div className="inbox-field inbox-field-range">
+          <label htmlFor="inbox-range">时间范围</label>
+          <DatePicker.RangePicker
+            id="inbox-range"
+            allowClear
+            value={dateRange}
+            onChange={(range) => setDateRange(range)}
+            format="YYYY-MM-DD"
+            placeholder={['开始日期', '结束日期']}
           />
         </div>
         <div className="inbox-field inbox-field-submit">
@@ -370,7 +379,9 @@ export default function InboxPage() {
           <span className="inbox-summary-scope">
             {accountName ? `${accountName} · ` : ''}
             {alias ? `仅 ${alias} · ` : ''}
-            {days > 0 ? `近 ${days} 天` : '全部时间'}
+            {dateRange?.[0] && dateRange?.[1]
+              ? `${dateRange[0].format('YYYY-MM-DD')} ~ ${dateRange[1].format('YYYY-MM-DD')}`
+              : '全部时间'}
           </span>
         </div>
       )}

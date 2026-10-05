@@ -40,14 +40,18 @@ func TestNormalizeAliasTaskValidation(t *testing.T) {
 		t.Fatal("interval_minutes=19 should fail")
 	}
 
-	// 自主任务：每日数量必须为 5 的倍数且 5-50。
+	// 自主任务：每日数量为 1-50 的任意整数(手动输入)。
 	auto := aliasTaskInput{Enabled: true, AccountID: "a", Mode: taskModeAuto, TargetCount: 20, DailyLimit: 10}
 	if _, e := normalizeAliasTask(auto); e != nil {
 		t.Fatal(e)
 	}
 	auto.DailyLimit = 12
+	if _, e := normalizeAliasTask(auto); e != nil {
+		t.Fatalf("daily_limit=12 现在应被接受: %v", e)
+	}
+	auto.DailyLimit = 51
 	if _, e := normalizeAliasTask(auto); e == nil {
-		t.Fatal("daily_limit=12 should fail")
+		t.Fatal("daily_limit=51 应被拒绝")
 	}
 
 	// 手动顺序标签需要前缀。
@@ -128,6 +132,7 @@ func TestAutoTaskUsesLabelLibraryAndEnforcesDailyCap(t *testing.T) {
 	task.Enabled = true
 	task.CreatedCount = 19
 	task.DailyCount = 19
+	task.TodayQuota = task.DailyLimit // 满额当日配额,隔离首日折算的影响
 	task.DailyDate = taskDate(time.Now())
 	m.tasks[task.ID] = task
 	m.mu.Unlock()

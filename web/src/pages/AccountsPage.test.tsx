@@ -173,19 +173,21 @@ describe('AccountsPage', () => {
     expect((screen.getByLabelText('Cookie（必填）') as HTMLTextAreaElement).value).toBe('')
   })
 
-  it('iCloud 登录收到 OTP_REQUIRED 后只显示 OTP 输入并可重试', async () => {
-    let calls = 0
+  it('iCloud 登录需要 2FA 时显示 OTP 输入并两步提交', async () => {
+    let beginCalls = 0
+    let otpCalls = 0
     server.use(
       http.get('/api/accounts', () => HttpResponse.json({ success: true, data: accounts })),
-      http.post('/api/accounts/:id/login', async () => {
-        calls++
-        if (calls === 1) {
-          return HttpResponse.json(
-            { success: false, code: 'OTP_REQUIRED', message: '需要提供 OTP 验证码' },
-            { status: 409 },
-          )
-        }
-        return HttpResponse.json({ success: true, data: accounts[0] })
+      http.post('/api/accounts/:id/login/begin', () => {
+        beginCalls++
+        return HttpResponse.json({
+          success: true,
+          data: { status: 'otp_required', session_id: 'login-session-1' },
+        })
+      }),
+      http.post('/api/accounts/:id/login/otp', () => {
+        otpCalls++
+        return HttpResponse.json({ success: true, data: { status: 'done', account: accounts[0] } })
       }),
     )
     renderPage()
@@ -202,7 +204,8 @@ describe('AccountsPage', () => {
     await user.type(otpInput, '123456')
     dialog = screen.getByRole('dialog')
     await user.click(within(dialog).getByRole('button', { name: /验证并登录/ }))
-    await waitFor(() => expect(calls).toBe(2))
+    await waitFor(() => expect(beginCalls).toBe(1))
+    await waitFor(() => expect(otpCalls).toBe(1))
   })
 
   it('App Password 提交后清空', async () => {

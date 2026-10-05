@@ -40,10 +40,13 @@ const (
 	// autoJitterSigma 为创建间隔的乘性扰动幅度：实际间隔 = 基准 × (1 ± sigma)。
 	// 取三角分布，使多数间隔落在基准附近、偶尔明显偏长或偏短，更接近真人节奏。
 	autoJitterSigma = 0.4
-)
+	// autoBreakChance 是额外「长暂停」的概率: 模拟真人临时离开,
+	// 以 2-4 倍间隔推迟一次创建(见 humanJitter)。
+	autoBreakChance = 0.12
 
-// allowedDailyCounts 是自主任务可选的每日创建数量。
-var allowedDailyCounts = map[int]bool{5: true, 10: true, 15: true, 20: true, 25: true, 30: true, 35: true, 40: true, 45: true, 50: true}
+	// defaultAutoDailyLimit 是自主任务未显式指定每日数量时的默认值。
+	defaultAutoDailyLimit = 20
+)
 
 var (
 	errAliasTaskValidation  = errors.New("alias task validation error")
@@ -74,6 +77,9 @@ type AliasTask struct {
 	// DailyLimit 表示每个自然日最多创建数量。
 	// auto 任务：即为用户设定的每天创建数量；scheduled 任务：作为每日安全上限。
 	DailyLimit int `json:"daily_limit"`
+	// TodayQuota 是「今日」实际可创建数量的上限。自主任务创建/跨天时按当天
+	// 剩余时间折算(见 firstDayQuota): 中午启动只生成半天目标,避免首日过密。
+	TodayQuota int `json:"today_quota,omitempty"`
 	// LabelMode 为标签生成方式：library(名称库自动) / sequential(顺序) / hash(哈希)。
 	LabelMode string `json:"label_mode"`
 	// LabelPrefix 为手动标签前缀（sequential/hash 模式使用）。
@@ -151,7 +157,14 @@ type autoTaskManager struct {
 	jitter func() float64
 }
 
+// normalizeAliasTask 以当前时间归一化任务输入(测试与旧调用方入口)。
 func normalizeAliasTask(in aliasTaskInput) (AliasTask, error) {
+	return normalizeAliasTaskAt(in, time.Now())
+}
+
+// normalizeAliasTaskAt 以指定时刻归一化任务输入。
+// now 用于计算自主任务的首日配额(按当天剩余时间折算),可注入以便测试。
+func normalizeAliasTaskAt(in aliasTaskInput, now time.Time) (AliasTask, error) {
 	if strings.TrimSpace(in.AccountID) == "" {
 		return AliasTask{}, aliasTaskValidationError("account_id 必填")
 	}
@@ -175,15 +188,22 @@ func normalizeAliasTask(in aliasTaskInput) (AliasTask, error) {
 	}
 	switch mode {
 	case taskModeAuto:
-		// 自主任务：用户设定每天创建数量（5-50，步进 5），系统自动安排时间。
-		if !allowedDailyCounts[in.DailyLimit] {
-			return AliasTask{}, aliasTaskValidationError("daily_limit 必须为 5-%d 之间且为 5 的倍数", maxTaskDailyLimit)
+		// 自主任务：用户设定每天创建数量(1-50 任意整数,缺省 20),系统自动安排时间。
+		daily := in.DailyLimit
+		if daily == 0 {
+			daily = defaultAutoDailyLimit
+		}
+		if daily < 1 || daily > maxTaskDailyLimit {
+			return AliasTask{}, aliasTaskValidationError("daily_limit 必须为 1-%d", maxTaskDailyLimit)
 		}
 		task.Mode = taskModeAuto
-		task.DailyLimit = in.DailyLimit
+		task.DailyLimit = daily
+		// 今日配额: 按创建时刻在当天的剩余时间折算(中午启动只生成半天目标)。
+		task.TodayQuota = firstDayQuota(daily, now)
+		task.DailyDate = taskDate(now)
 		// 自主任务的实际执行间隔由 nextAutoDelay 在每次调度时按活动窗口+剩余预算
 		// +随机扰动动态计算；此处仅存一个按每日数量分摊的基准值作为 NextRun 初值估算。
-		task.IntervalMinutes = autoIntervalMinutes(in.DailyLimit)
+		task.IntervalMinutes = autoIntervalMinutes(daily)
 		task.BatchCount = 1
 	case taskModeScheduled:
 		// 定时任务：每隔 interval 分钟创建 batch 个，直到达到目标总数。
@@ -251,6 +271,92 @@ func autoIntervalMinutes(dailyCount int) int {
 	return interval
 }
 
+// firstDayQuota 按「今天剩余时间」折算自主任务今天应创建的数量。
+//
+// 以自然日 24 小时为基准: 中午 12 点创建任务 → 今天只排一半(如每日 20 个排 10 个),
+// 避免首日把全天目标压进半天造成节奏过密。四舍五入到整数,
+// 不足 1 个则今天不排(次日跨天时恢复满额)。
+func firstDayQuota(dailyLimit int, now time.Time) int {
+	if dailyLimit <= 0 {
+		return 0
+	}
+	const daySeconds = 24 * 3600
+	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	remaining := dayStart.Add(24 * time.Hour).Sub(now).Seconds()
+	if remaining <= 0 {
+		return 0
+	}
+	if remaining > daySeconds {
+		remaining = daySeconds
+	}
+	quota := int(float64(dailyLimit)*remaining/daySeconds + 0.5)
+	if quota > dailyLimit {
+		quota = dailyLimit
+	}
+	return quota
+}
+
+// activityWeight 返回一天中某个小时的拟人活跃度权重(0-1)。
+//
+// 依据常见作息: 上午 9-11 点与晚间 19-22 点为高峰,午休与深夜走低,
+// 0-7 点(活动窗口外)为 0。用于按「真人何时更可能操作」倾斜创建时刻分布。
+func activityWeight(hour int) float64 {
+	switch {
+	case hour < autoActiveStartHour || hour >= autoActiveEndHour:
+		return 0
+	case hour == 8:
+		return 0.5
+	case hour == 9 || hour == 10 || hour == 11:
+		return 1.0
+	case hour == 12 || hour == 13:
+		return 0.55
+	case hour >= 14 && hour <= 17:
+		return 0.8
+	case hour == 18:
+		return 0.7
+	case hour >= 19 && hour <= 22:
+		return 0.9
+	default: // 23
+		return 0.4
+	}
+}
+
+// averageActivityWeight 返回活动窗口内的平均权重(用于把权重换算成配速)。
+func averageActivityWeight() float64 {
+	sum := 0.0
+	hours := 0
+	for h := autoActiveStartHour; h < autoActiveEndHour; h++ {
+		sum += activityWeight(h)
+		hours++
+	}
+	if hours == 0 {
+		return 1
+	}
+	return sum / float64(hours)
+}
+
+// paceDelay 按活跃度权重把「剩余时间 ÷ 剩余数量」折算成下一次间隔。
+//
+// 权重高的小时(上午/晚间)间隔更短、权重低的小时(午休/深夜)间隔更长,
+// 使整体创建时刻分布向真人活跃时段倾斜。结果钳制在窗口剩余时长内,
+// 保证当日最后一个配额不会滑出当天窗口(冷却地板由 nextAutoDelay 施加)。
+func (m *autoTaskManager) paceDelay(now, windowEnd time.Time, remaining int) time.Duration {
+	if remaining < 1 {
+		remaining = 1
+	}
+	base := windowEnd.Sub(now) / time.Duration(remaining)
+	avg := averageActivityWeight()
+	w := activityWeight(now.Hour())
+	if avg > 0 && w > 0 {
+		// 权重高 → 系数 <1(更短间隔); 权重低 → 系数 >1(更长间隔)。
+		base = time.Duration(float64(base) * avg / w)
+	}
+	if max := windowEnd.Sub(now); base > max {
+		base = max
+	}
+	return base
+}
+
 // autoActiveWindow 返回 now 所在自然日的拟人活动窗口 [start, end)。
 // 当窗口时长不足以在最小冷却间隔内容纳 remaining 个创建时，自动向前扩展起点，
 // 保证当日目标仍可达成（宁可放宽作息也不违反 20 分钟冷却红线）。
@@ -271,12 +377,13 @@ func autoActiveWindow(now time.Time, remaining int) (time.Time, time.Time) {
 	return start, end
 }
 
-// nextAutoDelay 计算自主任务下一次创建前应等待的时长。三层叠加：
+// nextAutoDelay 计算自主任务下一次创建前应等待的时长。四层叠加：
 //  1. 剩余预算配速：base = 窗口剩余时长 / 当日剩余数量，天然自校正，使当日总数收敛到目标；
-//  2. 乘性随机扰动：base × jitter()（以 1.0 为中心的三角分布），制造不规则的真人节奏；
-//  3. 昼夜窗口 + 冷却地板：窗口外顺延到窗口起点或次日；结果不低于 minCreationCooldown。
+//  2. 活跃度权重：按当前小时的拟人活跃度缩放(高峰更密、午休/深夜更疏)；
+//  3. 乘性随机扰动：base × jitter()（以 1.0 为中心的三角分布），制造不规则的真人节奏；
+//  4. 昼夜窗口 + 冷却地板：窗口外顺延到窗口起点或次日；结果不低于 minCreationCooldown。
 func (m *autoTaskManager) nextAutoDelay(t AliasTask, now time.Time) time.Duration {
-	remaining := t.DailyLimit - t.DailyCount
+	remaining := t.effectiveDailyQuota() - t.DailyCount
 	if remaining <= 0 {
 		// 当日额度用尽，睡到次日窗口起点附近。
 		return nextDailyRun(now).Sub(now)
@@ -288,12 +395,22 @@ func (m *autoTaskManager) nextAutoDelay(t AliasTask, now time.Time) time.Duratio
 	if !now.Before(end) {
 		return nextDailyRun(now).Sub(now)
 	}
-	base := end.Sub(now) / time.Duration(remaining)
+	base := m.paceDelay(now, end, remaining)
 	delay := time.Duration(float64(base) * m.jitterFactor())
 	if delay < minCreationCooldown {
 		delay = minCreationCooldown
 	}
 	return delay
+}
+
+// effectiveDailyQuota 返回任务「今日」实际可创建数量的上限。
+// 自主任务优先用 TodayQuota(创建/跨天时按剩余时间折算);
+// 旧任务或定时任务没有该字段时退回 DailyLimit。
+func (t AliasTask) effectiveDailyQuota() int {
+	if t.Mode == taskModeAuto && t.TodayQuota > 0 {
+		return t.TodayQuota
+	}
+	return t.DailyLimit
 }
 
 // jitterFactor 返回本次调度的乘性扰动因子，注入缺省时退化为无扰动的 1.0。
@@ -319,8 +436,18 @@ func triangularJitter() float64 {
 	u := (mrand.Float64() + mrand.Float64()) / 2
 	return 1 + autoJitterSigma*(2*u-1)
 }
+
+// humanJitter 是更拟人的间隔扰动: 大多数时候是常规三角扰动(1±0.4),
+// 另有 autoBreakChance 的概率产生一次 2-4 倍的长暂停,模拟真人临时离开
+// 电脑导致的节奏中断——纯对称扰动的时间序列仍过于规整,容易被识别。
+func humanJitter() float64 {
+	if mrand.Float64() < autoBreakChance {
+		return 2 + 2*mrand.Float64() // [2,4)
+	}
+	return triangularJitter()
+}
 func newAutoTaskManager(file string, backend Backend) *autoTaskManager {
-	m := &autoTaskManager{file: file, logFile: filepath.Join(filepath.Dir(file), "alias_task_logs.json"), backend: backend, tasks: map[string]AliasTask{}, stops: map[string]chan struct{}{}, done: map[string]chan struct{}{}, creating: map[string]bool{}, manualDaily: map[string]dailyCreationCounter{}, creationGuards: map[string]creationGuard{}, batchDelay: 3 * time.Second, writeState: writeJSONAtomic, writeLogs: writeJSONAtomic, now: time.Now, jitter: triangularJitter}
+	m := &autoTaskManager{file: file, logFile: filepath.Join(filepath.Dir(file), "alias_task_logs.json"), backend: backend, tasks: map[string]AliasTask{}, stops: map[string]chan struct{}{}, done: map[string]chan struct{}{}, creating: map[string]bool{}, manualDaily: map[string]dailyCreationCounter{}, creationGuards: map[string]creationGuard{}, batchDelay: 3 * time.Second, writeState: writeJSONAtomic, writeLogs: writeJSONAtomic, now: time.Now, jitter: humanJitter}
 	m.load()
 	m.loadLogs()
 	return m
@@ -364,6 +491,10 @@ func (m *autoTaskManager) load() {
 			if t.DailyLimit < 1 || t.DailyLimit > maxTaskDailyLimit {
 				t.DailyLimit = maxTaskDailyLimit
 			}
+			// 兼容旧任务：缺 TodayQuota 时按满额补齐(跨天逻辑会再校正)。
+			if t.Mode == taskModeAuto && t.TodayQuota <= 0 {
+				t.TodayQuota = t.DailyLimit
+			}
 			if t.IntervalMinutes < minTaskIntervalMinutes || t.IntervalMinutes > maxTaskIntervalMinutes {
 				t.IntervalMinutes = maxTaskIntervalMinutes
 			}
@@ -393,7 +524,7 @@ func (m *autoTaskManager) get(id string) (AliasTask, bool) {
 	return t, ok
 }
 func (m *autoTaskManager) create(in aliasTaskInput) (AliasTask, error) {
-	t, e := normalizeAliasTask(in)
+	t, e := normalizeAliasTaskAt(in, m.nowFunc())
 	if e != nil {
 		return t, e
 	}
@@ -436,7 +567,7 @@ func (m *autoTaskManager) saveAddLocked(t AliasTask) error {
 	return nil
 }
 func (m *autoTaskManager) update(id string, in aliasTaskInput) (AliasTask, error) {
-	n, e := normalizeAliasTask(in)
+	n, e := normalizeAliasTaskAt(in, m.nowFunc())
 	if e != nil {
 		return n, e
 	}
@@ -678,7 +809,7 @@ func (m *autoTaskManager) runOnce(id string) AliasTask {
 	remaining := t.MaxTotal - t.CreatedCount
 	now := time.Now()
 	today := taskDate(now)
-	if m.accountDailyCountLocked(t.AccountID, today) >= maxTaskDailyLimit || t.DailyCount >= t.DailyLimit {
+	if m.accountDailyCountLocked(t.AccountID, today) >= maxTaskDailyLimit || t.DailyCount >= t.effectiveDailyQuota() {
 		t.NextRun = nextDailyRun(now).Format(time.RFC3339)
 		m.tasks[id] = t
 		_ = m.saveLocked()
@@ -717,7 +848,7 @@ func (m *autoTaskManager) runOnce(id string) AliasTask {
 			current = resetDailyCount(current, time.Now())
 			m.tasks[id] = current
 		}
-		if !exists || !current.Enabled || current.CreatedCount >= current.MaxTotal || current.DailyCount >= current.DailyLimit || m.accountDailyCountLocked(current.AccountID, taskDate(time.Now())) >= maxTaskDailyLimit {
+		if !exists || !current.Enabled || current.CreatedCount >= current.MaxTotal || current.DailyCount >= current.effectiveDailyQuota() || m.accountDailyCountLocked(current.AccountID, taskDate(time.Now())) >= maxTaskDailyLimit {
 			m.mu.Unlock()
 			break
 		}
@@ -822,7 +953,7 @@ func (m *autoTaskManager) runOnce(id string) AliasTask {
 	}
 	// 仅当任务仍启用且未达上限时,按「本轮结束 + 间隔」推算下次执行;否则清空。
 	// 自主任务使用带扰动的动态间隔,定时任务使用固定间隔。
-	if t.Enabled && t.CreatedCount < t.MaxTotal && t.DailyCount >= t.DailyLimit {
+	if t.Enabled && t.CreatedCount < t.MaxTotal && t.DailyCount >= t.effectiveDailyQuota() {
 		t.NextRun = nextDailyRun(time.Now()).Format(time.RFC3339)
 	} else if t.Enabled && t.CreatedCount < t.MaxTotal {
 		if t.Mode == taskModeAuto {
@@ -876,11 +1007,16 @@ func (m *autoTaskManager) requestStop(id string) {
 
 func taskDate(now time.Time) string { return now.Format("2006-01-02") }
 
+// resetDailyCount 在跨天时清零当日计数,并重算自主任务的今日配额
+// (满额恢复,首日折算只影响创建当天)。
 func resetDailyCount(task AliasTask, now time.Time) AliasTask {
 	today := taskDate(now)
 	if task.DailyDate != today {
 		task.DailyDate = today
 		task.DailyCount = 0
+		if task.Mode == taskModeAuto {
+			task.TodayQuota = task.DailyLimit
+		}
 	}
 	return task
 }

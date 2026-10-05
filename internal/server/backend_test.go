@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -136,6 +138,7 @@ func (f *fakeBackend) DeleteAlias(accountID, anonymousID string) error {
 }
 
 func (f *fakeBackend) ListInbox(q InboxQuery) (InboxResult, error) {
+	f.listInboxQuery = q
 	msgs, total := slicePage(f.inbox.Messages, q.Offset, q.Limit)
 	return InboxResult{
 		AccountID: q.AccountID,
@@ -169,11 +172,14 @@ func (f *fakeBackend) Reload() error {
 }
 
 // newTestServer 构造带固定密码与 fake backend 的测试 Server。
+// AutoTaskFile 指向临时目录,保证创建额度的持久化路径可写。
 func newTestServer(f *fakeBackend) (*Server, *httptest.Server) {
+	dir, _ := os.MkdirTemp("", "icloud-hme-server-test-*")
 	cfg := Config{
 		Debug:         false,
 		AdminPassword: "admin-pass-2026-strong",
 		SessionTTL:    12 * time.Hour,
+		AutoTaskFile:  filepath.Join(dir, "alias_task.json"),
 	}
 	s := newWithBackend(f, cfg)
 	ts := httptest.NewServer(s.Handler())

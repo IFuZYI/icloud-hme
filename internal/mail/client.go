@@ -138,7 +138,13 @@ func inboxWindow(total, offset, limit int) (from, to uint32, ok bool) {
 // Preview 留空, 由 FetchPreviews 按需补齐——大收件箱秒级出列表,
 // 正文摘要只在用户看到时才付费拉取。
 // days 用于服务端 SEARCH 过滤(0 表示不限制); 返回按时间倒序排列。
+// 需要任意起止日期时用 ListInboxPageRange。
 func (c *Client) ListInboxPage(limit, offset, days int) ([]Message, int, error) {
+	return c.ListInboxPageRange(limit, offset, DateRangeFromDays(days))
+}
+
+// ListInboxPageRange 是 ListInboxPage 的日期区间版本(闭区间,零值表示不限)。
+func (c *Client) ListInboxPageRange(limit, offset int, r DateRange) ([]Message, int, error) {
 	if c.cli == nil {
 		return nil, 0, fmt.Errorf("未连接")
 	}
@@ -157,9 +163,9 @@ func (c *Client) ListInboxPage(limit, offset, days int) ([]Message, int, error) 
 		return []Message{}, 0, nil
 	}
 
-	// days 过滤走服务端 SEARCH(按 INTERNALDATE), 拿到符合日期的 UID 列表
+	// 日期过滤走服务端 SEARCH(按 INTERNALDATE), 拿到符合日期的 UID 列表
 	// (升序)后在本地做新→旧分页窗口; 比「全拉信封再本地过滤」少拉很多封。
-	uids, err := c.recentUIDs(days)
+	uids, err := c.recentUIDsRange(r)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -192,11 +198,12 @@ func (c *Client) ListInboxPage(limit, offset, days int) ([]Message, int, error) 
 
 // recentUIDs 返回收件箱(可选按近 N 天过滤)的全部 UID, 升序。
 func (c *Client) recentUIDs(days int) ([]uint32, error) {
-	criteria := imap.NewSearchCriteria()
-	if days > 0 {
-		criteria.Since = time.Now().AddDate(0, 0, -days)
-	}
-	return c.cli.UidSearch(criteria)
+	return c.recentUIDsRange(DateRangeFromDays(days))
+}
+
+// recentUIDsRange 返回收件箱在日期区间内的全部 UID, 升序。
+func (c *Client) recentUIDsRange(r DateRange) ([]uint32, error) {
+	return c.cli.UidSearch(dateRangeSearchCriteria(r))
 }
 
 // fetchEnvelopesByUID 按 UID 列表拉取信封(无正文), 返回按 UID 升序。
@@ -277,9 +284,14 @@ func (c *Client) FetchPreviews(uids []uint32) (map[string]string, error) {
 // FindByRecipient 查找发给指定隐私邮箱别名的最近 limit 封邮件(新→旧),
 // 返回 (本页, 符合条件的总数)。offset 用于「加载更多」翻页。
 func (c *Client) FindByRecipient(recipient string, limit, offset, days int) ([]Message, int, error) {
+	return c.FindByRecipientRange(recipient, limit, offset, DateRangeFromDays(days))
+}
+
+// FindByRecipientRange 是 FindByRecipient 的日期区间版本。
+func (c *Client) FindByRecipientRange(recipient string, limit, offset int, r DateRange) ([]Message, int, error) {
 	var out []Message
 	total := 0
-	err := c.ForEachByRecipient(recipient, limit, offset, days, func(m Message) bool {
+	err := c.forEachByRecipientRange(recipient, limit, offset, r, func(m Message) bool {
 		out = append(out, m)
 		return true
 	})
@@ -292,6 +304,11 @@ func (c *Client) FindByRecipient(recipient string, limit, offset, days int) ([]M
 // ForEachByRecipient 按新→旧遍历发给 recipient 的邮件(分页版)。
 // onMsg 返回 false 时立即停止(用于 OTP 命中即返回)。
 func (c *Client) ForEachByRecipient(recipient string, limit, offset, days int, onMsg func(Message) bool) error {
+	return c.forEachByRecipientRange(recipient, limit, offset, DateRangeFromDays(days), onMsg)
+}
+
+// forEachByRecipientRange 是 ForEachByRecipient 的日期区间版本。
+func (c *Client) forEachByRecipientRange(recipient string, limit, offset int, r DateRange, onMsg func(Message) bool) error {
 	if c.cli == nil {
 		return fmt.Errorf("未连接")
 	}
@@ -310,15 +327,12 @@ func (c *Client) ForEachByRecipient(recipient string, limit, offset, days int, o
 	}
 
 	// 服务端按 To + 日期搜索, 本地在 UID 列表上做新→旧分页
-	criteria := imap.NewSearchCriteria()
+	criteria := dateRangeSearchCriteria(r)
 	criteria.Header.Add("To", recipient)
-	if days > 0 {
-		criteria.Since = time.Now().AddDate(0, 0, -days)
-	}
 	uids, err := c.cli.UidSearch(criteria)
 	if err != nil || len(uids) == 0 {
 		// SEARCH 不可用(或无结果): 退化为扫最近信封本地过滤
-		return c.forEachRecentMatching(recipient, limit, offset, days, onMsg)
+		return c.forEachRecentMatchingRange(recipient, limit, offset, r, onMsg)
 	}
 	n := len(uids)
 	hiIdx := n - 1 - offset
@@ -345,6 +359,11 @@ func (c *Client) ForEachByRecipient(recipient string, limit, offset, days int, o
 // forEachRecentMatching 拉取收件箱最近若干封(仅 envelope), 本地按 To 过滤后
 // 再取正文, 支持新→旧 offset 翻页。SEARCH 不可用时的回退路径。
 func (c *Client) forEachRecentMatching(recipient string, limit, offset, days int, onMsg func(Message) bool) error {
+	return c.forEachRecentMatchingRange(recipient, limit, offset, DateRangeFromDays(days), onMsg)
+}
+
+// forEachRecentMatchingRange 是 forEachRecentMatching 的日期区间版本。
+func (c *Client) forEachRecentMatchingRange(recipient string, limit, offset int, r DateRange, onMsg func(Message) bool) error {
 	mbox, err := c.cli.Select("INBOX", true)
 	if err != nil {
 		return err
@@ -398,7 +417,7 @@ func (c *Client) forEachRecentMatching(recipient string, limit, offset, days int
 			continue
 		}
 		when := receivedDate(msg)
-		if !withinDays(when, days) {
+		if !r.within(when) {
 			continue
 		}
 		cands = append(cands, cand{uid: msg.Uid, date: when, to: to})

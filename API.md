@@ -206,6 +206,21 @@ X-CSRF-Token: <token>
 - 验证码错误：`401 OTP_INVALID`
 - 成功：**只返回 `Summary`，绝不返回 Cookies**（Cookie 自动持久化到账号配置）
 
+> 推荐改用两段式登录（避免在单个请求内阻塞等待验证码）：
+>
+> ```http
+> POST /api/accounts/:id/login/begin     {"password":"..."}
+>   → {"status":"done","account":{...}}                   无需 2FA
+>   → {"status":"otp_required","session_id":"..."}        需要 2FA
+> POST /api/accounts/:id/login/otp       {"session_id":"...","code":"123456"}
+>   → {"status":"done","account":{...}}                   验证通过
+> POST /api/accounts/:id/login/sms       {"session_id":"...","phone_id":2}
+> GET  /api/accounts/:id/login/phones?session_id=...
+> POST /api/accounts/:id/login/resend    {"session_id":"..."}
+> ```
+>
+> 会话有效期 5 分钟；验证码错误时会话保留，可直接重试；成功或过期后会话失效。
+
 ### 11. 删除账号
 
 ```http
@@ -229,7 +244,7 @@ X-CSRF-Token: <token>
 ```
 
 - `account_id` 必填
-- `label` 必填，必须来自 `GET /api/alias-labels` 返回的名称库
+- `label` 必填，长度 ≤200 字符；可自由输入（不再限定名称库）
 - 同一账号任何两次创建尝试（成功或失败、人工或自动）至少相隔 20 分钟；过早请求返回 `429 CREATION_COOLDOWN`
 - 单个账号当天最多创建 50 个（人工创建与自动任务合并统计）；超过上限返回 `429 CREATION_LIMIT_REACHED`
 - 若上游创建失败，已预留的人工创建额度会归还
@@ -263,13 +278,14 @@ GET /api/alias-labels
 ### 14. 读取邮件
 
 ```http
-GET /api/inbox?account_id=acc_1&alias=xyz123@icloud.com&limit=20&days=7
+GET /api/inbox?account_id=acc_1&alias=xyz123@icloud.com&limit=20&start=2026-08-01&end=2026-08-10
 ```
 
 - `account_id` 必填
 - `alias` 可选，只返回发给该别名的邮件
 - `limit` 1–100（默认 20）
-- `days` 1–90（默认 7）；非法整数直接 `400 VALIDATION_ERROR`
+- `start`/`end` 可选，日期区间（`YYYY-MM-DD` 或 RFC3339；`end` 含当天到 23:59:59）；同时给出时 `end` 不得早于 `start`
+- `days` 0–3650（默认 7）仅在未提供 `start`/`end` 时生效；非法值直接 `400 VALIDATION_ERROR`
 
 **响应（IMAP 优先，Web API 回退）：**
 
@@ -401,7 +417,7 @@ X-CSRF-Token: <token>
 
 自动任务为账号低频创建 HME 别名，达到 `target_count` 后自动停止。分两类：
 
-- **自主任务（`mode: auto`）**：`daily_limit` 设定每天创建数量（取值 5/10/…/50），系统按 24 小时自动分摊执行时刻，每次 1 个。`interval_minutes` 由系统推算（24×60 ÷ 每日数量，不低于 20），无需填写。
+- **自主任务（`mode: auto`）**：`daily_limit` 设定每天创建数量（1–50 任意整数，缺省 20），系统按当天剩余时间分摊执行时刻，每次 1 个。`interval_minutes` 由系统推算（24×60 ÷ 每日数量，不低于 20），无需填写。创建当天按剩余时间折算今日配额 `today_quota`（如每日 20 个、中午 12 点创建 → 今日 10 个），次日跨天恢复满额。
 - **定时任务（`mode: scheduled`）**：每隔 `interval_minutes`（20–1440）创建 `batch_count`（1–20）个；`daily_limit` 固定为账号每日安全上限 50。
 
 标签由 `label_mode` 决定：`library`（名称库轮换）/ `sequential`（`label_prefix` + 补零序号）/ `hash`（`label_prefix` + `hash_length` 位随机哈希，4–8）。
@@ -423,7 +439,7 @@ X-CSRF-Token: <token>                # 非 GET 请求需要
 | `account_id` | ✅ | 目标账号 ID |
 | `target_count` | ✅ | 累计创建目标（1–999） |
 | `mode` | ⭕ | `auto`（默认）/ `scheduled` |
-| `daily_limit` | auto 必填 | 每天创建数量，取值 5/10/…/50 |
+| `daily_limit` | auto 可选 | 每天创建数量，1–50 的整数（缺省 20） |
 | `interval_minutes` | scheduled 必填 | 间隔分钟（20–1440） |
 | `batch_count` | scheduled 必填 | 每周期数量（1–20） |
 | `label_mode` | ⭕ | `library`（默认）/ `sequential` / `hash` |
@@ -517,7 +533,7 @@ curl -b cookies.txt "$BASE/api/inbox?account_id=acc_1&limit=10"
 
 ## 限制
 
-- **创建频率**：同账号所有创建尝试至少相隔 20 分钟；自动任务分自主（每天 5–50 个自动分摊时刻）与定时（每 20–1440 分钟创建 1–20 个）两类，并对人工与自动创建合计执行每账号每天 50 个上限；上游失败不自动重试，自动任务会暂停等待人工确认。
+- **创建频率**：同账号所有创建尝试至少相隔 20 分钟；自动任务分自主（每天 1–50 个，按当天剩余时间分摊，含活跃度权重与随机扰动）与定时（每 20–1440 分钟创建 1–20 个）两类，并对人工与自动创建合计执行每账号每天 50 个上限；上游失败不自动重试，自动任务会暂停等待人工确认。
 - **Cookie 有效期**：约 24 小时，需定期更新
 - **邮件读取**：依赖 IMAP 连接，超时默认 30 秒
 - **请求体上限**：1 MiB
