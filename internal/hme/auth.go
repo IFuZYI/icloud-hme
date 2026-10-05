@@ -626,8 +626,13 @@ func (c *Client) getTrust(state *authState, ep authEndpoints) error {
 	if resp.StatusCode != 204 {
 		return fmt.Errorf("trust 失败: HTTP %d", resp.StatusCode)
 	}
-	state.authToken = resp.Header.Get("X-Apple-Session-Token")
-	state.trustToken = resp.Header.Get("X-Apple-TwoSV-Trust-Token")
+	// 非空才覆盖: 204 缺头时保留此前捕获的 authToken(captureSessionHeaders 同约定)。
+	if token := resp.Header.Get("X-Apple-Session-Token"); token != "" {
+		state.authToken = token
+	}
+	if trust := resp.Header.Get("X-Apple-TwoSV-Trust-Token"); trust != "" {
+		state.trustToken = trust
+	}
 	return nil
 }
 
