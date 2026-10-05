@@ -27,8 +27,10 @@ type FormState = {
   enabled: boolean
 }
 
-// 自主任务可选的每日创建数量（5–50，步进 5）。
-const DAILY_COUNTS = [5, 10, 15, 20, 25, 30, 35, 40, 45, 50]
+// 自主任务每日创建数量的允许范围(手动输入)。
+const MIN_DAILY = 1
+const MAX_DAILY = 50
+const DEFAULT_DAILY = 20
 // 定时任务可选的创建间隔（分钟）。
 const INTERVALS = [20, 30, 45, 60, 90, 120, 180, 360, 720, 1440]
 
@@ -36,7 +38,7 @@ function initialState(accounts: Account[], edit?: AliasTask): FormState {
   return {
     account: edit?.account_id ?? accounts[0]?.id ?? '',
     mode: edit?.mode ?? 'auto',
-    dailyCount: String(edit?.mode === 'auto' ? edit?.daily_limit ?? 10 : 10),
+    dailyCount: String(edit?.mode === 'auto' ? edit?.daily_limit ?? DEFAULT_DAILY : DEFAULT_DAILY),
     interval: String(edit?.interval_minutes ?? 60),
     batchCount: String(edit?.batch_count ?? 1),
     target: String(edit?.max_total ?? 20),
@@ -57,6 +59,13 @@ export default function AliasTaskForm({ open, accounts, edit, onClose, onSaved }
   }
 
   async function save() {
+    if (form.mode === 'auto') {
+      const daily = Number(form.dailyCount)
+      if (!Number.isInteger(daily) || daily < MIN_DAILY || daily > MAX_DAILY) {
+        setError(`每天创建数量需在 ${MIN_DAILY}-${MAX_DAILY} 之间`)
+        return
+      }
+    }
     setBusy(true)
     setError('')
     try {
@@ -146,15 +155,15 @@ export default function AliasTaskForm({ open, accounts, edit, onClose, onSaved }
       {form.mode === 'auto' ? (
         <div className="form-field">
           <label htmlFor="task-daily-count">每天创建数量</label>
-          <SelectMenu
+          <input
             id="task-daily-count"
-            block
-            ariaLabel="每天创建数量"
+            type="number"
+            min={MIN_DAILY}
+            max={MAX_DAILY}
             value={form.dailyCount}
-            options={DAILY_COUNTS.map((value) => ({ value: String(value), label: `${value} 个/天` }))}
-            onChange={(value) => update('dailyCount', value)}
+            onChange={(event) => update('dailyCount', event.target.value)}
           />
-          <p className="hint">系统会把当天的创建时间自动分摊到全天，避免集中请求。单账号每天合计最多 50 个。</p>
+          <p className="hint">输入 1-50 之间的数量；系统会按当天剩余时间分摊创建时刻（中午开始只生成半天目标）。单账号每天合计最多 50 个。</p>
         </div>
       ) : (
         <>

@@ -12,7 +12,13 @@ interface ICloudLoginDialogProps {
   onSaved: () => void
 }
 
-/** iCloud 密码登录对话框:支持 OTP 两阶段 */
+/**
+ * iCloud 密码登录对话框。
+ *
+ * 两段式流程(避免在单个请求里阻塞等待验证码):
+ *  1. POST /login/begin 提交密码 → 无需 2FA 直接完成;需要时返回 session_id;
+ *  2. POST /login/otp 提交验证码(可重试,会话保留)。
+ */
 export default function ICloudLoginDialog({
   accountId,
   accountEmail,
@@ -22,6 +28,7 @@ export default function ICloudLoginDialog({
 }: ICloudLoginDialogProps) {
   const [password, setPassword] = useState('')
   const [otp, setOtp] = useState('')
+  const [sessionId, setSessionId] = useState('')
   const [step, setStep] = useState<LoginStep>('PASSWORD_INPUT')
   const [error, setError] = useState('')
   const otpRequired = step === '2FA_INPUT'
@@ -30,6 +37,7 @@ export default function ICloudLoginDialog({
   function reset() {
     setPassword('')
     setOtp('')
+    setSessionId('')
     setStep('PASSWORD_INPUT')
     setError('')
   }
@@ -47,24 +55,37 @@ export default function ICloudLoginDialog({
     setStep('LOADING')
     setError('')
     try {
-      await request(`/api/accounts/${accountId}/login`, {
+      if (!otpRequired) {
+        const data = await request<{ status: string; session_id?: string }>(
+          `/api/accounts/${accountId}/login/begin`,
+          { method: 'POST', body: JSON.stringify({ password }) },
+        )
+        if (data.status === 'otp_required') {
+          setSessionId(data.session_id ?? '')
+          setStep('2FA_INPUT')
+          return
+        }
+        // 无需 2FA,登录已完成。
+        setStep('SUCCESS')
+        setPassword('')
+        onSaved()
+        return
+      }
+      await request(`/api/accounts/${accountId}/login/otp`, {
         method: 'POST',
-        body: JSON.stringify({
-          password,
-          ...(otpRequired ? { otp_code: otp } : {}),
-        }),
+        body: JSON.stringify({ session_id: sessionId, code: otp }),
       })
       setStep('SUCCESS')
-      setPassword('')
       setOtp('')
       onSaved()
     } catch (err) {
       if (err instanceof ApiError && err.code === 'OTP_REQUIRED') {
         setStep('2FA_INPUT')
-      } else {
-        setError(err instanceof ApiError ? err.message : '网络连接失败，请检查服务状态')
-        setStep(otpRequired ? '2FA_INPUT' : 'FAIL')
+        return
       }
+      setError(err instanceof ApiError ? err.message : '网络连接失败，请检查服务状态')
+      // 输错验证码时保留在验证码流,可直接重输;密码阶段失败则回到输入。
+      setStep(otpRequired ? '2FA_INPUT' : 'FAIL')
     }
   }
 

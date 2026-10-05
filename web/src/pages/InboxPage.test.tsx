@@ -78,7 +78,7 @@ describe('InboxPage', () => {
     )
   })
 
-  it('账号必选;alias 可空;limit/days 生效;query 经 URLSearchParams', async () => {
+  it('账号必选;alias 可空;limit/日期范围生效;query 经 URLSearchParams', async () => {
     let lastUrl = ''
     server.use(
       http.get('/api/accounts', () => HttpResponse.json({ success: true, data: accounts })),
@@ -89,20 +89,19 @@ describe('InboxPage', () => {
     )
     renderPage()
     await screen.findByText('主题一')
-    // 确认 query 参数
+    // 确认 query 参数: 默认近 7 天 → start/end 区间(不再用 days)
     const url = new URL(lastUrl)
     expect(url.searchParams.get('account_id')).toBe('acc_1')
     expect(url.searchParams.get('limit')).toBe('20')
-    expect(url.searchParams.get('days')).toBe('7')
-    // 修改 limit/days 再查询
+    expect(url.searchParams.get('start')).toBeTruthy()
+    expect(url.searchParams.get('end')).toBeTruthy()
+    // 修改 limit 再查询
     const user = userEvent.setup()
     await chooseOption(user, /每页数量/, '50')
-    await chooseOption(user, /时间范围/, '近 30 天')
     await user.click(screen.getByRole('button', { name: /查询/ }))
     await waitFor(() => {
       const u = new URL(lastUrl)
       expect(u.searchParams.get('limit')).toBe('50')
-      expect(u.searchParams.get('days')).toBe('30')
     })
   })
 
@@ -302,9 +301,9 @@ describe('InboxPage', () => {
     )
     renderPage()
     expect(await screen.findByText(/IMAP 不可用，已回退 Web API/)).toBeInTheDocument()
-    // 摘要行的时间范围描述(下拉选项里也有"近 7 天", 限定在摘要行内断言)
+    // 摘要行的时间范围描述改为日期区间
     const summary = document.querySelector('.inbox-summary')
-    expect(summary?.textContent).toContain('近 7 天')
+    expect(summary?.textContent).toMatch(/\d{4}-\d{2}-\d{2} ~ \d{4}-\d{2}-\d{2}/)
   })
 
   it('列表展示收件人别名与相对日期', async () => {

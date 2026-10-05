@@ -26,6 +26,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"icloud-hme/internal/account"
 	"icloud-hme/internal/auth"
+	"icloud-hme/internal/mail"
 	"icloud-hme/internal/webui"
 )
 
@@ -46,6 +47,9 @@ type Server struct {
 	cfg     Config
 	r       *gin.Engine
 	task    *autoTaskManager
+	logins  *loginStore
+	// newLoginSession 创建登录会话;生产实现绑定 account.Manager,测试可注入 fake。
+	newLoginSession func(accountID string) (LoginSession, error)
 }
 
 // New 创建 Server。mgr 为账号管理器,cfg 为安全配置。
@@ -56,7 +60,11 @@ func New(mgr *account.Manager, cfg Config) (*Server, error) {
 	}); err != nil {
 		return nil, err
 	}
-	return newWithBackend(&managerBackend{mgr: mgr}, cfg), nil
+	s := newWithBackend(&managerBackend{mgr: mgr}, cfg)
+	s.newLoginSession = func(accountID string) (LoginSession, error) {
+		return mgr.NewLoginSession(accountID)
+	}
+	return s, nil
 }
 
 // newWithBackend 创建 Server 并注入 Backend(测试使用内存 fake)。
@@ -68,6 +76,7 @@ func newWithBackend(be Backend, cfg Config) *Server {
 		be:      be,
 		limiter: auth.NewLimiter(nil, 15*time.Minute, 5, 10000),
 		cfg:     cfg,
+		logins:  newLoginStore(),
 	}
 	s.task = newAutoTaskManager(cfg.AutoTaskFile, be)
 	s.auth, _ = auth.NewManager(auth.Options{
@@ -142,6 +151,12 @@ func (s *Server) register() {
 			authed.POST("/accounts/:id/password", csrfCheck(s.auth), s.setAppPasswordHandler)
 			authed.PUT("/accounts/:id/mailbox", csrfCheck(s.auth), s.setMailboxHandler)
 			authed.POST("/accounts/:id/login", csrfCheck(s.auth), s.loginAccountHandler)
+			// 两段式登录: begin → (otp/sms) → done,避免在单个 HTTP 请求内阻塞等验证码。
+			authed.POST("/accounts/:id/login/begin", csrfCheck(s.auth), s.loginBeginHandler)
+			authed.POST("/accounts/:id/login/otp", csrfCheck(s.auth), s.loginOTPHandler)
+			authed.POST("/accounts/:id/login/sms", csrfCheck(s.auth), s.loginSMSHandler)
+			authed.GET("/accounts/:id/login/phones", s.loginPhonesHandler)
+			authed.POST("/accounts/:id/login/resend", csrfCheck(s.auth), s.loginResendHandler)
 			authed.DELETE("/accounts/:id", csrfCheck(s.auth), s.removeAccountHandler)
 
 			// ===== 核心接口 1: 创建邮箱 =====
@@ -220,21 +235,24 @@ func (s *Server) createAliasHandler(c *gin.Context) {
 		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "参数错误: account_id 必填")
 		return
 	}
-	if len([]rune(req.Label)) > 200 {
+	// 手动创建的标签由用户自由输入(不再限定名称库),仅校验长度。
+	label := strings.TrimSpace(req.Label)
+	if label == "" {
+		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "参数错误: label 必填")
+		return
+	}
+	if len([]rune(label)) > maxManualLabelLen {
 		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "参数错误: label 最长 200 字符")
 		return
 	}
-	if !isKnownAliasLabel(req.Label) {
-		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "参数错误: 请从名称库选择标签")
-		return
-	}
+	req.Label = label
 	if err := s.task.reserveManualCreation(req.AccountID); err != nil {
 		if errors.Is(err, errCreationCooldown) {
 			failCode(c, http.StatusTooManyRequests, "CREATION_COOLDOWN", "该账号刚发起过创建请求，请至少等待 20 分钟再试")
 			return
 		}
 		if errors.Is(err, errCreationDailyLimit) {
-			failCode(c, http.StatusTooManyRequests, "CREATION_LIMIT_REACHED", "该账号今日创建已达 20 个上限，请明日再试")
+			failCode(c, http.StatusTooManyRequests, "CREATION_LIMIT_REACHED", "该账号今日创建已达 50 个上限，请明日再试")
 			return
 		}
 		failCode(c, http.StatusInternalServerError, "INTERNAL_ERROR", "创建额度保存失败；为避免触发风控已停止创建")
@@ -287,6 +305,15 @@ func (s *Server) listInboxHandler(c *gin.Context) {
 		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "参数错误: days 需为 0-3650 的整数(0 表示不限)")
 		return
 	}
+	// 日期区间优先: 前端日期选择器直接传 start/end(YYYY-MM-DD 或 RFC3339)。
+	dateRange, err := parseDateRange(c.Query("start"), c.Query("end"))
+	if err != nil {
+		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
+		return
+	}
+	if dateRange.Start.IsZero() && dateRange.End.IsZero() {
+		dateRange = mail.DateRangeFromDays(days)
+	}
 
 	result, err := s.be.ListInbox(InboxQuery{
 		AccountID: accountID,
@@ -294,6 +321,7 @@ func (s *Server) listInboxHandler(c *gin.Context) {
 		Limit:     limit,
 		Offset:    offset,
 		Days:      days,
+		DateRange: dateRange,
 	})
 	if err != nil {
 		backendFail(c, err)
@@ -377,6 +405,47 @@ func parseInboxInt(raw string, min, max int) (int, error) {
 		return 0, errors.New("out of range")
 	}
 	return v, nil
+}
+
+// parseDateRange 解析收件箱日期区间参数。
+//
+// 接受 YYYY-MM-DD 或 RFC3339; end 为整天(含当天到 23:59:59)。
+// 任一为空表示该端不限;两端都为空返回零值区间(由调用方回退到 days)。
+func parseDateRange(rawStart, rawEnd string) (mail.DateRange, error) {
+	var r mail.DateRange
+	if s := strings.TrimSpace(rawStart); s != "" {
+		t, err := parseInboxDate(s, false)
+		if err != nil {
+			return r, errors.New("参数错误: start 需为 YYYY-MM-DD 或 RFC3339 日期")
+		}
+		r.Start = t
+	}
+	if s := strings.TrimSpace(rawEnd); s != "" {
+		t, err := parseInboxDate(s, true)
+		if err != nil {
+			return r, errors.New("参数错误: end 需为 YYYY-MM-DD 或 RFC3339 日期")
+		}
+		r.End = t
+	}
+	if !r.Start.IsZero() && !r.End.IsZero() && r.End.Before(r.Start) {
+		return mail.DateRange{}, errors.New("参数错误: end 不能早于 start")
+	}
+	return r, nil
+}
+
+// parseInboxDate 解析单个日期; endOfDay 为 true 时把纯日期对齐到当天 23:59:59。
+func parseInboxDate(raw string, endOfDay bool) (time.Time, error) {
+	if t, err := time.Parse(time.RFC3339, raw); err == nil {
+		return t, nil
+	}
+	t, err := time.ParseInLocation("2006-01-02", raw, time.Local)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if endOfDay {
+		t = t.Add(24*time.Hour - time.Second)
+	}
+	return t, nil
 }
 
 // ====================================================================

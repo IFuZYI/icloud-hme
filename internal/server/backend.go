@@ -33,6 +33,8 @@ type InboxQuery struct {
 	Limit     int
 	Offset    int
 	Days      int
+	// DateRange 是日期区间(优先于 Days); 零值表示不限。
+	DateRange mail.DateRange
 }
 
 // InboxResult 是收件箱查询结果。
@@ -356,9 +358,9 @@ func (b *managerBackend) ListInbox(q InboxQuery) (InboxResult, error) {
 		return b.mgr.WithMailClient(q.AccountID, func(mc *mail.Client) error {
 			var e error
 			if q.Alias != "" {
-				imapMessages, imapTotal, e = mc.FindByRecipient(q.Alias, q.Limit, q.Offset, q.Days)
+				imapMessages, imapTotal, e = mc.FindByRecipientRange(q.Alias, q.Limit, q.Offset, q.DateRange)
 			} else {
-				imapMessages, imapTotal, e = mc.ListInboxPage(q.Limit, q.Offset, q.Days)
+				imapMessages, imapTotal, e = mc.ListInboxPageRange(q.Limit, q.Offset, q.DateRange)
 			}
 			return e
 		})

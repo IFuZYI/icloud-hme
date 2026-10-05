@@ -195,7 +195,7 @@ describe('AliasesPage', () => {
     )
   })
 
-  it('创建别名:从名称库选择标签，成功后刷新并可复制邮箱', async () => {
+  it('创建别名:自由输入标签，成功后刷新并可复制邮箱', async () => {
     let created = false
     server.use(
       http.get('/api/accounts', () => HttpResponse.json({ success: true, data: accounts })),
@@ -231,14 +231,14 @@ describe('AliasesPage', () => {
     await screen.findByText('alpha@icloud.com')
     const user = userEvent.setup()
     await user.click(screen.getByRole('button', { name: /创建别名/ }))
-    await screen.findByRole('button', { name: '选择标签' })
-    await user.click(screen.getByRole('button', { name: '选择标签' }))
-    await user.click(screen.getByRole('option', { name: 'Notion' }))
+    // 标签改为自由输入框(不再从名称库选择)
+    await user.type(await screen.findByLabelText('标签'), 'Notion')
     await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: /创建/ }))
     expect(await screen.findByText('gamma@icloud.com')).toBeInTheDocument()
 
+    // 重新打开对话框时输入框已清空
     await user.click(screen.getByRole('button', { name: /创建别名/ }))
-    await waitFor(() => expect(screen.getByRole('button', { name: '选择标签' })).toHaveTextContent('GitHub'))
+    expect(await screen.findByLabelText('标签')).toHaveValue('')
   })
 
   it('停用别名:显示目标邮箱并二次确认', async () => {

@@ -114,8 +114,9 @@ func TestAliasLabelLibraryEndpointAndManualValidation(t *testing.T) {
 		t.Fatalf("label library = %d: %s", status, body)
 	}
 
+	// 手动标签现已支持自由输入,不再限定名称库。
 	status, body = aliasTaskRequest(t, ts.URL, session, csrf, http.MethodPost, "/api/create", `{"account_id":"acc_1","label":"任意自定义标签"}`)
-	if status != http.StatusBadRequest || !strings.Contains(body, `"code":"VALIDATION_ERROR"`) {
+	if status != http.StatusOK {
 		t.Fatalf("custom manual label = %d: %s", status, body)
 	}
 }

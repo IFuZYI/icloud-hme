@@ -21,9 +21,10 @@ func TestNextAutoDelayPacesRemainingBudgetWithinWindow(t *testing.T) {
 	now := atHour(autoActiveStartHour, 0)
 	delay := m.nextAutoDelay(task, now)
 
-	// 窗口 08:00-24:00 共 16h，10 个 → 基准约 96 分钟。
-	windowMinutes := float64(autoActiveEndHour-autoActiveStartHour) * 60
-	want := time.Duration(windowMinutes/10) * time.Minute
+	// 基准 = 窗口剩余 16h ÷ 10 个，再按 08:00 的活跃度权重缩放
+	// (清晨权重低 → 间隔拉长,权重曲线见 activityWeight)。
+	_, end := autoActiveWindow(now, 10)
+	want := m.paceDelay(now, end, 10)
 	if delay != want {
 		t.Fatalf("base pacing delay = %v, want %v", delay, want)
 	}
@@ -33,13 +34,22 @@ func TestNextAutoDelaySelfCorrectsWhenBehind(t *testing.T) {
 	m := newAutoTaskManager(t.TempDir()+"/task.json", &taskBackend{})
 	m.jitter = func() float64 { return 1.0 }
 
-	// 每日 10 个，已到 20:00 还剩 8 个未创建：剩余 4h/8 = 30 分钟，比初始基准更密。
+	// 每日 10 个，已到 20:00 还剩 8 个未创建：剩余 4h/8 = 30 分钟基准,
+	// 比窗口起点(08:00)的基准更密 —— 配速随剩余预算自校正。
 	task := AliasTask{Mode: taskModeAuto, DailyLimit: 10, DailyCount: 2}
 	now := atHour(20, 0)
 	delay := m.nextAutoDelay(task, now)
-	want := 30 * time.Minute
+
+	_, end := autoActiveWindow(now, 8)
+	want := m.paceDelay(now, end, 8)
 	if delay != want {
 		t.Fatalf("self-correct delay = %v, want %v", delay, want)
+	}
+	// 与清晨相比更密(晚间高峰权重 0.9 > 清晨 0.5)。
+	early := atHour(autoActiveStartHour, 0)
+	_, earlyEnd := autoActiveWindow(early, 8)
+	if delay >= m.paceDelay(early, earlyEnd, 8) {
+		t.Fatalf("晚间配速 %v 应比清晨更密", delay)
 	}
 }
 
@@ -48,7 +58,7 @@ func TestNextAutoDelayNeverBelowCooldown(t *testing.T) {
 	m.jitter = func() float64 { return 1.0 }
 
 	// 每日 50 个但只剩 5 分钟窗口：基准会远小于冷却下限，必须被夹到 20 分钟。
-	task := AliasTask{Mode: taskModeAuto, DailyLimit: 50, DailyCount: 0}
+	task := AliasTask{Mode: taskModeAuto, DailyLimit: 50, DailyCount: 0, TodayQuota: 50}
 	now := atHour(autoActiveEndHour, 0).Add(-5 * time.Minute) // 23:55
 	delay := m.nextAutoDelay(task, now)
 	if delay < minCreationCooldown {
@@ -74,7 +84,7 @@ func TestNextAutoDelayDefersWhenDailyBudgetExhausted(t *testing.T) {
 	m := newAutoTaskManager(t.TempDir()+"/task.json", &taskBackend{})
 	m.jitter = func() float64 { return 1.0 }
 
-	task := AliasTask{Mode: taskModeAuto, DailyLimit: 10, DailyCount: 10}
+	task := AliasTask{Mode: taskModeAuto, DailyLimit: 10, DailyCount: 10, TodayQuota: 10}
 	now := atHour(14, 0)
 	delay := m.nextAutoDelay(task, now)
 	want := nextDailyRun(now).Sub(now)

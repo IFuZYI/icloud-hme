@@ -1,7 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import Dialog from './Dialog'
 import { request, ApiError } from '../api/client'
-import SelectMenu from './SelectMenu'
 
 interface CreateAliasDialogProps {
   accountId: string
@@ -10,37 +9,24 @@ interface CreateAliasDialogProps {
   onCreated: (email: string) => void
 }
 
-/** 创建别名对话框 */
+const MAX_LABEL_LEN = 200
+
+/** 创建别名对话框:标签由用户自由输入(不再限定名称库)。 */
 export default function CreateAliasDialog({
   accountId,
   open,
   onClose,
   onCreated,
 }: CreateAliasDialogProps) {
-  const [labels, setLabels] = useState<string[]>([])
   const [label, setLabel] = useState('')
   const [error, setError] = useState('')
   const [submitting, setSubmitting] = useState(false)
 
-  useEffect(() => {
-    if (!open || labels.length > 0) return
-    let cancelled = false
-    request<string[]>('/api/alias-labels')
-      .then((items) => {
-        if (cancelled) return
-        setLabels(items)
-        setLabel((current) => current || items[0] || '')
-      })
-      .catch((cause) => {
-        if (!cancelled) setError(cause instanceof ApiError ? cause.message : '名称库加载失败')
-      })
-    return () => { cancelled = true }
-  }, [open, labels.length])
-
   async function handleSubmit() {
     if (submitting) return
-    if (!label) {
-      setError('请选择标签')
+    const trimmed = label.trim()
+    if (!trimmed) {
+      setError('请输入标签')
       return
     }
     setSubmitting(true)
@@ -48,7 +34,7 @@ export default function CreateAliasDialog({
     try {
       const data = await request<{ email: string }>('/api/create', {
         method: 'POST',
-        body: JSON.stringify({ account_id: accountId, label }),
+        body: JSON.stringify({ account_id: accountId, label: trimmed }),
       })
       setLabel('')
       onCreated(data.email)
@@ -75,16 +61,16 @@ export default function CreateAliasDialog({
       )}
       <div className="form-field">
         <label htmlFor="alias-label">标签</label>
-        <SelectMenu
+        <input
           id="alias-label"
-          block
-          ariaLabel="选择标签"
+          type="text"
+          maxLength={MAX_LABEL_LEN}
           value={label}
-          options={labels.map((item) => ({ value: item, label: item }))}
-          onChange={setLabel}
-          disabled={labels.length === 0}
+          onChange={(event) => setLabel(event.target.value)}
+          placeholder="如 GitHub、Notion、某网站"
+          autoComplete="off"
         />
-        <p className="hint">标签从名称库选择；创建后会自动生成新的隐私邮箱。建议按真实用途创建，避免短时间内重复创建。</p>
+        <p className="hint">标签可自由填写，仅用于本地标识；创建后会自动生成新的隐私邮箱。建议按真实用途创建，避免短时间内重复创建。</p>
       </div>
       <div className="form-actions">
         <button onClick={onClose}>取消</button>

@@ -479,6 +479,107 @@ func (m *Manager) HMEClient(id string, verbose bool) (*hme.Client, error) {
 	return hme.NewClient(snap.Cookies, snap.Host, snap.Proxy, verbose)
 }
 
+// NewLoginSession 为指定账号创建一个新的登录会话(尚未提交密码)。
+//
+// 返回的会话由调用方驱动两段式登录:Begin → (可选 CompleteOTP/CompleteSMS) →
+// Summary。密码等敏感信息只存在于内存,不落盘。
+func (m *Manager) NewLoginSession(id string) (*HMELoginSession, error) {
+	m.mu.RLock()
+	acc, ok := m.accounts[id]
+	var snap *Account
+	if ok {
+		snap = copyAccount(acc)
+	}
+	m.mu.RUnlock()
+	if !ok {
+		return nil, fmt.Errorf("账号不存在: %s", id)
+	}
+
+	email := snap.ICloudEmail
+	if email == "" {
+		email = snap.RealEmail
+	}
+	if email == "" {
+		return nil, fmt.Errorf("账号未设置邮箱地址")
+	}
+
+	client, err := hme.NewClient(nil, snap.Host, snap.Proxy, true)
+	if err != nil {
+		return nil, err
+	}
+	return &HMELoginSession{mgr: m, id: id, email: email, client: client}, nil
+}
+
+// HMELoginSession 把 *hme.Client 的两段式登录与账号持久化绑在一起。
+type HMELoginSession struct {
+	mgr    *Manager
+	id     string
+	email  string
+	client *hme.Client
+}
+
+func (s *HMELoginSession) Begin(password string) error {
+	return s.client.BeginLogin(s.email, password)
+}
+
+func (s *HMELoginSession) CompleteOTP(code string) error { return s.client.CompleteOTP(code) }
+
+func (s *HMELoginSession) CompleteSMS(phoneID int, code string) error {
+	return s.client.CompleteSMS(phoneID, code)
+}
+
+func (s *HMELoginSession) ResendOTP() error { return s.client.ResendOTP() }
+
+func (s *HMELoginSession) TrustedPhones() ([]hme.TrustedPhone, error) {
+	return s.client.TrustedPhones()
+}
+
+func (s *HMELoginSession) SendSMS(phoneID int) error { return s.client.SendSMS(phoneID) }
+
+// Summary 把登录得到的 Cookie 落库(含 validate 刷新),并返回脱敏摘要。
+func (s *HMELoginSession) Summary() (Summary, error) {
+	// 先保存 accountLogin 返回的 Cookie,随后通过 validate 刷新会话并再次持久化。
+	// 国区与美区都走同一条刷新链路,避免只保存登录阶段的临时 token。
+	if err := s.mgr.SaveCookies(s.id, s.client.Cookies); err != nil {
+		return Summary{}, err
+	}
+	if err := s.client.ValidateSession(); err != nil {
+		// validate 的失败响应也可能携带 Set-Cookie,尽量保留服务端最新状态。
+		_ = s.mgr.SaveCookies(s.id, s.client.Cookies)
+		return Summary{}, err
+	}
+
+	m := s.mgr
+	m.mu.Lock()
+	cur, ok := m.accounts[s.id]
+	if !ok {
+		m.mu.Unlock()
+		return Summary{}, fmt.Errorf("账号不存在: %s", s.id)
+	}
+	cur.Cookies = cloneCookies(s.client.Cookies)
+	cur.Status = "active"
+	cur.LastValidated = time.Now().Format(time.RFC3339)
+	cur.LastError = ""
+	if info := s.client.AccountInfo(); info != nil {
+		cur.RealEmail = firstNonEmpty(info.AppleID, info.PrimaryEmail)
+		if cur.ICloudEmail == "" {
+			cur.ICloudEmail = deriveICloudEmail(info)
+		}
+	}
+	sum := cur.Summary()
+	saveErr := m.save()
+	m.mu.Unlock()
+	if saveErr != nil {
+		return Summary{}, saveErr
+	}
+
+	// 登录后立即按真实别名列表刷新计数,避免账号管理页停留在 0/0。
+	if aliases, listErr := s.client.ListAliases(); listErr == nil {
+		_ = s.mgr.UpdateAliasCounts(s.id, aliases)
+	}
+	return sum, nil
+}
+
 // HMEClientWithPassword 为指定账号创建一个新的 HME 客户端,使用账号密码登录。
 // 登录成功后会自动获取 Cookie 并保存到账号配置。
 func (m *Manager) HMEClientWithPassword(id, password string, otpProvider hme.OTPProvider) (*hme.Client, error) {
