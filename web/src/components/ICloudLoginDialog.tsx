@@ -43,7 +43,10 @@ export default function ICloudLoginDialog({
   const [pushSent, setPushSent] = useState(true)
   const [smsPhone, setSmsPhone] = useState<TrustedPhone | null>(null)
   const [busy, setBusy] = useState(false)
-  const otpRequired = step === '2FA_INPUT'
+  // 只要已拿到 session_id 就处于验证码流——LOADING 期间也必须保持验证码 UI,
+  // 否则提交在途时界面会闪回密码输入框、恢复按钮随之消失(审查探针抓到的缺陷)。
+  const inOtpFlow = sessionId !== ''
+  const otpRequired = inOtpFlow && step !== 'SUCCESS'
   const submitting = step === 'LOADING' || busy
 
   function reset() {

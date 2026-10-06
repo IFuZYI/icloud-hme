@@ -244,6 +244,141 @@ it('推送失败时可改用短信验证', async () => {
   expect(calls).toEqual(['phones', 'sms', 'otp'])
 })
 
+// 提交在途(step=LOADING)时必须保持验证码 UI: 恢复按钮仍在(禁用), 不得闪回密码框。
+// 回归背景: 状态派生用 `step === '2FA_INPUT'` 时, LOADING 期间界面会闪回密码输入框、
+// 恢复按钮整体消失(审查探针在中断前抓到, 见 commit 修复说明)。
+it('验证码提交在途时保持验证码流且恢复按钮禁用', async () => {
+  let resolveOtp: (() => void) | undefined
+  server.use(
+    http.post('/api/accounts/:id/login/begin', () =>
+      HttpResponse.json({
+        success: true,
+        data: { status: 'otp_required', session_id: 'login-session-1', push_sent: false },
+      }),
+    ),
+    http.post('/api/accounts/:id/login/otp', async () => {
+      await new Promise<void>((resolve) => { resolveOtp = resolve })
+      return HttpResponse.json({ success: true, data: { status: 'done' } })
+    }),
+  )
+  render(
+    <ICloudLoginDialog accountId="acc_1" accountEmail="owner@icloud.com" open onClose={vi.fn()} onSaved={vi.fn()} />,
+  )
+  const user = userEvent.setup()
+  await user.type(screen.getByLabelText('密码'), 'p@ssw0rd')
+  await user.click(screen.getByRole('button', { name: '登录' }))
+  await screen.findByText(/验证码推送失败/)
+  await user.type(screen.getByLabelText('验证码'), '123456')
+  await user.click(screen.getByRole('button', { name: '验证并登录' }))
+  await waitFor(() => expect(resolveOtp).toBeDefined())
+
+  // 提交在途: 仍在验证码流(验证码输入框存在), 恢复按钮禁用而非消失
+  expect(screen.getByLabelText('验证码')).toBeInTheDocument()
+  expect(screen.queryByLabelText('密码')).toBeNull()
+  expect(screen.getByRole('button', { name: '重发验证码' })).toBeDisabled()
+  expect(screen.getByRole('button', { name: '改用短信验证' })).toBeDisabled()
+  resolveOtp?.()
+})
+
+// push_sent 缺省(旧服务端不返回该字段)应视为已推送, 不误报失败。
+it('push_sent 缺省时显示已推送提示而非失败警示', async () => {
+  server.use(
+    http.post('/api/accounts/:id/login/begin', () =>
+      HttpResponse.json({
+        success: true,
+        data: { status: 'otp_required', session_id: 'login-session-1' },
+      }),
+    ),
+  )
+  render(
+    <ICloudLoginDialog accountId="acc_1" accountEmail="owner@icloud.com" open onClose={vi.fn()} onSaved={vi.fn()} />,
+  )
+  const user = userEvent.setup()
+  await user.type(screen.getByLabelText('密码'), 'p@ssw0rd')
+  await user.click(screen.getByRole('button', { name: '登录' }))
+  expect(await screen.findByText(/验证码已推送到受信任设备/)).toBeInTheDocument()
+  expect(screen.queryByText(/验证码推送失败/)).toBeNull()
+})
+
+// 恢复操作失败走统一 ApiError 路径(展示服务端 message, 不吞错)。
+it('重发失败时显示服务端错误信息', async () => {
+  server.use(
+    http.post('/api/accounts/:id/login/begin', () =>
+      HttpResponse.json({
+        success: true,
+        data: { status: 'otp_required', session_id: 'login-session-1', push_sent: false },
+      }),
+    ),
+    http.post('/api/accounts/:id/login/resend', () =>
+      HttpResponse.json({ success: false, code: 'UPSTREAM_FAILURE', message: '上游推送被拒绝' }, { status: 502 }),
+    ),
+  )
+  render(
+    <ICloudLoginDialog accountId="acc_1" accountEmail="owner@icloud.com" open onClose={vi.fn()} onSaved={vi.fn()} />,
+  )
+  const user = userEvent.setup()
+  await user.type(screen.getByLabelText('密码'), 'p@ssw0rd')
+  await user.click(screen.getByRole('button', { name: '登录' }))
+  await screen.findByText(/验证码推送失败/)
+  await user.click(screen.getByRole('button', { name: '重发验证码' }))
+  expect(await screen.findByRole('alert')).toHaveTextContent('上游推送被拒绝')
+})
+
+// 无受信任手机号时给出明确错误, 不静默停留在原状态。
+it('手机号列表为空时提示无法使用短信验证', async () => {
+  server.use(
+    http.post('/api/accounts/:id/login/begin', () =>
+      HttpResponse.json({
+        success: true,
+        data: { status: 'otp_required', session_id: 'login-session-1', push_sent: false },
+      }),
+    ),
+    http.get('/api/accounts/:id/login/phones', () =>
+      HttpResponse.json({ success: true, data: { phones: [] } }),
+    ),
+  )
+  render(
+    <ICloudLoginDialog accountId="acc_1" accountEmail="owner@icloud.com" open onClose={vi.fn()} onSaved={vi.fn()} />,
+  )
+  const user = userEvent.setup()
+  await user.type(screen.getByLabelText('密码'), 'p@ssw0rd')
+  await user.click(screen.getByRole('button', { name: '登录' }))
+  await screen.findByText(/验证码推送失败/)
+  await user.click(screen.getByRole('button', { name: '改用短信验证' }))
+  expect(await screen.findByRole('alert')).toHaveTextContent('没有受信任手机号')
+})
+
+// 重发在途(busy)时全部按钮禁用: 恢复操作与提交互斥, 防并发双发。
+it('重发在途时全部按钮禁用', async () => {
+  let resolveResend: (() => void) | undefined
+  server.use(
+    http.post('/api/accounts/:id/login/begin', () =>
+      HttpResponse.json({
+        success: true,
+        data: { status: 'otp_required', session_id: 'login-session-1', push_sent: false },
+      }),
+    ),
+    http.post('/api/accounts/:id/login/resend', async () => {
+      await new Promise<void>((resolve) => { resolveResend = resolve })
+      return HttpResponse.json({ success: true, data: { sent: true } })
+    }),
+  )
+  render(
+    <ICloudLoginDialog accountId="acc_1" accountEmail="owner@icloud.com" open onClose={vi.fn()} onSaved={vi.fn()} />,
+  )
+  const user = userEvent.setup()
+  await user.type(screen.getByLabelText('密码'), 'p@ssw0rd')
+  await user.click(screen.getByRole('button', { name: '登录' }))
+  await screen.findByText(/验证码推送失败/)
+  await user.click(screen.getByRole('button', { name: '重发验证码' }))
+  await waitFor(() => expect(resolveResend).toBeDefined())
+  expect(screen.getByRole('button', { name: '重发验证码' })).toBeDisabled()
+  expect(screen.getByRole('button', { name: '改用短信验证' })).toBeDisabled()
+  // busy 期间主按钮标签切换为「登录中…」且禁用
+  expect(screen.getByRole('button', { name: '登录中…' })).toBeDisabled()
+  resolveResend?.()
+})
+
 // otp_required 缺 session_id 时给出明确错误, 而不是提交空 session_id。
 it('begin 返回 otp_required 但缺 session_id 时提示重试', async () => {
   server.use(
