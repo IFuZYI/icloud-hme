@@ -507,6 +507,60 @@
   }
 }
 
+/* ─── 窄屏(≤560px)日期时间面板: 单列日历 + 下方时间行 ───
+   默认面板固定宽 492px(日历 280 + 时间列), 在 390px 视口下会左溢出 135px,
+   日期格子被裁到屏幕外。窄屏改为纵向堆叠并允许面板收缩到视口内。 */
+@media (max-width: 560px) {
+  /* 窄屏改为底部固定定位(移动端标准的 bottom-sheet 模式):
+     面板锚在视口底部, 不受输入框位置影响, 不会左右溢出、也不会被底部裁掉。
+     antd 默认按面板原宽(492px)计算 left 定位, 收缩后会左偏出屏, 必须一并覆盖。 */
+  .ant-picker-dropdown {
+    position: fixed !important;
+    inset: auto 8px 8px 8px !important;
+    width: auto !important;
+    max-width: none !important;
+  }
+
+  /* 内容超出视口时由面板内部滚动(预留底部安全区) */
+  .ant-picker-dropdown .ant-picker-panel-container {
+    width: 100%;
+    max-width: 100%;
+    max-height: calc(100dvh - 16px - env(safe-area-inset-bottom, 0px));
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+
+  /* 窄屏改为纵向堆叠: 日历在上、时间列在下。
+     antd 的左右分栏容器是 .ant-picker-datetime-panel。 */
+  .ant-picker-dropdown .ant-picker-datetime-panel {
+    flex-direction: column;
+  }
+
+  /* antd 给日历内容固定了 min-width(920px), 会强制面板超宽把时间列顶出视口;
+     必须连 content/body/header 一起放开, 单改 panel 无效。 */
+  .ant-picker-dropdown .ant-picker-date-panel,
+  .ant-picker-dropdown .ant-picker-date-panel .ant-picker-body,
+  .ant-picker-dropdown .ant-picker-date-panel .ant-picker-header,
+  .ant-picker-dropdown .ant-picker-date-panel .ant-picker-content,
+  .ant-picker-dropdown .ant-picker-time-panel {
+    width: 100% !important;
+    min-width: 0 !important;
+    max-width: 100% !important;
+  }
+
+  .ant-picker-dropdown .ant-picker-time-panel .ant-picker-content {
+    display: flex;
+    flex-direction: row;
+    min-width: 0 !important;
+  }
+
+  .ant-picker-dropdown .ant-picker-time-panel-column {
+    flex: 1;
+    min-width: 0;
+    max-height: 96px;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .inbox-page .inbox-action.is-busy svg,
   .inbox-page .inbox-preview-text.is-loading {

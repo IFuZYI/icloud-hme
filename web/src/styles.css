@@ -451,6 +451,20 @@ textarea {
     box-shadow var(--dur-fast) var(--ease-out);
 }
 
+/* antd 组件内部的输入框由组件自身控制样式(边框/高度/内边距都在外层容器上);
+   全局的 input 规则会把 antd DatePicker 的裸 input 撑到 40px+padding,
+   使控件高度翻倍。这里把 antd 内部的 input/textarea 还原为无样式裸元素。 */
+.ant-picker input,
+.ant-picker textarea {
+  width: auto;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
 select {
   appearance: none;
   -webkit-appearance: none;
@@ -481,6 +495,12 @@ textarea:focus {
   outline: none;
   border-color: var(--color-primary);
   box-shadow: 0 0 0 3px var(--color-primary-soft);
+}
+
+/* antd 内部 input 的聚焦样式由外层容器(.ant-picker)负责, 这里豁免 */
+.ant-picker input:focus {
+  border-color: transparent;
+  box-shadow: none;
 }
 
 textarea {
@@ -1261,6 +1281,24 @@ tbody tr:nth-child(n + 6) { animation-delay: 150ms; }
     max-height: 92vh;
     border-radius: var(--radius-xl) var(--radius-xl) 0 0;
     padding: 24px 20px calc(24px + env(safe-area-inset-bottom));
+  }
+}
+
+/* 极窄屏(≤420px): 收紧导航项内边距, 让 5 个菜单项完整放进一行;
+   否则「收件箱」等尾部项会被挤出视野(仅靠横向滚动才能看到)。 */
+@media (max-width: 420px) {
+  .app-shell nav a {
+    padding-inline: 8px;
+    gap: 5px;
+    font-size: 12.5px;
+  }
+
+  .app-shell .brand-name {
+    font-size: 15px;
+  }
+
+  .app-shell header > button {
+    padding-inline: 10px;
   }
 }
 

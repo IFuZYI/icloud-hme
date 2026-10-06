@@ -1,10 +1,20 @@
-import { NavLink, Outlet, useNavigate } from 'react-router-dom'
+import { useEffect, useRef } from 'react'
+import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { useAuth } from '../auth/AuthProvider'
 import { IconAccounts, IconAliases, IconInbox, IconLogout, IconShield, IconClock } from './icons'
 
 export default function AppShell() {
   const { logout } = useAuth()
   const navigate = useNavigate()
+  const location = useLocation()
+  const navRef = useRef<HTMLElement>(null)
+
+  // 窄屏导航是横向滚动条: 当前页可能被挤出视野(390px 下「收件箱」在屏幕外)。
+  // 路由切换后把激活项滚入视野, 保证用户总能看到自己在哪一页。
+  useEffect(() => {
+    const active = navRef.current?.querySelector('a[aria-current="page"]')
+    active?.scrollIntoView({ block: 'nearest', inline: 'center' })
+  }, [location.pathname])
 
   async function handleLogout() {
     await logout()
@@ -28,7 +38,7 @@ export default function AppShell() {
             </span>
           </span>
         </div>
-        <nav aria-label="主导航">
+        <nav aria-label="主导航" ref={navRef}>
           <NavLink to="/accounts">
             <IconAccounts />
             账号
