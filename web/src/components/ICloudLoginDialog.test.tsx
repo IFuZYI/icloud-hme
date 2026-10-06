@@ -177,3 +177,29 @@ it('begin 返回 otp_required 但缺 session_id 时提示重试', async () => {
   // 不应进入验证码步骤
   expect(screen.queryByLabelText('验证码')).toBeNull()
 })
+
+// 密码错误(INVALID_CREDENTIALS)时应留在密码输入阶段且保留已输入的密码,
+// 允许直接修正后重试; 同时不得触发全局登出。
+// 回归背景: 旧版把 401 一律触发全局登出, 管理员被从对话框踢回登录页。
+it('密码错误保留在密码输入阶段且不丢输入', async () => {
+  server.use(
+    http.post('/api/accounts/:id/login/begin', () =>
+      HttpResponse.json(
+        { success: false, code: 'INVALID_CREDENTIALS', message: 'iCloud 邮箱或密码错误' },
+        { status: 401 },
+      ),
+    ),
+  )
+  render(
+    <ICloudLoginDialog accountId="acc_1" accountEmail="owner@icloud.com" open onClose={vi.fn()} onSaved={vi.fn()} />,
+  )
+  const user = userEvent.setup()
+  await user.type(screen.getByLabelText('密码'), 'wrong-pass')
+  await user.click(screen.getByRole('button', { name: '登录' }))
+
+  expect(await screen.findByRole('alert')).toHaveTextContent('iCloud 邮箱或密码错误')
+  // 仍在密码输入阶段: 密码框存在且保留输入, 未进入验证码流
+  const password = screen.getByLabelText('密码') as HTMLInputElement
+  expect(password.value).toBe('wrong-pass')
+  expect(screen.queryByLabelText('验证码')).toBeNull()
+})

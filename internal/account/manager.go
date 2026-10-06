@@ -863,9 +863,14 @@ func dsidFromCookies(cookies map[string]string) string {
 
 // SetAppPassword 设置 iCloud 邮箱和 App 专用密码,并测试 IMAP 连接。
 func (m *Manager) SetAppPassword(id, icloudEmail, appPassword string) error {
-	if icloudEmail == "" {
-		return fmt.Errorf("iCloud 邮箱不能为空")
+	// 邮箱规范化(与 AddAccount/UpdateMetadata 同一入口):
+	// 全角＠/首尾空白在这里被清理, 非法格式在连接前即被拒绝,
+	// 避免用户拿到「IMAP 验证失败」却看不出是邮箱格式问题。
+	normalized, err := normalizeEmail(icloudEmail)
+	if err != nil {
+		return err
 	}
+	icloudEmail = normalized
 	if appPassword == "" {
 		return fmt.Errorf("App 专用密码不能为空")
 	}

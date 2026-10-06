@@ -90,14 +90,10 @@ export default function ICloudLoginDialog({
         setStep('2FA_INPUT')
         return
       }
-      if (err instanceof ApiError && err.code === 'INVALID_CREDENTIALS') {
-        // 密码错误: 回到密码输入阶段并保留输入框, 便于修正后重试。
-        setError(err.message)
-        setStep('PASSWORD_INPUT')
-        return
-      }
       setError(err instanceof ApiError ? err.message : '网络连接失败，请检查服务状态')
-      // 输错验证码时保留在验证码流,可直接重输;密码阶段失败则回到输入。
+      // 承重行为: 密码阶段失败留在密码输入(输入框内容天然保留, 可直接重试),
+      // 验证码阶段失败留在验证码流(服务端保留会话)。凭据错误(INVALID_CREDENTIALS)
+      // 走通用路径落到这里, 无需单独分支。
       setStep(otpRequired ? '2FA_INPUT' : 'PASSWORD_INPUT')
     }
   }
