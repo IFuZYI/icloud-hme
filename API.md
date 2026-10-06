@@ -284,7 +284,7 @@ GET /api/inbox?account_id=acc_1&alias=xyz123@icloud.com&limit=20&start=2026-08-0
 - `account_id` 必填
 - `alias` 可选，只返回发给该别名的邮件
 - `limit` 1–100（默认 20）
-- `start`/`end` 可选，日期区间（`YYYY-MM-DD` 或 RFC3339；`end` 含当天到 23:59:59）；同时给出时 `end` 不得早于 `start`
+- `start`/`end` 可选，时间区间；支持 `YYYY-MM-DD`（整天，`end` 含当天到 23:59:59）、`YYYY-MM-DDTHH:mm[:ss]`（精确到分/秒，前端日期时间选择器格式，本地时区）或 RFC3339（带时区）；同时给出时 `end` 不得早于 `start`
 - `days` 0–3650（默认 7）仅在未提供 `start`/`end` 时生效；非法值直接 `400 VALIDATION_ERROR`
 
 **响应（IMAP 优先，Web API 回退）：**
@@ -322,6 +322,8 @@ GET /api/inbox?account_id=acc_1&alias=xyz123@icloud.com&limit=20&start=2026-08-0
 ```
 
 `method` 为 `imap` 或 `web_api`。IMAP 路径支持服务端按收件人搜索；Web API 路径拉取后本地过滤。
+
+**时间范围参数**：`start`/`end` 由前端两个日期时间选择器（开始时间/结束时间，Ant Design `DatePicker showTime`）产生，格式 `YYYY-MM-DDTHH:mm:ss`，后端原样保留到分钟/秒精度，不做整天对齐。
 
 **文件夹与消息 ID**：IMAP 读取同时扫描收件箱与垃圾邮件箱（iCloud 常把转发邮件判为垃圾），`folder` 字段标出来源。IMAP 的 UID 按文件夹生效，因此非 INBOX 邮件的 `id` 带文件夹前缀（`Junk:88`），INBOX 保持纯数字（`1042`，兼容旧格式）。`GET /api/inbox/:message_id`、`DELETE /api/inbox/:message_id` 与 `POST /api/inbox/previews` 的 `ids` 均接受这两种格式，原样回传列表里的 `id` 即可。
 

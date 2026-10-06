@@ -60,7 +60,10 @@
 /* ─── 筛选栏：桌面单行，窄屏自动换行 ─── */
 .inbox-page .inbox-filters {
   display: grid;
-  grid-template-columns: minmax(150px, 1.2fr) minmax(180px, 1.6fr) minmax(96px, 0.7fr) minmax(110px, 0.8fr) minmax(88px, auto);
+  /* 账号 / 别名 / 每页 / 开始时间 / 结束时间 / 查询 */
+  grid-template-columns:
+    minmax(140px, 1.1fr) minmax(160px, 1.3fr) minmax(88px, 0.6fr)
+    minmax(190px, 1fr) minmax(190px, 1fr) minmax(88px, auto);
   align-items: end;
   gap: var(--space-3);
   margin-bottom: var(--space-4);
@@ -69,6 +72,11 @@
   border-radius: var(--radius-xl);
   background: var(--color-bg-raised);
   box-shadow: var(--shadow-xs);
+}
+
+/* 两个日期时间选择器占满各自网格列(antd 默认宽度不足, 日期会被截断) */
+.inbox-page .inbox-filters .ant-picker {
+  width: 100%;
 }
 
 .inbox-page .inbox-field {
@@ -418,6 +426,16 @@
 }
 
 /* ─── 响应式 ─── */
+@media (max-width: 1100px) {
+  .inbox-page .inbox-filters {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .inbox-page .inbox-field-submit {
+    grid-column: 1 / -1;
+  }
+}
+
 @media (max-width: 900px) {
   .inbox-page .inbox-filters {
     grid-template-columns: repeat(2, minmax(0, 1fr));

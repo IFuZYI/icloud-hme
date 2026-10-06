@@ -301,9 +301,9 @@ describe('InboxPage', () => {
     )
     renderPage()
     expect(await screen.findByText(/IMAP 不可用，已回退 Web API/)).toBeInTheDocument()
-    // 摘要行的时间范围描述改为日期区间
+    // 摘要行的时间范围描述: 日期+时间区间(与两个日期时间选择器一致)
     const summary = document.querySelector('.inbox-summary')
-    expect(summary?.textContent).toMatch(/\d{4}-\d{2}-\d{2} ~ \d{4}-\d{2}-\d{2}/)
+    expect(summary?.textContent).toMatch(/\d{4}-\d{2}-\d{2} \d{2}:\d{2} ~ \d{4}-\d{2}-\d{2} \d{2}:\d{2}/)
   })
 
   it('列表展示收件人别名与相对日期', async () => {
