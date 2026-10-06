@@ -11,7 +11,7 @@ describe('ICloudLoginDialog', () => {
       http.post('/api/accounts/:id/login/begin', () =>
         HttpResponse.json({
           success: true,
-          data: { status: 'otp_required', session_id: 'login-session-1' },
+          data: { status: 'otp_required', session_id: 'login-session-1', push_sent: true },
         }),
       ),
     )
@@ -41,7 +41,7 @@ describe('ICloudLoginDialog', () => {
         calls.push({ path: 'begin', body: (await request.json()) as Record<string, unknown> })
         return HttpResponse.json({
           success: true,
-          data: { status: 'otp_required', session_id: 'login-session-1' },
+          data: { status: 'otp_required', session_id: 'login-session-1', push_sent: true },
         })
       }),
       http.post('/api/accounts/:id/login/otp', async ({ request }) => {
@@ -107,7 +107,7 @@ describe('ICloudLoginDialog', () => {
       http.post('/api/accounts/:id/login/begin', () =>
         HttpResponse.json({
           success: true,
-          data: { status: 'otp_required', session_id: 'login-session-1' },
+          data: { status: 'otp_required', session_id: 'login-session-1', push_sent: true },
         }),
       ),
       http.post('/api/accounts/:id/login/otp', () =>
@@ -160,6 +160,88 @@ describe('ICloudLoginDialog', () => {
     await waitFor(() => expect(resolveRequest).toBeDefined())
     resolveRequest?.()
   })
+})
+
+// 推送失败(push_sent=false)时给出明确提示, 并提供「重发验证码」恢复路径。
+// 回归背景: 旧版推送失败只记服务端日志, 用户界面永远显示「请输入验证码」,
+// 而验证码根本不会到达设备——用户只能无限等待。
+it('push_sent=false 时提示推送失败并允许重发', async () => {
+  let resendCalled = false
+  server.use(
+    http.post('/api/accounts/:id/login/begin', () =>
+      HttpResponse.json({
+        success: true,
+        data: { status: 'otp_required', session_id: 'login-session-1', push_sent: false },
+      }),
+    ),
+    http.post('/api/accounts/:id/login/resend', async ({ request }) => {
+      const body = (await request.json()) as Record<string, unknown>
+      resendCalled = body.session_id === 'login-session-1'
+      return HttpResponse.json({ success: true, data: { sent: true } })
+    }),
+  )
+  render(
+    <ICloudLoginDialog accountId="acc_1" accountEmail="owner@icloud.com" open onClose={vi.fn()} onSaved={vi.fn()} />,
+  )
+  const user = userEvent.setup()
+  await user.type(screen.getByLabelText('密码'), 'p@ssw0rd')
+  await user.click(screen.getByRole('button', { name: '登录' }))
+
+  expect(await screen.findByText(/验证码推送失败/)).toBeInTheDocument()
+  await user.click(screen.getByRole('button', { name: '重发验证码' }))
+  await waitFor(() => expect(resendCalled).toBe(true))
+  expect(await screen.findByText(/已重新请求推送验证码/)).toBeInTheDocument()
+})
+
+// 推送失败时可用短信验证作为备选通道: 取手机号 → 发短信 → 提交短信验证码。
+it('推送失败时可改用短信验证', async () => {
+  const calls: string[] = []
+  server.use(
+    http.post('/api/accounts/:id/login/begin', () =>
+      HttpResponse.json({
+        success: true,
+        data: { status: 'otp_required', session_id: 'login-session-1', push_sent: false },
+      }),
+    ),
+    http.get('/api/accounts/:id/login/phones', () => {
+      calls.push('phones')
+      return HttpResponse.json({
+        success: true,
+        data: { phones: [{ id: 2, number_with_dial_code: '+86 138****1234' }] },
+      })
+    }),
+    http.post('/api/accounts/:id/login/sms', async ({ request }) => {
+      calls.push('sms')
+      const body = (await request.json()) as Record<string, unknown>
+      expect(body.phone_id).toBe(2)
+      return HttpResponse.json({ success: true, data: { sent: true } })
+    }),
+    http.post('/api/accounts/:id/login/otp', async ({ request }) => {
+      calls.push('otp')
+      const body = (await request.json()) as Record<string, unknown>
+      // 短信通道: 必须带 method=sms 与 phone_id
+      expect(body.method).toBe('sms')
+      expect(body.phone_id).toBe(2)
+      return HttpResponse.json({ success: true, data: { status: 'done' } })
+    }),
+  )
+  const onSaved = vi.fn()
+  render(
+    <ICloudLoginDialog accountId="acc_1" accountEmail="owner@icloud.com" open onClose={vi.fn()} onSaved={onSaved} />,
+  )
+  const user = userEvent.setup()
+  await user.type(screen.getByLabelText('密码'), 'p@ssw0rd')
+  await user.click(screen.getByRole('button', { name: '登录' }))
+
+  await screen.findByText(/验证码推送失败/)
+  await user.click(screen.getByRole('button', { name: '改用短信验证' }))
+  expect(await screen.findByText(/已向 \+86 138\*\*\*\*1234 发送短信验证码/)).toBeInTheDocument()
+  expect(calls).toEqual(['phones', 'sms'])
+
+  await user.type(screen.getByLabelText('验证码'), '654321')
+  await user.click(screen.getByRole('button', { name: '验证并登录' }))
+  await waitFor(() => expect(onSaved).toHaveBeenCalledOnce())
+  expect(calls).toEqual(['phones', 'sms', 'otp'])
 })
 
 // otp_required 缺 session_id 时给出明确错误, 而不是提交空 session_id。

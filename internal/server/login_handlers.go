@@ -48,11 +48,17 @@ func (s *Server) loginBeginHandler(c *gin.Context) {
 	if err := session.Begin(req.Password); err != nil {
 		if errors.Is(err, hme.ErrOTPRequired) {
 			// 需要 2FA:尽力自动推送一次验证码,然后保存会话等待提交。
+			// push_sent 把推送结果反馈给前端——推送失败时用户可手动重发,
+			// 不再只躺在服务端日志里。
+			pushSent := true
 			if resendErr := session.ResendOTP(); resendErr != nil {
-				slog.Info("自动推送 2FA 验证码失败", "account", id, "err", resendErr.Error())
+				pushSent = false
+				slog.Warn("自动推送 2FA 验证码失败", "account", id, "err", resendErr.Error())
+			} else {
+				slog.Info("2FA 验证码已推送到受信任设备", "account", id)
 			}
 			sessionID := s.logins.put(id, session)
-			ok(c, gin.H{"status": "otp_required", "session_id": sessionID})
+			ok(c, gin.H{"status": "otp_required", "session_id": sessionID, "push_sent": pushSent})
 			return
 		}
 		backendFail(c, classifyLoginErr(err))
