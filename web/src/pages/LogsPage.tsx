@@ -1,7 +1,15 @@
 import { useEffect, useState } from 'react'
 import { ApiError, request } from '../api/client'
+import { formatDateTime } from '../utils/datetime'
 import type { AliasTaskLog } from '../api/types'
 import Dialog from '../components/Dialog'
+
+/** 服务端 RFC3339 → 项目统一的中文时间格式; 解析失败时回退原文。 */
+function formatLogTime(raw: string): string {
+  const d = new Date(raw)
+  if (Number.isNaN(d.getTime())) return raw
+  return formatDateTime(d)
+}
 
 function failureReason(message: string): string {
   const separator = message.match(/[：:]/)
@@ -43,7 +51,7 @@ export default function LogsPage() {
           <tbody>
             {logs.map((log) => (
               <tr key={log.id}>
-                <td>{new Date(log.time).toLocaleString()}</td>
+                <td>{formatLogTime(log.time)}</td>
                 <td>{log.task_id}</td>
                 <td>
                   <span className={log.level === 'error' ? 'badge badge-error' : 'badge badge-active'}>
@@ -81,7 +89,7 @@ export default function LogsPage() {
               </div>
             )}
             <dl>
-              <div><dt>时间</dt><dd>{new Date(selected.time).toLocaleString()}</dd></div>
+              <div><dt>时间</dt><dd>{formatLogTime(selected.time)}</dd></div>
               <div><dt>任务 ID</dt><dd><code>{selected.task_id}</code></dd></div>
               <div><dt>级别</dt><dd>{selected.level}</dd></div>
               <div><dt>完整日志</dt><dd className="log-detail-message">{selected.message}</dd></div>

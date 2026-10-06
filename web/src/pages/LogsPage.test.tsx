@@ -58,4 +58,17 @@ describe('LogsPage', () => {
       '创建任务，等待 10 秒后开始',
     )
   })
+
+  it('日志时间用项目统一的中文格式, 不用浏览器默认的 toLocaleString', async () => {
+    server.use(
+      http.get('/api/alias-task-logs', () =>
+        HttpResponse.json({ success: true, data: logs }),
+      ),
+    )
+    render(<LogsPage />)
+    await screen.findByText('自动邮箱001 创建失败：认证已过期，请重新登录 iCloud')
+    // 统一格式 "2026/09/12 06:00"(zh-CN, 24 小时制); 不能出现美式 "9/12/2026, 6:00:00 AM"
+    expect(screen.getAllByText(/2026\/09\/12 06:00/).length).toBeGreaterThan(0)
+    expect(screen.queryByText(/AM|PM/)).toBeNull()
+  })
 })
