@@ -420,21 +420,23 @@ func parseInboxInt(raw string, min, max int) (int, error) {
 
 // parseDateRange 解析收件箱日期区间参数。
 //
-// 接受 YYYY-MM-DD 或 RFC3339; end 为整天(含当天到 23:59:59)。
-// 任一为空表示该端不限;两端都为空返回零值区间(由调用方回退到 days)。
+// 接受 YYYY-MM-DD(整天) / YYYY-MM-DDTHH:mm[:ss](精确到分/秒) / RFC3339。
+// 纯日期时 end 对齐到当天 23:59:59(含当天); 带时间的值原样保留——
+// 前端两个日期时间选择器(开始时间/结束时间)选到分钟, 不应被扩成整天。
+// 任一为空表示该端不限; 两端都为空返回零值区间(由调用方回退到 days)。
 func parseDateRange(rawStart, rawEnd string) (mail.DateRange, error) {
 	var r mail.DateRange
 	if s := strings.TrimSpace(rawStart); s != "" {
 		t, err := parseInboxDate(s, false)
 		if err != nil {
-			return r, errors.New("参数错误: start 需为 YYYY-MM-DD 或 RFC3339 日期")
+			return r, errors.New("参数错误: start 需为 YYYY-MM-DD 或带时间的日期")
 		}
 		r.Start = t
 	}
 	if s := strings.TrimSpace(rawEnd); s != "" {
 		t, err := parseInboxDate(s, true)
 		if err != nil {
-			return r, errors.New("参数错误: end 需为 YYYY-MM-DD 或 RFC3339 日期")
+			return r, errors.New("参数错误: end 需为 YYYY-MM-DD 或带时间的日期")
 		}
 		r.End = t
 	}
@@ -444,8 +446,21 @@ func parseDateRange(rawStart, rawEnd string) (mail.DateRange, error) {
 	return r, nil
 }
 
-// parseInboxDate 解析单个日期; endOfDay 为 true 时把纯日期对齐到当天 23:59:59。
+// parseInboxDate 解析单个日期时间值。
+//
+// 支持三种格式(依次尝试):
+//   - YYYY-MM-DDTHH:mm:ss / YYYY-MM-DDTHH:mm(浏览器 datetime-local 形态, 本地时区)
+//   - RFC3339(带时区偏移)
+//   - YYYY-MM-DD(纯日期, 本地时区; endOfDay 时对齐到 23:59:59)
+//
+// 带时间的值不做任何对齐——调用方(日期时间选择器)已表达精确意图。
 func parseInboxDate(raw string, endOfDay bool) (time.Time, error) {
+	// datetime-local(无时区)按本地时区解释; RFC3339 保留其自带偏移。
+	for _, layout := range []string{"2006-01-02T15:04:05", "2006-01-02T15:04"} {
+		if t, err := time.ParseInLocation(layout, raw, time.Local); err == nil {
+			return t, nil
+		}
+	}
 	if t, err := time.Parse(time.RFC3339, raw); err == nil {
 		return t, nil
 	}

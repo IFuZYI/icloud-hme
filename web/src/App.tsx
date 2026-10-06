@@ -1,4 +1,6 @@
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
+import { ConfigProvider } from 'antd'
+import zhCN from 'antd/locale/zh_CN'
 import { AuthProvider, useAuth } from './auth/AuthProvider'
 import { ToastProvider } from './components/ToastProvider'
 import AppShell from './components/AppShell'
@@ -22,22 +24,24 @@ function ProtectedLayout() {
 
 export default function App() {
   return (
-    <BrowserRouter>
-      <AuthProvider>
-        <ToastProvider>
-          <Routes>
-            <Route path="/login" element={<LoginPage />} />
-            <Route element={<ProtectedLayout />}>
-              <Route path="/accounts" element={<AccountsPage />} />
-              <Route path="/aliases" element={<AliasesPage />} />
-              <Route path="/alias-tasks" element={<AliasTasksPage />} />
-              <Route path="/logs" element={<LogsPage />} />
-              <Route path="/inbox" element={<InboxPage />} />
-              <Route path="*" element={<Navigate to="/accounts" replace />} />
-            </Route>
-          </Routes>
-        </ToastProvider>
-      </AuthProvider>
-    </BrowserRouter>
+    <ConfigProvider locale={zhCN}>
+      <BrowserRouter>
+        <AuthProvider>
+          <ToastProvider>
+            <Routes>
+              <Route path="/login" element={<LoginPage />} />
+              <Route element={<ProtectedLayout />}>
+                <Route path="/accounts" element={<AccountsPage />} />
+                <Route path="/aliases" element={<AliasesPage />} />
+                <Route path="/alias-tasks" element={<AliasTasksPage />} />
+                <Route path="/logs" element={<LogsPage />} />
+                <Route path="/inbox" element={<InboxPage />} />
+                <Route path="*" element={<Navigate to="/accounts" replace />} />
+              </Route>
+            </Routes>
+          </ToastProvider>
+        </AuthProvider>
+      </BrowserRouter>
+    </ConfigProvider>
   )
 }

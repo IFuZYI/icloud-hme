@@ -23,13 +23,18 @@ function defaultDateRange(): [Dayjs, Dayjs] {
   return [dayjs().subtract(7, 'day').startOf('day'), dayjs().endOf('day')]
 }
 
-/** 从 URL 的 start/end(YYYY-MM-DD)还原日期区间; 缺失或非法时回退默认近 7 天。 */
+/** 从 URL 的 start/end 还原时间范围; 缺失或非法时回退默认近 7 天。
+ *  纯日期(旧链接)按整天处理: start 取 00:00, end 取 23:59。 */
 function hydrateDateRange(params: URLSearchParams): [Dayjs | null, Dayjs | null] {
   const parse = (raw: string | null, endOfDay: boolean): Dayjs | null => {
     if (!raw) return null
-    const d = dayjs(raw) // ISO 日期可被 dayjs 直接解析, 无需 customParseFormat
+    const d = dayjs(raw) // ISO / datetime-local 均可被 dayjs 直接解析
     if (!d.isValid()) return null
-    return endOfDay ? d.endOf('day') : d.startOf('day')
+    // 仅纯日期(无时间部分)才对齐整天, 带时间的值原样保留。
+    if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+      return endOfDay ? d.endOf('day') : d.startOf('day')
+    }
+    return d
   }
   const start = parse(params.get('start'), false)
   const end = parse(params.get('end'), true)
@@ -71,10 +76,11 @@ export default function InboxPage() {
   const [alias, setAlias] = useState('')
   const [pageSize, setPageSize] = useState(20)
   const [searchParams, setSearchParams] = useSearchParams()
-  // 初始区间: 优先用 URL 的 start/end(刷新/分享链接可复现筛选), 否则默认近 7 天。
-  const [dateRange, setDateRange] = useState<[Dayjs | null, Dayjs | null] | null>(() =>
-    hydrateDateRange(searchParams),
-  )
+  // 时间范围: 两个独立的日期时间选择器(开始时间/结束时间), 对齐参考项目筛选条。
+  // 初始值优先取 URL 的 start/end(刷新/分享链接可复现筛选), 否则默认近 7 天。
+  const initialRange = hydrateDateRange(searchParams)
+  const [rangeStart, setRangeStart] = useState<Dayjs | null>(initialRange[0])
+  const [rangeEnd, setRangeEnd] = useState<Dayjs | null>(initialRange[1])
 
   const [messages, setMessages] = useState<InboxMessage[]>([])
   const [total, setTotal] = useState(0)
@@ -125,8 +131,8 @@ export default function InboxPage() {
         limit: String(pageSize),
         offset: String(offset),
       })
-      if (dateRange?.[0]) params.set('start', dateRange[0].format('YYYY-MM-DD'))
-      if (dateRange?.[1]) params.set('end', dateRange[1].format('YYYY-MM-DD'))
+      if (rangeStart) params.set('start', rangeStart.format('YYYY-MM-DDTHH:mm:ss'))
+      if (rangeEnd) params.set('end', rangeEnd.format('YYYY-MM-DDTHH:mm:ss'))
       if (alias) params.set('alias', alias)
       try {
         const data = await request<InboxResult>(`/api/inbox?${params.toString()}`, {
@@ -154,7 +160,7 @@ export default function InboxPage() {
         setRefreshing(false)
       }
     },
-    [accountId, alias, pageSize, dateRange, fillPreviews],
+    [accountId, alias, pageSize, rangeStart, rangeEnd, fillPreviews],
   )
 
   async function openMessage(message: InboxMessage) {
@@ -262,14 +268,14 @@ export default function InboxPage() {
     const t = window.setTimeout(() => void loadPage(0, false), 0)
     return () => window.clearTimeout(t)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [accountId, alias, pageSize, dateRange, retryKey])
+  }, [accountId, alias, pageSize, rangeStart, rangeEnd, retryKey])
 
   function runQuery() {
     const next: Record<string, string> = { account_id: accountId }
     if (alias) next.alias = alias
     next.limit = String(pageSize)
-    if (dateRange?.[0]) next.start = dateRange[0].format('YYYY-MM-DD')
-    if (dateRange?.[1]) next.end = dateRange[1].format('YYYY-MM-DD')
+    if (rangeStart) next.start = rangeStart.format('YYYY-MM-DDTHH:mm:ss')
+    if (rangeEnd) next.end = rangeEnd.format('YYYY-MM-DDTHH:mm:ss')
     setSearchParams(next, { replace: true })
     setDetail(null)
     // 保留现有列表, 只让刷新按钮进入忙碌态(loading 会让整块变成骨架屏)
@@ -357,15 +363,28 @@ export default function InboxPage() {
             onChange={(v) => setPageSize(Number(v))}
           />
         </div>
-        <div className="inbox-field inbox-field-range">
-          <label htmlFor="inbox-range">时间范围</label>
-          <DatePicker.RangePicker
-            id="inbox-range"
+        <div className="inbox-field">
+          <label htmlFor="inbox-range-start">开始时间</label>
+          <DatePicker
+            id="inbox-range-start"
+            showTime
             allowClear
-            value={dateRange}
-            onChange={(range) => setDateRange(range)}
-            format="YYYY-MM-DD"
-            placeholder={['开始日期', '结束日期']}
+            value={rangeStart}
+            onChange={(v) => setRangeStart(v)}
+            format="YYYY-MM-DD HH:mm"
+            placeholder="开始时间"
+          />
+        </div>
+        <div className="inbox-field">
+          <label htmlFor="inbox-range-end">结束时间</label>
+          <DatePicker
+            id="inbox-range-end"
+            showTime
+            allowClear
+            value={rangeEnd}
+            onChange={(v) => setRangeEnd(v)}
+            format="YYYY-MM-DD HH:mm"
+            placeholder="结束时间"
           />
         </div>
         <div className="inbox-field inbox-field-submit">
@@ -396,8 +415,8 @@ export default function InboxPage() {
           <span className="inbox-summary-scope">
             {accountName ? `${accountName} · ` : ''}
             {alias ? `仅 ${alias} · ` : ''}
-            {dateRange?.[0] && dateRange?.[1]
-              ? `${dateRange[0].format('YYYY-MM-DD')} ~ ${dateRange[1].format('YYYY-MM-DD')}`
+            {rangeStart && rangeEnd
+              ? `${rangeStart.format('YYYY-MM-DD HH:mm')} ~ ${rangeEnd.format('YYYY-MM-DD HH:mm')}`
               : '全部时间'}
           </span>
         </div>

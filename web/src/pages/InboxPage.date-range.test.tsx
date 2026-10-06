@@ -1,5 +1,5 @@
 import { http, HttpResponse } from 'msw'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { beforeEach, describe, expect, it } from 'vitest'
@@ -62,7 +62,9 @@ function renderPage(initialPath = '/inbox') {
   )
 }
 
-describe('InboxPage 日期范围选择器', () => {
+// 时间范围使用两个独立的 antd DatePicker(带时间), 对齐参考项目筛选条:
+// 一个「开始时间」一个「结束时间」, 各自可清空, 面板为中文(此刻/确定)。
+describe('InboxPage 时间范围选择器', () => {
   beforeEach(() => {
     setCSRFToken('csrf-test')
     server.resetHandlers()
@@ -75,21 +77,22 @@ describe('InboxPage 日期范围选择器', () => {
     )
   })
 
-  it('时间范围使用日期范围选择器而非固定天数下拉', async () => {
+  it('渲染两个独立的日期时间选择器(开始时间/结束时间), 而非 RangePicker', async () => {
     server.use(
       http.get('/api/accounts', () => HttpResponse.json({ success: true, data: accounts })),
       http.get('/api/inbox', () => HttpResponse.json({ success: true, data: inboxResult })),
     )
     renderPage()
     await screen.findByText('主题一')
-    // 旧的"近 N 天"下拉应已移除
-    expect(screen.queryByRole('button', { name: '时间范围' })).not.toBeInTheDocument()
-    // 日期范围选择器存在(antd RangePicker 渲染为两个日期输入)
-    expect(screen.getByText('时间范围')).toBeInTheDocument()
-    expect(screen.getAllByPlaceholderText(/开始日期|结束日期/).length).toBeGreaterThan(0)
+    // 两个独立的 antd picker 容器; RangePicker 的 ant-picker-range 不应存在
+    expect(document.querySelectorAll('.ant-picker').length).toBe(2)
+    expect(document.querySelector('.ant-picker-range')).toBeNull()
+    // 占位符为「开始时间」「结束时间」
+    expect(screen.getAllByPlaceholderText(/开始时间/).length).toBeGreaterThan(0)
+    expect(screen.getAllByPlaceholderText(/结束时间/).length).toBeGreaterThan(0)
   })
 
-  it('默认范围查询携带 start/end 参数', async () => {
+  it('默认近 7 天: 两个输入框带值, 查询携带 start/end 且不带 days', async () => {
     let lastUrl = ''
     server.use(
       http.get('/api/accounts', () => HttpResponse.json({ success: true, data: accounts })),
@@ -102,15 +105,17 @@ describe('InboxPage 日期范围选择器', () => {
     await screen.findByText('主题一')
     await waitFor(() => {
       const url = new URL(lastUrl)
-      expect(url.searchParams.get('account_id')).toBe('acc_1')
-      // 默认近 7 天: 起止日期均存在,且不再使用 days
       expect(url.searchParams.get('start')).toBeTruthy()
       expect(url.searchParams.get('end')).toBeTruthy()
       expect(url.searchParams.get('days')).toBeNull()
     })
+    const inputs = document.querySelectorAll<HTMLInputElement>('.ant-picker-input input')
+    expect(inputs.length).toBe(2)
+    expect(inputs[0].value).not.toBe('')
+    expect(inputs[1].value).not.toBe('')
   })
 
-  it('清空日期范围后按全部时间查询(不带 start/end)', async () => {
+  it('清空开始时间后查询: 不带 start(只留 end)', async () => {
     let lastUrl = ''
     server.use(
       http.get('/api/accounts', () => HttpResponse.json({ success: true, data: accounts })),
@@ -122,15 +127,16 @@ describe('InboxPage 日期范围选择器', () => {
     renderPage()
     await screen.findByText('主题一')
     const user = userEvent.setup()
-    // 清空: antd 的清除按钮在未 hover 时 pointer-events:none,用 fireEvent 绕过。
-    const clear = document.querySelector('.ant-picker-clear') as HTMLElement | null
+    // 清空第一个 picker(开始时间): 清除按钮未 hover 时 pointer-events:none,
+    // 直接派发 click 事件绕过该限制。
+    const clear = document.querySelectorAll('.ant-picker-clear')[0] as HTMLElement
     expect(clear).not.toBeNull()
-    fireEvent.click(clear as HTMLElement)
+    clear.dispatchEvent(new MouseEvent('click', { bubbles: true }))
     await user.click(screen.getByRole('button', { name: /查询/ }))
     await waitFor(() => {
       const url = new URL(lastUrl)
       expect(url.searchParams.get('start')).toBeNull()
-      expect(url.searchParams.get('end')).toBeNull()
+      expect(url.searchParams.get('end')).toBeTruthy()
     })
   })
 })
@@ -159,12 +165,17 @@ describe('InboxPage URL 日期区间水合', () => {
         return HttpResponse.json({ success: true, data: inboxResult })
       }),
     )
-    renderPage('/inbox?account_id=acc_1&start=2026-03-01&end=2026-03-05')
+    renderPage('/inbox?account_id=acc_1&start=2026-03-01T08:30&end=2026-03-05T18:45')
     await screen.findByText('主题一')
     await waitFor(() => {
       const url = new URL(lastUrl)
-      expect(url.searchParams.get('start')).toBe('2026-03-01')
-      expect(url.searchParams.get('end')).toBe('2026-03-05')
+      // 请求统一以秒精度发出(YYYY-MM-DDTHH:mm:ss), 时间部分保持不变
+      expect(url.searchParams.get('start')).toBe('2026-03-01T08:30:00')
+      expect(url.searchParams.get('end')).toBe('2026-03-05T18:45:00')
     })
+    // 两个输入框分别回填了对应时间
+    const inputs = document.querySelectorAll<HTMLInputElement>('.ant-picker-input input')
+    expect(inputs[0].value).toContain('2026-03-01')
+    expect(inputs[1].value).toContain('2026-03-05')
   })
 })
