@@ -36,8 +36,19 @@ type Server struct {
 	AccountLoginHit int
 	ValidateHits    int
 	ResendMethod    string
-	SMSSendBody     map[string]any
-	SMSVerifyBody   map[string]any
+	ResendHits      int
+	// PushTriggerMethod 记录触发推送所用的方法 (期望 PUT)。
+	PushTriggerMethod string
+	// PushTriggerHits 是触发推送端点的命中次数。
+	PushTriggerHits int
+	// ConflictOnSubmit 为 true 时提交正确验证码返回 409(模拟 2026 年
+	// 起 idmsa 对「已接受」验证码的行为)。
+	ConflictOnSubmit bool
+	// ConflictWithToken 为 true 时上述 409 附带 X-Apple-Session-Token,
+	// 表示 Apple 实际已接受验证码(rclone #9488)。
+	ConflictWithToken bool
+	SMSSendBody       map[string]any
+	SMSVerifyBody     map[string]any
 }
 
 // New 启动 mock 服务,测试结束自动关闭。
@@ -133,7 +144,23 @@ func New(t testing.TB) *Server {
 		w.WriteHeader(http.StatusOK)
 	})
 
+	// 同一个路径承担两种语义, 按方法区分:
+	//   PUT  (无请求体) → 触发向受信任设备推送验证码 (2026+ 流程)
+	//   POST (带 code)  → 提交验证码校验
 	mux.HandleFunc("/appleauth/auth/verify/trusteddevice/securitycode", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			// 触发推送必须携带 409 下发的会话头, 否则视为未授权。
+			if r.Header.Get("scnt") != "scnt-2fa" {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			m.mu.Lock()
+			m.PushTriggerMethod = r.Method
+			m.PushTriggerHits++
+			m.mu.Unlock()
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
 		body, _ := io.ReadAll(r.Body)
 		var payload map[string]any
 		_ = json.Unmarshal(body, &payload)
@@ -144,6 +171,7 @@ func New(t testing.TB) *Server {
 		m.mu.Lock()
 		m.VerifyCode = code
 		expected := m.ExpectedCode
+		conflict := m.ConflictOnSubmit
 		m.mu.Unlock()
 		if r.Header.Get("scnt") != "scnt-2fa" || r.Header.Get("X-Apple-Session-Token") != "session-token-2fa" {
 			w.WriteHeader(http.StatusUnauthorized)
@@ -153,18 +181,27 @@ func New(t testing.TB) *Server {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
+		// 2026 年起 idmsa 可能对「已接受」的验证码返回 409; 附带
+		// X-Apple-Session-Token 才是「实际成功」的信号(rclone #9488)。
+		if conflict {
+			if m.ConflictWithToken {
+				w.Header().Set("X-Apple-Session-Token", "session-token-post-otp")
+			}
+			w.Header().Set("scnt", "scnt-after-otp")
+			w.WriteHeader(http.StatusConflict)
+			return
+		}
 		w.Header().Set("scnt", "scnt-after-otp")
 		w.WriteHeader(http.StatusNoContent)
 	})
 
+	// 旧流程端点: 2026 年后 Apple 不再通过它推送验证码, 一律 405。
+	// 保留 handler 是为了断言实现不再依赖这条路径。
 	mux.HandleFunc("/appleauth/auth/verify/trusteddevice", func(w http.ResponseWriter, r *http.Request) {
 		m.mu.Lock()
 		m.ResendMethod = r.Method
+		m.ResendHits++
 		m.mu.Unlock()
-		if r.Method == http.MethodGet {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	})
 

@@ -98,7 +98,7 @@ func TestCompleteOTPWithoutPendingLoginFails(t *testing.T) {
 	}
 }
 
-func TestResendOTPUsesFirstWorkingCandidate(t *testing.T) {
+func TestResendOTPUsesPutSecurityCodeEndpoint(t *testing.T) {
 	m := hmetest.New(t)
 	m.RequireOTP = true
 	c := newMockedClient(t, m, "icloud.com")
@@ -108,8 +108,64 @@ func TestResendOTPUsesFirstWorkingCandidate(t *testing.T) {
 	if err := c.ResendOTP(); err != nil {
 		t.Fatalf("ResendOTP: %v", err)
 	}
-	if m.ResendMethod != http.MethodGet {
-		t.Fatalf("重发使用的方法 = %q, 期望先探测 GET", m.ResendMethod)
+	// 2026 年后 Apple 要求显式 PUT /verify/trusteddevice/securitycode (无请求体)
+	// 才会推送验证码; 旧的 GET/POST verify/trusteddevice 组合已失效。
+	if m.PushTriggerMethod != http.MethodPut {
+		t.Fatalf("触发推送的方法 = %q, 期望 PUT", m.PushTriggerMethod)
+	}
+	if m.PushTriggerHits != 1 {
+		t.Fatalf("触发推送命中 = %d, 期望恰好 1 次", m.PushTriggerHits)
+	}
+	if m.ResendHits != 0 {
+		t.Fatalf("不应再探测旧端点 verify/trusteddevice, 命中 %d 次", m.ResendHits)
+	}
+}
+
+// 2026 年起 idmsa 对「已接受」的验证码可能返回 409 并同时下发
+// X-Apple-Session-Token(rclone #9488)。必须把 409+token 视为成功,
+// 否则用户收到正确验证码却无法完成登录。
+func TestCompleteOTPAccepts409WithSessionToken(t *testing.T) {
+	m := hmetest.New(t)
+	m.RequireOTP = true
+	m.ConflictOnSubmit = true
+	m.ConflictWithToken = true
+	c := newMockedClient(t, m, "icloud.com")
+	if err := c.BeginLogin("owner@example.com", "p@ssw0rd"); err != ErrOTPRequired {
+		t.Fatalf("BeginLogin err = %v", err)
+	}
+	if err := c.CompleteOTP("123456"); err != nil {
+		t.Fatalf("409 + session token 应视为成功, got: %v", err)
+	}
+	if c.Cookies["X-APPLE-WEBAUTH-TOKEN"] == "" {
+		t.Fatalf("登录成功后应提取到 Cookie, got %v", c.Cookies)
+	}
+}
+
+// 409 但未下发 session token 时仍是失败(不能盲目接受所有 409)。
+func TestCompleteOTPRejects409WithoutToken(t *testing.T) {
+	m := hmetest.New(t)
+	m.RequireOTP = true
+	m.ConflictOnSubmit = true
+	// ConflictWithToken 保持 false: 409 无 token, 表示被拒。
+	c := newMockedClient(t, m, "icloud.com")
+	if err := c.BeginLogin("owner@example.com", "p@ssw0rd"); err != ErrOTPRequired {
+		t.Fatalf("BeginLogin err = %v", err)
+	}
+	if err := c.CompleteOTP("123456"); err == nil {
+		t.Fatal("409 无 session token 不应成功")
+	}
+}
+
+// 错误验证码(401)仍是失败。
+func TestCompleteOTPRejectsWrongCode(t *testing.T) {
+	m := hmetest.New(t)
+	m.RequireOTP = true
+	c := newMockedClient(t, m, "icloud.com")
+	if err := c.BeginLogin("owner@example.com", "p@ssw0rd"); err != ErrOTPRequired {
+		t.Fatalf("BeginLogin err = %v", err)
+	}
+	if err := c.CompleteOTP("000000"); err == nil {
+		t.Fatal("错误验证码不应成功")
 	}
 }
 

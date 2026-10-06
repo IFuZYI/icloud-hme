@@ -211,13 +211,16 @@ X-CSRF-Token: <token>
 > ```http
 > POST /api/accounts/:id/login/begin     {"password":"..."}
 >   → {"status":"done","account":{...}}                   无需 2FA
->   → {"status":"otp_required","session_id":"..."}        需要 2FA
+>   → {"status":"otp_required","session_id":"...","push_sent":true}   需要 2FA
 > POST /api/accounts/:id/login/otp       {"session_id":"...","code":"123456"}
 >   → {"status":"done","account":{...}}                   验证通过
 > POST /api/accounts/:id/login/sms       {"session_id":"...","phone_id":2}
 > GET  /api/accounts/:id/login/phones?session_id=...
 > POST /api/accounts/:id/login/resend    {"session_id":"..."}
 > ```
+>
+> `push_sent` 表示验证码是否已成功推送到受信任设备：`false` 时用户可调用
+> `login/resend` 手动重发，或改用短信验证（`login/phones` + `login/sms`）。
 >
 > 会话有效期 5 分钟；验证码错误时会话保留，可直接重试；成功或过期后会话失效。
 

@@ -18,6 +18,7 @@ var errOTPInvalidForTest = errors.New("2FA 验证失败: HTTP 401")
 type fakeLoginSession struct {
 	beginErr  error
 	otpErr    error
+	resendErr error
 	codes     []string
 	resendHit bool
 	smsSent   int
@@ -38,7 +39,7 @@ func (f *fakeLoginSession) CompleteSMS(phoneID int, code string) error {
 
 func (f *fakeLoginSession) ResendOTP() error {
 	f.resendHit = true
-	return nil
+	return f.resendErr
 }
 
 func (f *fakeLoginSession) TrustedPhones() ([]hme.TrustedPhone, error) {
@@ -100,6 +101,47 @@ func TestLoginBeginOTPRequiredReturnsSession(t *testing.T) {
 	base := ts.URL
 	defer ts.Close()
 	_ = beginLogin(t, base, s, csrf)
+}
+
+// 推送成功时 begin 响应带 push_sent=true; 推送失败时带 false,
+// 前端据此提示用户手动重发而不是无限等待。
+func TestLoginBeginReportsPushSent(t *testing.T) {
+	cases := []struct {
+		name      string
+		resendErr error
+		want      bool
+	}{
+		{"推送成功", nil, true},
+		{"推送失败", errors.New("请求发送验证码失败: HTTP 500"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			session := &fakeLoginSession{beginErr: hme.ErrOTPRequired, resendErr: tc.resendErr}
+			_, ts := newLoginTestServer(t, session)
+			defer ts.Close()
+			s, csrf := login(t, ts, "admin-pass-2026-strong")
+
+			status, body := aliasTaskRequest(t, ts.URL, s, csrf, http.MethodPost, "/api/accounts/acc_1/login/begin", `{"password":"p@ssw0rd"}`)
+			if status != http.StatusOK {
+				t.Fatalf("begin = %d: %s", status, body)
+			}
+			var out struct {
+				Data struct {
+					Status   string `json:"status"`
+					PushSent *bool  `json:"push_sent"`
+				} `json:"data"`
+			}
+			if err := json.Unmarshal([]byte(body), &out); err != nil {
+				t.Fatal(err)
+			}
+			if out.Data.Status != "otp_required" {
+				t.Fatalf("status = %q", out.Data.Status)
+			}
+			if out.Data.PushSent == nil || *out.Data.PushSent != tc.want {
+				t.Fatalf("push_sent = %v, 期望 %v (body: %s)", out.Data.PushSent, tc.want, body)
+			}
+		})
+	}
 }
 
 func TestLoginBeginDoneWithoutOTP(t *testing.T) {

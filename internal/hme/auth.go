@@ -464,16 +464,31 @@ func (c *Client) TrustedPhones() ([]TrustedPhone, error) {
 		return nil, fmt.Errorf("获取手机号列表失败: HTTP %d", resp.StatusCode)
 	}
 	// 实际响应把列表嵌套在 phoneNumberVerification 里,兼容顶层平铺的旧结构。
+	// 2026 年起 Apple 又把它移到了 twoSV.bridgeInitiateData.phoneNumberVerification
+	// (icloudpd #1325)——三条路径依次回退,任一命中即用。
+	type phoneVerification struct {
+		TrustedPhoneNumbers []TrustedPhone `json:"trustedPhoneNumbers"`
+	}
 	var result struct {
-		PhoneNumberVerification struct {
-			TrustedPhoneNumbers []TrustedPhone `json:"trustedPhoneNumbers"`
-		} `json:"phoneNumberVerification"`
+		PhoneNumberVerification phoneVerification `json:"phoneNumberVerification"`
+		TwoSV                   struct {
+			PhoneNumberVerification phoneVerification `json:"phoneNumberVerification"`
+			BridgeInitiateData      struct {
+				PhoneNumberVerification phoneVerification `json:"phoneNumberVerification"`
+			} `json:"bridgeInitiateData"`
+		} `json:"twoSV"`
 		TrustedPhoneNumbers []TrustedPhone `json:"trustedPhoneNumbers"`
 	}
 	if err := json.Unmarshal(body, &result); err != nil {
 		return nil, fmt.Errorf("解析手机号列表失败: %w", err)
 	}
 	phones := result.PhoneNumberVerification.TrustedPhoneNumbers
+	if len(phones) == 0 {
+		phones = result.TwoSV.BridgeInitiateData.PhoneNumberVerification.TrustedPhoneNumbers
+	}
+	if len(phones) == 0 {
+		phones = result.TwoSV.PhoneNumberVerification.TrustedPhoneNumbers
+	}
 	if len(phones) == 0 {
 		phones = result.TrustedPhoneNumbers
 	}
@@ -547,45 +562,43 @@ func (c *Client) CompleteSMS(phoneID int, code string) error {
 
 // ResendOTP 请求 Apple 向受信任设备推送 2FA 验证码。
 //
-// 409 之后 Apple 通常会自动推送一次,本方法用于手动重发。该端点在不同账号/
-// 区域的行为不一致,因此按候选组合依次探测,任一返回 2xx 即视为成功。
+// 2026 年起 Apple 更改了流程: 409 之后不再自动推送, 必须显式
+// PUT /appleauth/auth/verify/trusteddevice/securitycode (无请求体) 才会
+// 向受信任设备下发验证码。旧实现探测的 GET/POST verify/trusteddevice
+// 组合已全部失效(实测 405/500, 且不产生任何推送)。
+// 成功状态为 202(部分账号返回 200/204), 任一 2xx 即视为成功。
 func (c *Client) ResendOTP() error {
 	state, err := c.pending()
 	if err != nil {
 		return err
 	}
 	ep := c.endpoints()
-	candidates := []struct{ method, url string }{
-		{"GET", ep.verifyDevice}, // 国区 HSA2 账号实测可用 (200)
-		{"PUT", ep.verifyDevice}, // icloud-photos-sync 的方式 (202)
-		{"POST", ep.verifyDevice},
-		{"PUT", ep.verifyDevice + "/securitycode"},
-		{"GET", ep.verifyDevice + "/securitycode"},
+	req, err := http.NewRequest("PUT", ep.verifyDevice+"/securitycode", nil)
+	if err != nil {
+		return err
 	}
-	var lastStatus int
-	for _, cand := range candidates {
-		req, err := http.NewRequest(cand.method, cand.url, nil)
-		if err != nil {
-			return err
-		}
-		req.Header = c.updateAuthHeaders(req.Header, state)
-		req.Header.Del("Content-Type") // 该系列端点要求无请求体
+	req.Header = c.updateAuthHeaders(req.Header, state)
 
-		resp, err := c.httpc.Do(req)
-		if err != nil {
-			return err
-		}
-		c.captureSessionHeaders(state, resp)
-		lastStatus = resp.StatusCode
-		resp.Body.Close()
-		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			return nil
-		}
+	resp, err := c.httpc.Do(req)
+	if err != nil {
+		return err
 	}
-	return fmt.Errorf("请求发送验证码失败: 全部组合均被拒绝 (最后 HTTP %d)", lastStatus)
+	defer resp.Body.Close()
+	c.captureSessionHeaders(state, resp)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("请求发送验证码失败: HTTP %d", resp.StatusCode)
+	}
+	return nil
 }
 
 // submitSecurityCode 提交 2FA 验证码。
+//
+// 成功形态有两种:
+//   - 204/200: 常规成功;
+//   - 409 且响应带 X-Apple-Session-Token: 2026 年起 idmsa 对「已接受」的
+//     验证码可能返回 409(响应体 securityCode.valid=true)并同时下发
+//     session token——token 才是真正的地面事实(rclone #9488)。
+//     若把这种 409 当失败, 用户会陷入「验证码正确却永远登录不上」。
 func (c *Client) submitSecurityCode(state *authState, ep authEndpoints, code string) error {
 	reqBody := map[string]interface{}{
 		"securityCode": map[string]string{"code": code},
@@ -603,10 +616,16 @@ func (c *Client) submitSecurityCode(state *authState, ep authEndpoints, code str
 		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != 204 {
+
+	// 先捕获头: 409 成功形态同样轮换 scnt/session token, 后续 finishLogin 依赖。
+	c.captureSessionHeaders(state, resp)
+
+	if resp.StatusCode == http.StatusConflict && resp.Header.Get("X-Apple-Session-Token") != "" {
+		return nil
+	}
+	if resp.StatusCode != 204 && resp.StatusCode != 200 {
 		return fmt.Errorf("2FA 验证失败: HTTP %d", resp.StatusCode)
 	}
-	c.captureSessionHeaders(state, resp)
 	return nil
 }
 
