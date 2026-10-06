@@ -32,8 +32,13 @@ func bodyLimitMiddleware() gin.HandlerFunc {
 }
 
 // securityHeaders 是全局安全响应头。
+//
+// style-src 必须含 'unsafe-inline': antd v6 经 CSS-in-JS 在运行时注入
+// <style> 标签, 且 React 的 style={{...}} 内联属性也受 style-src 管辖——
+// 只有 'self' 时两者全被拦截, antd 组件(DatePicker 等)会退化成无样式
+// 裸元素。script-src 保持 'self'(内联脚本仍被禁止), 风险可控。
 var securityHeaders = map[string]string{
-	"Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+	"Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
 	"X-Content-Type-Options":  "nosniff",
 	"Referrer-Policy":         "no-referrer",
 	"Permissions-Policy":      "camera=(), microphone=(), geolocation=()",
