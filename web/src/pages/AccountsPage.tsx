@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { request, ApiError } from '../api/client'
 import { fetchAccounts, invalidateAccounts } from '../api/cache'
+import { formatDateTime } from '../utils/datetime'
 import type { AccountSummary } from '../api/types'
 import AsyncState from '../components/AsyncState'
 import AccountFormDialog from '../components/AccountFormDialog'
@@ -50,6 +51,14 @@ function credText(acc: AccountSummary): string {
   if (acc.mailbox) parts.push(`收件箱:${acc.mailbox.email}`)
   if (acc.has_proxy) parts.push('代理')
   return parts.length > 0 ? `已配置（${parts.join('·')}）` : '未配置'
+}
+
+/** 最近验证时间: 空值显示占位符, 其余格式化为本地可读时间(服务端返回 RFC3339)。 */
+function formatValidated(raw: string): string {
+  if (!raw) return '—'
+  const d = new Date(raw)
+  if (Number.isNaN(d.getTime())) return raw
+  return formatDateTime(d)
 }
 
 export default function AccountsPage() {
@@ -186,7 +195,9 @@ export default function AccountsPage() {
               {accounts.map((acc) => (
                 <tr key={acc.id}>
                   <td>
-                    {acc.name}
+                    <span className="cell-truncate" title={acc.name}>
+                      {acc.name}
+                    </span>
                     {acc.status_message && (
                       <span className="hint" style={{ display: 'block' }}>
                         {acc.status_message}
@@ -194,19 +205,21 @@ export default function AccountsPage() {
                     )}
                   </td>
                   <td>
-                    {acc.icloud_email || acc.real_email || '—'}
+                    <span className="cell-truncate" title={acc.icloud_email || acc.real_email || ''}>
+                      {acc.icloud_email || acc.real_email || '—'}
+                    </span>
                     <span className="cell-secondary">{acc.id}</span>
                   </td>
                   <td>
                     <StatusBadge status={acc.status} />
                   </td>
                   <td>
-                    <span className="cell-strong">
+                    <span className="cell-strong alias-count">
                       {acc.alias_active} / {acc.alias_total}
                     </span>
                   </td>
-                  <td>{credText(acc)}</td>
-                  <td>{acc.last_validated ? acc.last_validated : '—'}</td>
+                  <td><span className="cell-nowrap">{credText(acc)}</span></td>
+                  <td><span className="cell-nowrap">{formatValidated(acc.last_validated)}</span></td>
                   <td>
                     <div className="account-row-actions">
                       <button className="account-edit-button" onClick={() => { setEditing(acc); setFormSession((session) => session + 1); setFormOpen(true) }}>

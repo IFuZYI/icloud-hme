@@ -986,6 +986,28 @@ td .cell-secondary {
   font-weight: 600;
 }
 
+/* 别名计数 "45 / 123" 必须整体呈现: 列宽不足时曾折成两行("45 /" + "123") */
+.alias-count {
+  white-space: nowrap;
+}
+
+/* 表格长文本单元格: 单行截断 + 省略号, 完整值由 title 提示。
+   长名称/邮箱曾折成 3-4 行把行高撑到 88px。
+   上限 200px: 再大(220px+)会把两列的最小宽度推到超出容器, 引入横向滚动条。 */
+.cell-truncate {
+  display: block;
+  overflow: hidden;
+  max-width: 200px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 短标签单元格(凭据/最近验证): 列宽被长文本列挤压时会逐字折行
+   ("未"/"配"/"置" 三行), 把整行撑到 92px。禁止内部换行, 由表格布局分配宽度。 */
+.cell-nowrap {
+  white-space: nowrap;
+}
+
 .link-button {
   padding: 0;
   border: 0;

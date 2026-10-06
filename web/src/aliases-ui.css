@@ -107,11 +107,18 @@
 @media (max-width: 640px) {
   .aliases-page .aliases-title h2,
   .aliases-page .aliases-title p { white-space: normal; }
-  .aliases-page .aliases-toolbar { width: 100%; }
+  /* 工具栏 4 个控件(账号/自动创建/创建别名/状态筛选)在 390px 总宽 633px,
+     nowrap 会让它们溢出屏幕。改为换行 + 每行两个等宽控件。 */
+  .aliases-page .aliases-toolbar { width: 100%; flex-wrap: wrap; }
   .aliases-page .aliases-toolbar .select-menu,
-  .aliases-page .aliases-toolbar .aliases-primary-btn { flex: 1; }
+  .aliases-page .aliases-toolbar .aliases-primary-btn,
+  .aliases-page .aliases-toolbar .aliases-ghost-btn {
+    flex: 1 1 calc(50% - var(--space-2));
+    min-width: 0;
+  }
   .aliases-page .aliases-toolbar .select-trigger,
-  .aliases-page .aliases-toolbar .aliases-primary-btn { width: 100%; min-height: 44px; justify-content: center; }
+  .aliases-page .aliases-toolbar .aliases-primary-btn,
+  .aliases-page .aliases-toolbar .aliases-ghost-btn { width: 100%; min-height: 44px; justify-content: center; }
   .aliases-page .aliases-batch-actions { justify-content: flex-start; }
   .aliases-page .aliases-batch-actions button { min-height: 44px; }
 }

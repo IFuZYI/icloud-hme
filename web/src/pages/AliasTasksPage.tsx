@@ -1,12 +1,19 @@
 import { useEffect, useMemo, useState } from 'react'
 import { request, ApiError } from '../api/client'
 import { fetchAccounts } from '../api/cache'
-import { formatIntervalMinutes } from '../utils/datetime'
+import { formatDateTime, formatIntervalMinutes } from '../utils/datetime'
 import AliasTaskForm from '../components/AliasTaskForm'
 import TaskMoreMenu from '../components/TaskMoreMenu'
 import type { AccountSummary, AliasTask } from '../api/types'
 import { useToast } from '../components/ToastProvider'
 import { IconPlus } from '../components/icons'
+
+/** 下次执行时间: 服务端 RFC3339 → 项目统一的中文时间格式。 */
+function formatNextRun(raw: string): string {
+  const d = new Date(raw)
+  if (Number.isNaN(d.getTime())) return raw
+  return formatDateTime(d)
+}
 
 export default function AliasTasksPage() {
   const [tasks, setTasks] = useState<AliasTask[]>([])
@@ -67,7 +74,7 @@ export default function AliasTasksPage() {
           <div className="task-card-header"><div className="task-card-title"><div className="task-title-line"><h3>{labelText(task)}</h3><span className="task-type-badge">{isAuto ? '自主任务' : '定时任务'}</span></div><p title={accountName(task.account_id)}>{accountName(task.account_id)}</p></div><TaskMoreMenu enabled={task.enabled} onToggle={() => void action(task, 'toggle')} onEdit={() => { setEdit(task); setOpen(true) }} onDelete={() => void action(task, 'delete')} /></div>
           <div className="task-card-meta"><span><small>{isAuto ? '每天数量' : '创建周期'}</small><strong>{isAuto ? `${task.daily_limit} 个/天` : `每${formatIntervalMinutes(task.interval_minutes)} ${task.batch_count} 个`}</strong></span><span><small>今日</small><strong>{task.daily_count} / {task.mode === 'auto' ? (task.today_quota ?? 0) : task.daily_limit} 个</strong></span></div>
           <div className="task-progress-label"><span>进度</span><strong>{task.created_count} / {task.max_total}（{percent}%）</strong></div>
-          <div className="task-next-run">下次执行：{task.enabled ? (task.next_run ? new Date(task.next_run).toLocaleString() : '已达上限或等待下一轮') : '已暂停'}</div>
+          <div className="task-next-run">下次执行：{task.enabled ? (task.next_run ? formatNextRun(task.next_run) : '已达上限或等待下一轮') : '已暂停'}</div>
           <div className="task-progress" role="progressbar" aria-valuenow={task.created_count} aria-valuemin={0} aria-valuemax={task.max_total} aria-label={`${task.created_count}/${task.max_total}`}><div className="task-progress-fill" style={{ width: `${percent}%` }} /></div>
           {task.last_error && <p className="task-card-error" title={task.last_error}>{task.last_error}</p>}
         </article>
