@@ -465,6 +465,61 @@ textarea {
   box-shadow: none;
 }
 
+/* ─── antd 面板隔离层 ───
+   antd 的日期面板经 portal 渲染到 body, 项目全局的元素级规则(table/th/td/tbody tr/button)
+   会一并命中面板内部的同名元素, 破坏其布局(CDP 实测确认):
+   - 全局 table { min-width: 920px } 把日历网格撑到 920px(每列 131px)、年份网格
+     每列 307px, 溢出面板(492px/351px) → 右侧列被裁掉、日期与时间列重叠;
+   - 全局 th/td 的 padding/border 给日历单元格加了框线、表头加了灰底;
+   - 全局 tbody tr 的入场动画/过渡作用到日历行;
+   - 全局 button 的 min-height:40px/胶囊圆角把面板头部按钮撑到 50px 高。
+   这里在面板范围内复位这些泄漏属性。antd 自身规则优先级更高, 不受影响。 */
+.ant-picker-dropdown table {
+  min-width: 0;
+}
+
+.ant-picker-dropdown th,
+.ant-picker-dropdown td {
+  padding: 0;
+  border-bottom: 0;
+  background: transparent;
+  text-align: center;
+  vertical-align: middle;
+  font-size: inherit;
+  font-weight: inherit;
+  letter-spacing: normal;
+  white-space: normal;
+}
+
+.ant-picker-dropdown tbody tr {
+  animation: none;
+  transition: none;
+  will-change: auto;
+}
+
+.ant-picker-dropdown tbody tr:hover {
+  background: transparent;
+}
+
+/* 面板头部箭头/年份切换按钮与「此刻」链接按钮: 复位全局 button 的 min-height;
+   「确定」(.ant-btn) 的高度由 antd 自己控制。 */
+.ant-picker-dropdown button {
+  min-height: auto;
+}
+
+.ant-picker-dropdown button:not(.ant-btn) {
+  border-radius: 6px;
+}
+
+.ant-picker-dropdown button:not(.ant-btn):hover:not(:disabled) {
+  background: transparent;
+  border-color: transparent;
+}
+
+.ant-picker-dropdown button:not(.ant-btn):active:not(:disabled) {
+  transform: none;
+}
+
 select {
   appearance: none;
   -webkit-appearance: none;

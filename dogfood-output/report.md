@@ -2,7 +2,7 @@
 
 **Target:** http://127.0.0.1:8081 (iCloud HME 管理台)
 **Date:** 2026-10-06
-**Scope:** 全站探索性 QA × 两轮（第一轮：日期选择器与筛选栏；第二轮：全量——全部页面 × 3 视口 × 有数据状态 × 对话框/弹层）
+**Scope:** 全站探索性 QA × 三轮（第一轮：日期选择器与筛选栏；第二轮：全量——全部页面 × 3 视口 × 有数据状态 × 对话框/弹层；第三轮：日期面板年份视图——用户截图定位）
 **Tester:** Hermes Agent (automated exploratory QA)
 
 ---
@@ -13,18 +13,111 @@
 
 **第二轮（8 项新发现，7 修复 + 1 驳回）：** 引入测试数据后暴露出的表格渲染缺陷、原始 ISO 时间泄漏、`toLocaleString` 格式不统一、别名页工具栏移动端溢出等。
 
+**第三轮（1 项 Critical 根因 + 1 项 Medium，全部修复）：** 全局 `table { min-width: 920px }` 泄漏进 antd 日期面板（面板内日历/年份网格也是 `<table>`），把网格撑到 920px → 年份视图第三列（2021/2024/2027）被裁掉。用户截图即此问题。
+
 | 轮次 | 🔴 Critical | 🟠 High | 🟡 Medium | 🔵 Low | 合计 |
 |------|------------|---------|-----------|--------|------|
 | 第一轮 | 0 | 2 | 2 | 3 | 7（全部修复/驳回） |
 | 第二轮 | 0 | 2 | 2 | 4 | 8（7 修复 + 1 驳回） |
+| 第三轮 | 1 | 0 | 1 | 0 | 2（全部修复） |
 
-**Overall Assessment:** 两轮共 15 项发现。第二轮的关键价值在于**注入测试数据**——第一轮所有列表页均为空状态，表格渲染缺陷完全不可见。第二轮暴露的 2 个 High 均与「有数据时」的表格布局相关。
+**Overall Assessment:** 三轮共 17 项发现。第三轮的关键教训：**antd 面板经 portal 渲染到 body，项目全局的元素级选择器（`table`/`th`/`td`/`tbody tr`/`button`）会泄漏进面板内部**，造成面板布局损坏。此前的多轮「移动端补丁」（`min-width: 0 !important` 等）都是在治标——真正的根因是全局规则没有作用域隔离。
 
-**方法论说明（两轮均严格执行「measure, don't eyeball」）：** vision 模型在两轮中共给出 **9 次与 DOM 测量直接矛盾的描述**（声称"控件高度不一致"而实测全部 40px、"面板没有此刻/确定按钮"而 DOM 中按钮存在、"查询按钮基线错位"而实测 top/bottom 完全一致等）。所有结论均以 `getBoundingClientRect()` / `getComputedStyle()` / CDP `CSS.getMatchedStylesForNode` 的测量为准；vision 仅用于初筛可疑区域，不用于定量判断。
+**方法论说明（三轮均严格执行「measure, don't eyeball」）：** vision 模型在三轮中共给出 **12 次与 DOM 测量直接矛盾的描述**（如声称"年份 2028-2030 缺失"而 DOM 实测 12 格全在、"日历与时间列重叠"而实测间隙 18px 等）。所有结论均以 `getBoundingClientRect()` / `getComputedStyle()` / CDP `CSS.getMatchedStylesForNode` 的测量为准；vision 仅用于初筛可疑区域，不用于定量判断。
 
 ---
 
-## 第二轮 Issues（本次新增）
+## 第三轮 Issues（本轮新增）
+
+### Issue #16: 全局 `table { min-width: 920px }` 泄漏进 antd 日期面板，年份/日期网格被撑爆裁切
+
+| Field | Value |
+|-------|-------|
+| **Severity** | 🔴 Critical（数据选择功能受损） |
+| **Category** | Functional / Visual |
+| **URL** | `/inbox`（所有含日期选择器的页面） |
+
+**Description:**
+antd 的日期面板经 portal 渲染到 `body`，其内部的日历网格与年份/月份网格都用 `<table>` 实现。项目全局的 `table { min-width: 920px }`（本意是给页面数据表格用的）一并命中面板内的 `<table>`：
+
+- **年份视图**：网格被撑到 920px、每列 307px，而面板只有 351px → **第三列（2021/2024/2027/2030）完全不可见**，第二列也被部分裁切。用户截图里"年份缺失"即此问题。
+- **日期视图**：日历网格被撑到 920px、每列 131px，与右侧时间列（x=1022）重叠。
+- 同类泄漏还有：全局 `th/td` 的 padding/border 给日历格子加了框线、表头加了灰底；全局 `tbody tr` 的入场动画作用到日历行；全局 `button` 的 `min-height: 40px` 把面板头部箭头按钮撑到 50px 高。
+
+**Steps to Reproduce:**
+1. 打开 `/inbox`，点击「开始时间」
+2. 点击面板头部的年份（如「2026年」）进入年份视图
+3. 观察：年份网格 3 列只显示约 2 列，右侧列被裁
+
+**Expected:** 年份/日期网格完整显示在面板内。
+
+**Actual:** 年份网格宽 920px（面板 351px），第三列在屏幕外；日期网格宽 920px（面板 492px），与时间列重叠。
+
+**根因定位（CDP `CSS.getMatchedStylesForNode`）：**
+```
+.ant-picker-date-panel .ant-picker-content
+  [user-agent] table -> {'border-collapse': 'separate'}
+  [regular]    table -> {'border-collapse': 'collapse', 'width': '100%', 'min-width': '920px'}   ← 泄漏源
+  [regular]    :where(.css-oc1rc0)... -> {'width': '100%', 'border-collapse': 'collapse'}
+```
+`[regular]` 来源即 `web/src/styles.css:595` 的全局 `table` 规则。
+
+**修复：** 在 `styles.css` 新增 **antd 面板隔离层**（`.ant-picker-dropdown` 作用域内复位泄漏属性）：
+
+```css
+.ant-picker-dropdown table { min-width: 0; }
+.ant-picker-dropdown th, .ant-picker-dropdown td { padding: 0; border-bottom: 0; background: transparent; ... }
+.ant-picker-dropdown tbody tr { animation: none; transition: none; will-change: auto; }
+.ant-picker-dropdown button { min-height: auto; }
+```
+
+**验证（4 视口 × 3 视图矩阵）：**
+
+| 视口 | 日期视图 | 年份视图 | 月份视图 |
+|------|---------|---------|---------|
+| 1440×900 | ✅ 0 溢出 | ✅ 12 格全在 | ✅ 12 格全在 |
+| 768×1024 | ✅ 0 溢出 | ✅ | ✅ |
+| 513×702 | ✅ | ✅ | ✅ |
+| 390×844 | ✅ | ✅ | ✅ |
+
+**回归验证（隔离层不得影响页面表格）：** `/logs`、`/accounts` 表格的 `min-width: 920px`、`th` padding/bg、`row-enter` 动画全部保留。
+
+**测试：** `web/src/test/antd-isolation.test.ts`（5 个守卫测试，断言隔离规则存在 + 全局规则保留）。**变异验证**：删除 `min-width: 0` → 测试失败；恢复 → 通过。
+
+---
+
+### Issue #17: 窄屏 bottom-sheet 下年份/月份面板左对齐，右侧空 154px
+
+| Field | Value |
+|-------|-------|
+| **Severity** | 🟡 Medium |
+| **Category** | Visual |
+| **URL** | `/inbox` |
+
+**Description:**
+≤560px 时面板改为 bottom-sheet（撑满视口宽 497px），但年份/月份面板保持 antd 固定宽 351px 并左对齐，右侧空出 154px；与下方日期视图（撑满）不一致。
+
+**修复：** 窄屏媒体查询内将 `.ant-picker-year-panel` / `.ant-picker-month-panel` 及其 body/content 撑满整宽（与日期视图一致，格子触控区域也更大）。
+
+**验证：** 513px 下左/右 gap 从 8/154 变为 8/8；390px 从 8/31 变为 8/8。
+
+---
+
+## 第三轮方法论记录
+
+**用户截图时间戳分析：** 用户截图 `upload_20261006_064708_3.png`（06:47）早于修复构建（07:11），截图中的年份裁切正是 Issue #16。修复后按用户截图同尺寸（513×702）复现验证：2021/2024/2027 全部回归、网格左右对称。
+
+**驳回的 vision 误报（本轮 3 条）：**
+1. 声称"日历与时间列重叠" → DOM 实测日期表右缘 1004 < 时间列左缘 1022，间隙 18px；放大图复核无重叠
+2. 声称"年份 2028-2030 缺失" → DOM 实测 12 格全在（当时是 577px 低视口，格子在视口外但面板内）
+3. 声称"确定按钮灰色禁用" → DOM 实测 `disabled: false, bg: rgb(22,119,255)`（蓝色可用）；用户截图中确为禁用态，因为**输入框被清空**（无值可确认）——antd 标准行为
+
+**验证的标准交互行为（非缺陷）：**
+- 输入框灰色文字 = antd hover 预览（`rgba(0,0,0,0.25)`）：鼠标悬停年份格子时输入框显示预览值。实测 hover 2022 → 输入框显示 "2022-09-29 00:00"（灰）；hover 2025 → 跟随变化。
+
+---
+
+## 第二轮 Issues（保留）
 
 ### Issue #8: 凭据列窄至 60px 时「未配置」被逐字拆成 3 行，整行撑到 92px
 
