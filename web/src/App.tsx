@@ -1,3 +1,4 @@
+import { useMemo } from 'react'
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
 import { ConfigProvider } from 'antd'
 import zhCN from 'antd/locale/zh_CN'
@@ -10,6 +11,8 @@ import AliasesPage from './pages/AliasesPage'
 import InboxPage from './pages/InboxPage'
 import AliasTasksPage from './pages/AliasTasksPage'
 import LogsPage from './pages/LogsPage'
+import { buildAntdTheme } from './antdTheme'
+import { usePrefersDark } from './usePrefersDark'
 
 function ProtectedLayout() {
   const { status } = useAuth()
@@ -22,24 +25,14 @@ function ProtectedLayout() {
   return <AppShell />
 }
 
-// antd 主题对齐项目设计系统(web/src/styles.css 的 token):
-// 控件 40px 高 / 11px 圆角 / --color-border-strong 边框 / --color-text 文字色。
-// 不这样做的话, DatePicker 会带着 antd 默认样式(50px 高、6px 圆角、灰边框)
-// 与相邻的 SelectMenu/按钮明显错位。
-const antdTheme = {
-  token: {
-    controlHeight: 40,
-    borderRadius: 11,
-    colorBorder: '#c7c7cc', // --color-border-strong
-    colorText: '#1d1d1f', // --color-text
-    fontFamily:
-      '-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif',
-  },
-}
-
 export default function App() {
+  // antd 主题跟随系统色: 暗色模式下用暗色算法 + 暗色 token,
+  // 否则 DatePicker 等组件会在黑页面上显示为白斑。
+  const dark = usePrefersDark()
+  // useMemo: 保持主题对象引用稳定, 避免每次渲染都让 ConfigProvider 重算 token。
+  const theme = useMemo(() => buildAntdTheme(dark), [dark])
   return (
-    <ConfigProvider locale={zhCN} theme={antdTheme}>
+    <ConfigProvider locale={zhCN} theme={theme}>
       <BrowserRouter>
         <AuthProvider>
           <ToastProvider>
