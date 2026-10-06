@@ -185,6 +185,41 @@ func TestTrustedPhonesParsesNestedPayload(t *testing.T) {
 	}
 }
 
+// TestTrustedPhonesParsesAllPaths 钉住 4 条解析路径。
+// 2026 年起 Apple 把 trustedPhoneNumbers 移到了
+// twoSV.bridgeInitiateData.phoneNumberVerification (icloudpd #1325);
+// 旧的两条路径必须继续兼容, 否则老账号或区域差异会让短信通道拿不到号码。
+func TestTrustedPhonesParsesAllPaths(t *testing.T) {
+	const phones = `[{"id":7,"numberWithDialCode":"+86 139****0007"}]`
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"路径1-顶层 phoneNumberVerification", `{"phoneNumberVerification":{"trustedPhoneNumbers":` + phones + `}}`},
+		{"路径2-twoSV.bridgeInitiateData", `{"twoSV":{"bridgeInitiateData":{"phoneNumberVerification":{"trustedPhoneNumbers":` + phones + `}}}}`},
+		{"路径3-twoSV.phoneNumberVerification", `{"twoSV":{"phoneNumberVerification":{"trustedPhoneNumbers":` + phones + `}}}`},
+		{"路径4-顶层平铺", `{"trustedPhoneNumbers":` + phones + `}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := hmetest.New(t)
+			m.RequireOTP = true
+			m.AuthStateBody = tc.body
+			c := newMockedClient(t, m, "icloud.com")
+			if err := c.BeginLogin("owner@example.com", "p@ssw0rd"); err != ErrOTPRequired {
+				t.Fatalf("BeginLogin err = %v", err)
+			}
+			got, err := c.TrustedPhones()
+			if err != nil {
+				t.Fatalf("TrustedPhones: %v", err)
+			}
+			if len(got) != 1 || got[0].ID != 7 {
+				t.Fatalf("phones = %+v, 期望解析出 id=7", got)
+			}
+		})
+	}
+}
+
 func TestSMSFlowCompletesLogin(t *testing.T) {
 	m := hmetest.New(t)
 	m.RequireOTP = true
