@@ -34,8 +34,13 @@ interface RequestOptions extends Omit<RequestInit, 'body'> {
   signal?: AbortSignal
 }
 
-/** 业务级 401 白名单: 这些错误码不表示管理会话失效, 不应触发全局登出。 */
-const BUSINESS_401_CODES = new Set(['OTP_INVALID', 'UPSTREAM_UNAUTHORIZED'])
+/** 业务级 401 白名单: 这些错误码不表示管理会话失效, 不应触发全局登出。
+ *
+ *  INVALID_CREDENTIALS: 登录 iCloud 时密码错误(不是管理员会话问题,
+ *  否则会把管理员从登录对话框踢回管理台登录页)。
+ *  OTP_INVALID: 验证码错误。
+ *  UPSTREAM_UNAUTHORIZED: iCloud 侧 Cookie 失效(账号级, 非管理会话)。 */
+const BUSINESS_401_CODES = new Set(['OTP_INVALID', 'UPSTREAM_UNAUTHORIZED', 'INVALID_CREDENTIALS'])
 
 /**
  * 唯一的 fetch 入口。

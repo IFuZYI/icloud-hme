@@ -199,6 +199,21 @@ func (s *Server) loginAccountHandler(c *gin.Context) {
 	ok(c, sum)
 }
 
+// checkAccountHandler 处理 POST /api/accounts/:id/check。
+//
+// 手动检测账号登录态: 对现有 Cookie 做一次低风险 validate 探活,
+// 状态与 last_validated/last_error 落库后返回脱敏摘要。
+// 检测失败时返回稳定错误码(前端刷新列表即可看到 error 状态)。
+func (s *Server) checkAccountHandler(c *gin.Context) {
+	id := c.Param("id")
+	sum, err := s.be.CheckAccount(id)
+	if err != nil {
+		backendFail(c, err)
+		return
+	}
+	ok(c, sum)
+}
+
 // removeAccountHandler 处理 DELETE /api/accounts/:id。
 func (s *Server) removeAccountHandler(c *gin.Context) {
 	id := c.Param("id")

@@ -2,7 +2,7 @@ import { useState } from 'react'
 import Dialog from './Dialog'
 import { request, ApiError } from '../api/client'
 
-type LoginStep = 'PASSWORD_INPUT' | 'LOADING' | '2FA_INPUT' | 'SUCCESS' | 'FAIL'
+type LoginStep = 'PASSWORD_INPUT' | 'LOADING' | '2FA_INPUT' | 'SUCCESS'
 
 interface ICloudLoginDialogProps {
   accountId: string
@@ -65,7 +65,7 @@ export default function ICloudLoginDialog({
           // 静默兜底成空串只会让下一步提交 {session_id: ''} 被 400。
           if (!data.session_id) {
             setError('服务端未返回登录会话，请重试')
-            setStep('FAIL')
+            setStep('PASSWORD_INPUT')
             return
           }
           setSessionId(data.session_id)
@@ -90,9 +90,15 @@ export default function ICloudLoginDialog({
         setStep('2FA_INPUT')
         return
       }
+      if (err instanceof ApiError && err.code === 'INVALID_CREDENTIALS') {
+        // 密码错误: 回到密码输入阶段并保留输入框, 便于修正后重试。
+        setError(err.message)
+        setStep('PASSWORD_INPUT')
+        return
+      }
       setError(err instanceof ApiError ? err.message : '网络连接失败，请检查服务状态')
       // 输错验证码时保留在验证码流,可直接重输;密码阶段失败则回到输入。
-      setStep(otpRequired ? '2FA_INPUT' : 'FAIL')
+      setStep(otpRequired ? '2FA_INPUT' : 'PASSWORD_INPUT')
     }
   }
 

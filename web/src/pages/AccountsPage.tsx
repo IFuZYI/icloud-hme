@@ -78,6 +78,7 @@ export default function AccountsPage() {
   const [mailboxFor, setMailboxFor] = useState<AccountSummary | null>(null)
   const [deleteFor, setDeleteFor] = useState<AccountSummary | null>(null)
   const [deleting, setDeleting] = useState(false)
+  const [checkingId, setCheckingId] = useState<string | null>(null)
 
   const { show } = useToast()
   const navigate = useNavigate()
@@ -143,11 +144,27 @@ export default function AccountsPage() {
     switch (action) {
       case 'cookies': setCookieFor(account); break
       case 'login': setLoginFor(account); break
+      case 'check': void handleCheck(account); break
       case 'password': setAppPwdFor(account); break
       case 'mailbox': setMailboxFor(account); break
       case 'proxy': setProxyFor(account); break
       case 'aliases': navigate(`/aliases?account_id=${encodeURIComponent(account.id)}`); break
       case 'inbox': navigate(`/inbox?account_id=${encodeURIComponent(account.id)}`); break
+    }
+  }
+
+  /** 手动检测登录态: 调用 check 接口, 成功/失败都刷新列表以更新状态徽章。 */
+  async function handleCheck(account: AccountSummary) {
+    if (checkingId) return
+    setCheckingId(account.id)
+    try {
+      await request(`/api/accounts/${account.id}/check`, { method: 'POST' })
+      show('登录状态有效')
+    } catch (err) {
+      show(err instanceof ApiError ? err.message : '检测失败，请稍后重试')
+    } finally {
+      setCheckingId(null)
+      void load()
     }
   }
 
@@ -230,7 +247,11 @@ export default function AccountsPage() {
                         <IconTrash size={14} />
                         删除
                       </button>
-                      <MoreActionsDropdown accountName={acc.name} onAction={(action) => handleMoreAction(acc, action)} />
+                      <MoreActionsDropdown
+                        accountName={acc.name}
+                        onAction={(action) => handleMoreAction(acc, action)}
+                        checkDisabled={!acc.has_cookies}
+                      />
                     </div>
                   </td>
                 </tr>

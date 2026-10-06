@@ -61,6 +61,7 @@ type Backend interface {
 	SetAppPassword(string, string, string) (account.Summary, error)
 	SetMailbox(string, account.MailboxConfig) (account.Summary, error)
 	LoginAccount(string, string, string) (account.Summary, error)
+	CheckAccount(string) (account.Summary, error)
 	RemoveAccount(string) bool
 	CreateAlias(string, string) (*hme.CreateResult, error)
 	ListAliases(string) ([]hme.Alias, error)
@@ -185,9 +186,16 @@ func (b *managerBackend) LoginAccount(id, password, otpCode string) (account.Sum
 }
 
 // classifyLoginErr 把 iCloud 登录错误映射为稳定错误。
+//
+// 登录流程与 HME 操作不同: 登录不依赖 Cookie, 因此裸 401/403 不表示
+// 「iCloud 会话失效」。各阶段语义(dogfood 实测修正):
+//   - init/complete(凭据交换): 401/403 = 凭据被拒(密码错/账号不存在)
+//     → INVALID_CREDENTIALS, 提示检查邮箱与密码, 而非误导用户去更新 Cookie
+//   - start/federate/trust/web(流程/收尾): 4xx = 流程故障 → UPSTREAM_FAILURE
+//   - validate/会话检查: 明确会话信号(session/cookie) → UPSTREAM_UNAUTHORIZED
 func classifyLoginErr(err error) *BackendError {
 	msg := err.Error()
-	if strings.Contains(msg, "需要提供 OTP") {
+	if errors.Is(err, hme.ErrOTPRequired) || strings.Contains(msg, "需要提供 OTP") || strings.Contains(msg, "需要提供 2FA") {
 		return &BackendError{Status: http.StatusConflict, Code: "OTP_REQUIRED", Message: "需要提供 OTP 验证码"}
 	}
 	if strings.Contains(msg, "2FA 验证失败") {
@@ -199,10 +207,63 @@ func classifyLoginErr(err error) *BackendError {
 	if strings.Contains(msg, "未设置邮箱地址") {
 		return &BackendError{Status: http.StatusBadRequest, Code: "VALIDATION_ERROR", Message: msg}
 	}
-	if isSessionError(msg) {
+	if strings.Contains(msg, "同意隐私条款") {
+		return &BackendError{Status: http.StatusBadRequest, Code: "VALIDATION_ERROR", Message: msg}
+	}
+	if strings.Contains(msg, "用户名或密码错误") || (isCredentialStage(msg) && containsHTTPStatus(msg, "401", "403")) {
+		return &BackendError{Status: http.StatusUnauthorized, Code: "INVALID_CREDENTIALS", Message: "iCloud 邮箱或密码错误"}
+	}
+	if hasExplicitSessionSignal(msg) {
 		return &BackendError{Status: http.StatusUnauthorized, Code: "UPSTREAM_UNAUTHORIZED", Message: "iCloud 会话失效,请更新 Cookie"}
 	}
 	return &BackendError{Status: http.StatusBadGateway, Code: "UPSTREAM_FAILURE", Message: "iCloud 登录失败,请稍后重试"}
+}
+
+// isCredentialStage 判断错误是否来自凭据交换阶段(signin init/complete)。
+// 这两个阶段的 401/403 表示凭据被拒, 而不是会话问题。
+func isCredentialStage(msg string) bool {
+	return strings.Contains(msg, "auth init") || strings.Contains(msg, "auth complete")
+}
+
+// containsHTTPStatus 检查错误消息是否含指定 HTTP 状态码。
+func containsHTTPStatus(msg string, codes ...string) bool {
+	for _, code := range codes {
+		if strings.Contains(msg, "HTTP "+code) || strings.Contains(msg, "status: "+code) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasExplicitSessionSignal 检查错误是否携带明确的会话失效信号。
+//
+// 只认明确关键词而非裸状态码: 登录流程没有 Cookie, 裸 401/403 更可能是
+// 凭据问题或流程故障, 提示「更新 Cookie」会把用户引向错误操作。
+func hasExplicitSessionSignal(msg string) bool {
+	m := strings.ToLower(msg)
+	return strings.Contains(m, "session") || strings.Contains(m, "cookie") ||
+		strings.Contains(m, "unauthorized") || strings.Contains(m, "会话校验失败") ||
+		strings.Contains(m, "421")
+}
+
+// CheckAccount 检测账号登录态是否有效(validate 探活 + 状态落库)。
+func (b *managerBackend) CheckAccount(id string) (account.Summary, error) {
+	sum, err := b.mgr.CheckAccount(id)
+	if err != nil {
+		msg := err.Error()
+		if strings.Contains(msg, "账号不存在") {
+			return account.Summary{}, &BackendError{Status: http.StatusNotFound, Code: "ACCOUNT_NOT_FOUND", Message: "账号不存在"}
+		}
+		if strings.Contains(msg, "未配置 Cookie") {
+			return account.Summary{}, &BackendError{Status: http.StatusBadRequest, Code: "VALIDATION_ERROR", Message: "账号未配置 Cookie，无法检测登录状态"}
+		}
+		// 检测失败时账号状态已置 error, 返回摘要与稳定错误码。
+		if hasExplicitSessionSignal(msg) || isSessionError(msg) {
+			return sum, &BackendError{Status: http.StatusUnauthorized, Code: "UPSTREAM_UNAUTHORIZED", Message: "iCloud 会话已失效，请重新登录或更新 Cookie"}
+		}
+		return sum, &BackendError{Status: http.StatusBadGateway, Code: "UPSTREAM_FAILURE", Message: "登录态检测失败，请稍后重试"}
+	}
+	return sum, nil
 }
 
 // RemoveAccount 删除账号。
@@ -563,12 +624,15 @@ func classifyUpstreamErr(fixedMsg string, err error) *BackendError {
 // isSessionError 判断错误是否由会话失效引起。
 // 421 Misdirected Request 是 iCloud 邮件侧在 Cookie 失效时的返回码,
 // 必须与会话错误同类处理,否则会被误报为 502 UPSTREAM_FAILURE。
+//
+// 注意: 不匹配「认证」一词——「账号启用了双重认证」这类业务消息会被误判
+// (dogfood 实测: OTP 场景误报为会话失效)。
 func isSessionError(msg string) bool {
 	m := strings.ToLower(msg)
 	return strings.Contains(m, "401") || strings.Contains(m, "403") ||
 		strings.Contains(m, "421") ||
 		strings.Contains(m, "session") || strings.Contains(m, "cookie") ||
-		strings.Contains(m, "unauthorized") || strings.Contains(m, "认证") ||
+		strings.Contains(m, "unauthorized") ||
 		strings.Contains(m, "会话校验失败")
 }
 

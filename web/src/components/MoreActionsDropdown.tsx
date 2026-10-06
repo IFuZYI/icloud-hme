@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
-import { IconKey, IconMail } from './icons'
+import { IconKey, IconMail, IconRefresh } from './icons'
 
-export type AccountAction = 'cookies' | 'login' | 'password' | 'mailbox' | 'proxy' | 'aliases' | 'inbox'
+export type AccountAction = 'cookies' | 'login' | 'check' | 'password' | 'mailbox' | 'proxy' | 'aliases' | 'inbox'
 
 type ActionItem = {
   key: AccountAction
   label: string
   icon?: ReactNode
+  disabled?: boolean
 }
 
 const groups: Array<{ title: string; items: ActionItem[] }> = [
@@ -15,6 +16,7 @@ const groups: Array<{ title: string; items: ActionItem[] }> = [
     title: '认证',
     items: [
       { key: 'login', label: 'iCloud 登录', icon: <IconKey size={15} /> },
+      { key: 'check', label: '检测状态', icon: <IconRefresh size={15} /> },
       { key: 'cookies', label: '更新 Cookie', icon: <IconKey size={15} /> },
       { key: 'password', label: 'App 专用密码', icon: <IconKey size={15} /> },
     ],
@@ -34,9 +36,11 @@ interface MoreActionsDropdownProps {
   accountName: string
   onAction: (action: AccountAction) => void
   disabled?: boolean
+  /** 禁用「检测状态」项(账号无 Cookie 时无意义)。 */
+  checkDisabled?: boolean
 }
 
-export default function MoreActionsDropdown({ accountName, onAction, disabled = false }: MoreActionsDropdownProps) {
+export default function MoreActionsDropdown({ accountName, onAction, disabled = false, checkDisabled = false }: MoreActionsDropdownProps) {
   const [open, setOpen] = useState(false)
   const [position, setPosition] = useState({ top: 0, left: 0 })
   const buttonRef = useRef<HTMLButtonElement>(null)
@@ -118,16 +122,20 @@ export default function MoreActionsDropdown({ accountName, onAction, disabled = 
             <div className="account-action-group" key={group.title}>
               {index > 0 && <div className="account-action-divider" role="separator" />}
               <p>{group.title}</p>
-              {group.items.map((item) => (
-                <button
-                  type="button"
-                  key={item.key}
-                  role="menuitem"
-                  onClick={() => { setOpen(false); onAction(item.key) }}
-                >
-                  {item.icon}<span>{item.label}</span>
-                </button>
-              ))}
+              {group.items.map((item) => {
+                const itemDisabled = item.key === 'check' && checkDisabled
+                return (
+                  <button
+                    type="button"
+                    key={item.key}
+                    role="menuitem"
+                    disabled={itemDisabled}
+                    onClick={() => { setOpen(false); onAction(item.key) }}
+                  >
+                    {item.icon}<span>{item.label}</span>
+                  </button>
+                )
+              })}
             </div>
           ))}
         </div>,

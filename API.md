@@ -134,7 +134,7 @@ X-CSRF-Token: <token>
 ```
 
 - `name` 必填，去空白后 1–64 字符
-- `icloud_email` 必填，`net/mail` 校验且地址值必须等于输入
+- `icloud_email` 必填；服务端做规范化后校验：全角 `＠` 与首尾空白自动清理，显示名格式（`"名称" <a@b.com>`）提取出裸地址，多地址（逗号分隔）拒绝。存储的是规范化后的值
 - `host` 只能是 `icloud.com` 或 `icloud.com.cn`（默认 `icloud.com`）
 - `proxy` 可选，必须是 `http`/`https`/`socks5` URL
 - `cookies` 可选，支持 Cookie Header 字符串或 JSON 文本
@@ -220,6 +220,20 @@ X-CSRF-Token: <token>
 > ```
 >
 > 会话有效期 5 分钟；验证码错误时会话保留，可直接重试；成功或过期后会话失效。
+
+### 10b. 检测账号登录态
+
+```http
+POST /api/accounts/:id/check
+X-CSRF-Token: <token>
+```
+
+对账号现有 Cookie 做一次低风险 validate 探活（不创建/修改任何远端资源，不触发创建冷却），并把结果落库后返回脱敏 `Summary`。
+
+- 有效：`200`，`status=active`、`last_validated` 刷新、`last_error` 清空；顺带刷新别名计数
+- 失效：`401 UPSTREAM_UNAUTHORIZED`（会话已失效）或 `502 UPSTREAM_FAILURE`（其他上游故障）；`status=error`、`last_error` 记录原因（脱敏，不含 Cookie 值）
+- 无 Cookie：`400 VALIDATION_ERROR`（账号未配置 Cookie，无法检测）
+- 账号不存在：`404 ACCOUNT_NOT_FOUND`
 
 ### 11. 删除账号
 

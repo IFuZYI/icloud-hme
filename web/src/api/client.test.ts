@@ -89,6 +89,24 @@ describe('api client', () => {
     expect(onUnauthorized).not.toHaveBeenCalled()
   })
 
+  it('iCloud 密码错误(INVALID_CREDENTIALS 401)不触发全局登出', async () => {
+    // 回归背景: 登录对话框里输错 iCloud 密码返回 401 INVALID_CREDENTIALS,
+    // 全局登出会把管理员从对话框踢回管理台登录页, 无法重试。
+    const onUnauthorized = vi.fn()
+    server.use(
+      http.post('/api/accounts/acc_1/login/begin', () =>
+        HttpResponse.json(
+          { success: false, code: 'INVALID_CREDENTIALS', message: 'iCloud 邮箱或密码错误' },
+          { status: 401 },
+        ),
+      ),
+    )
+    await expect(
+      request('/api/accounts/acc_1/login/begin', { method: 'POST' }, onUnauthorized),
+    ).rejects.toMatchObject({ code: 'INVALID_CREDENTIALS', message: 'iCloud 邮箱或密码错误' })
+    expect(onUnauthorized).not.toHaveBeenCalled()
+  })
+
   it('GET 不带 CSRF,POST 自动带 CSRF', async () => {
     setCSRFToken('csrf-token-123')
     let getHeaders: Headers | undefined

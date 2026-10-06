@@ -151,7 +151,13 @@ func normalizeHost(host string) string {
 }
 
 // SetupURL 返回 iCloud setup 端点。
+//
+// 测试覆盖(authEndpointsOverride)优先: 否则 ValidateSession 等经
+// SetupURL 构造的请求会绕过 override 打到真实 Apple 域名。
 func (c *Client) SetupURL() string {
+	if authEndpointsOverride != nil && authEndpointsOverride.setupBase != "" {
+		return authEndpointsOverride.setupBase
+	}
 	if c.setupURL == "" {
 		suffix := "setup.icloud.com"
 		if c.Host == "icloud.com.cn" {

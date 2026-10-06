@@ -152,6 +152,8 @@ func (s *Server) register() {
 			authed.POST("/accounts/:id/password", csrfCheck(s.auth), s.setAppPasswordHandler)
 			authed.PUT("/accounts/:id/mailbox", csrfCheck(s.auth), s.setMailboxHandler)
 			authed.POST("/accounts/:id/login", csrfCheck(s.auth), s.loginAccountHandler)
+			// 手动检测登录态: 对现有 Cookie 做 validate 探活(参考 hme-manager check())。
+			authed.POST("/accounts/:id/check", csrfCheck(s.auth), s.checkAccountHandler)
 			// 两段式登录: begin → (otp/sms) → done,避免在单个 HTTP 请求内阻塞等验证码。
 			authed.POST("/accounts/:id/login/begin", csrfCheck(s.auth), s.loginBeginHandler)
 			authed.POST("/accounts/:id/login/otp", csrfCheck(s.auth), s.loginOTPHandler)
