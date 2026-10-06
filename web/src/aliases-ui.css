@@ -43,10 +43,12 @@
 .select-menu-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .aliases-toolbar .select-menu { flex-shrink: 0; }
 
-/* 按钮统一: 主按钮/次按钮全部继承全局 button.primary / 默认按钮,
-   这里只保留「图标+文字」排版与尺寸微调, 不再重复实现颜色/圆角/阴影 */
-.aliases-page .aliases-primary-btn { display: inline-flex; align-items: center; gap: 7px; min-height: 40px; padding: 0 16px; border: 0; border-radius: var(--radius-pill); background: var(--color-primary); color: #fff; font: inherit; font-size: var(--text-base); font-weight: 500; cursor: pointer; white-space: nowrap; transition: background var(--dur-base) var(--ease-apple), transform var(--dur-base) var(--ease-apple), box-shadow var(--dur-base) var(--ease-apple); }
-.aliases-page .aliases-primary-btn:hover:not(:disabled) { background: var(--color-primary-hover); box-shadow: var(--shadow-sm); }
+/* 按钮统一: 主按钮/次按钮全部走设计系统 token(明暗自动跟随),
+   这里只保留「图标+文字」排版与尺寸微调, 不重复实现圆角/阴影。
+   底色用 --color-primary-button 而非 --color-primary: 暗色模式下后者
+   上白字仅 3.02:1 (dogfood QA 实测), 按钮专用 token 更深一档。 */
+.aliases-page .aliases-primary-btn { display: inline-flex; align-items: center; gap: 7px; min-height: 40px; padding: 0 16px; border: 0; border-radius: var(--radius-pill); background: var(--color-primary-button, var(--color-primary)); color: #fff; font: inherit; font-size: var(--text-base); font-weight: 500; cursor: pointer; white-space: nowrap; transition: background var(--dur-base) var(--ease-apple), transform var(--dur-base) var(--ease-apple), box-shadow var(--dur-base) var(--ease-apple); }
+.aliases-page .aliases-primary-btn:hover:not(:disabled) { background: var(--color-primary-button-hover, var(--color-primary-hover)); box-shadow: var(--shadow-sm); }
 .aliases-page .aliases-primary-btn:active:not(:disabled) { transform: scale(0.97); }
 .aliases-page .aliases-primary-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .aliases-page .aliases-ghost-btn { display: inline-flex; align-items: center; gap: 7px; min-height: 40px; padding: 0 14px; border: 1px solid var(--color-border-strong); border-radius: var(--radius-pill); background: var(--color-bg-raised); color: var(--color-text); font: inherit; font-size: var(--text-base); cursor: pointer; white-space: nowrap; transition: background var(--dur-base) var(--ease-apple), border-color var(--dur-base) var(--ease-apple), transform var(--dur-base) var(--ease-apple); }

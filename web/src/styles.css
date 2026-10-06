@@ -10,10 +10,22 @@
   --color-primary-hover: #0077ed;
   --color-primary-soft: #e8f3ff;
   --color-primary-soft-border: #b9d9f7;
+  /* 主按钮底色(白字需 >=4.5:1): 浅色 #0071e3 白字 4.70:1 合规,
+     暗色模式在下方媒体查询块覆写为 #1d6fd6。
+     hover 用 #006edb (白字 4.94:1): 沿用旧值 #0077ed 仅 4.32:1。 */
+  --color-primary-button: #0071e3;
+  --color-primary-button-hover: #006edb;
+  /* skip-link 专用: 两种模式共用, 取白字 5.51:1 的深蓝 */
+  --color-skip-link: #1668c4;
 
   /* 语义色 */
-  --color-danger: #d93026;
-  --color-danger-hover: #c22b21;
+  /* 对比度: #c22b21 在 danger-soft(#fdeceb) 上 5.02:1、白底 5.74:1 (原 #d93026 仅 4.17:1)。 */
+  --color-danger: #c22b21;
+  --color-danger-hover: #a8231a;
+  /* 危险按钮底色(白字需 >=4.5:1): 浅色与 --color-danger 同值,
+     暗色模式在下方媒体查询块覆写。 */
+  --color-danger-button: #c22b21;
+  --color-danger-button-hover: #a8231a;
   --color-danger-soft: #fdeceb;
   --color-success: #1a7f37;
   --color-success-soft: #e6f4ea;
@@ -26,7 +38,9 @@
   --color-bg-raised: #ffffff;
   --color-text: #1d1d1f;
   --color-text-secondary: #6e6e73;
-  --color-text-tertiary: #86868b;
+  /* 对比度: #6a6a6f 在 bg-subtle(#f0f0f2) 上 4.73:1、白底 5.38:1,
+     满足 WCAG AA 4.5:1; 原 #86868b 仅 3.18:1 (dogfood QA 实测)。 */
+  --color-text-tertiary: #6a6a6f;
   --color-border: #dedee3;
   --color-border-strong: #c7c7cc;
 
@@ -84,12 +98,23 @@
 @media (prefers-color-scheme: dark) {
   :root {
     --color-primary: #2997ff;
+    /* 通用主色 hover (当前作为按钮 hover token 的回退值);
+       按钮实际 hover 色见 --color-primary-button-hover (白字对比度需求)。 */
     --color-primary-hover: #64b5ff;
+    /* 按钮专用底色: #2997ff 上白字仅 3.02:1、hover #64b5ff 仅 2.19:1;
+       按钮改用更深一档 (白字 4.89:1 / 4.58:1) 满足 WCAG AA。
+       --color-primary 保持亮色, 供焦点环/强调文字/边框等前景场景使用。 */
+    --color-primary-button: #1d6fd6;
+    --color-primary-button-hover: #1e74dc;
     --color-primary-soft: #102f4c;
     --color-primary-soft-border: #24557f;
 
     --color-danger: #ff6b60;
     --color-danger-hover: #ff857c;
+    /* 危险按钮专用底色: #ff6b60 上白字仅 2.79:1; 用 #c22b21 (5.74:1)。
+       --color-danger 保持亮色供错误文字/图标使用 (暗底上 6.03:1)。 */
+    --color-danger-button: #c22b21;
+    --color-danger-button-hover: #a8231a;
     --color-danger-soft: #4a2320;
     --color-success: #4cc26a;
     --color-success-soft: #1e3a28;
@@ -145,7 +170,10 @@ body {
   position: absolute;
   left: -9999px;
   top: 0;
-  background: var(--color-primary);
+  /* 对比度: 白字在暗色主色 #2997ff 上仅 3.02:1; 固定用深蓝 #1668c4
+     (白字 5.51:1) 满足 WCAG AA。浅色 #0071e3 本身 4.70:1 合规,
+     但此处两模式共用同一样式, 故取两者都安全的值。 */
+  background: var(--color-skip-link);
   color: #fff;
   padding: var(--space-2) var(--space-4);
   z-index: 1000;
@@ -351,25 +379,30 @@ button:disabled {
 }
 
 button.primary {
-  background: var(--color-primary);
+  /* 暗色模式下 --color-primary(#2997ff) 上白字仅 3.02:1;
+     用更深的按钮底色 #1d6fd6 (白字 4.89:1) 满足 WCAG AA。
+     浅色模式保持 #0071e3 (白字 4.7:1)。 */
+  background: var(--color-primary-button, var(--color-primary));
   border-color: transparent;
   color: #fff;
   box-shadow: var(--shadow-xs);
 }
 
 button.primary:hover:not(:disabled) {
-  background: var(--color-primary-hover);
+  background: var(--color-primary-button-hover, var(--color-primary-hover));
   box-shadow: var(--shadow-sm);
 }
 
 button.danger {
-  background: var(--color-danger);
+  /* 暗色模式下 --color-danger(#ff6b60) 上白字仅 2.79:1;
+     按钮底色用 --color-danger-button (暗色 #c22b21 白字 5.74:1)。 */
+  background: var(--color-danger-button, var(--color-danger));
   border-color: transparent;
   color: #fff;
 }
 
 button.danger:hover:not(:disabled) {
-  background: var(--color-danger-hover);
+  background: var(--color-danger-button-hover, var(--color-danger-hover));
 }
 
 button.ghost {

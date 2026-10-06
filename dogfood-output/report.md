@@ -2,7 +2,7 @@
 
 **Target:** http://127.0.0.1:8081 (iCloud HME 管理台)
 **Date:** 2026-10-06
-**Scope:** 全站探索性 QA × 三轮（第一轮：日期选择器与筛选栏；第二轮：全量——全部页面 × 3 视口 × 有数据状态 × 对话框/弹层；第三轮：日期面板年份视图——用户截图定位）
+**Scope:** 全站探索性 QA × 四轮（第一轮：日期选择器与筛选栏；第二轮：全量——全部页面 × 3 视口 × 有数据状态 × 对话框/弹层；第三轮：日期面板年份视图——用户截图定位；第四轮：全量 UI 复测——6 视口矩阵 + 交互深度 + 对比度/暗色模式审计）
 **Tester:** Hermes Agent (automated exploratory QA)
 
 ---
@@ -15,19 +15,83 @@
 
 **第三轮（1 项 Critical 根因 + 1 项 Medium，全部修复）：** 全局 `table { min-width: 920px }` 泄漏进 antd 日期面板（面板内日历/年份网格也是 `<table>`），把网格撑到 920px → 年份视图第三列（2021/2024/2027）被裁掉。用户截图即此问题。
 
+**第四轮（1 项 High + 1 项 Medium 系统性问题，全部修复）：** 暗色模式下 antd 组件（DatePicker 等）保持白色硬编码、与全黑页面严重割裂；设计系统多个文字 token 低于 WCAG AA 4.5:1（tertiary 3.18:1、danger 4.17:1、暗色主按钮白字 3.02:1、skip-link 3.02:1）。
+
 | 轮次 | 🔴 Critical | 🟠 High | 🟡 Medium | 🔵 Low | 合计 |
 |------|------------|---------|-----------|--------|------|
 | 第一轮 | 0 | 2 | 2 | 3 | 7（全部修复/驳回） |
 | 第二轮 | 0 | 2 | 2 | 4 | 8（7 修复 + 1 驳回） |
 | 第三轮 | 1 | 0 | 1 | 0 | 2（全部修复） |
+| 第四轮 | 0 | 1 | 1 | 0 | 2（全部修复） |
 
-**Overall Assessment:** 三轮共 17 项发现。第三轮的关键教训：**antd 面板经 portal 渲染到 body，项目全局的元素级选择器（`table`/`th`/`td`/`tbody tr`/`button`）会泄漏进面板内部**，造成面板布局损坏。此前的多轮「移动端补丁」（`min-width: 0 !important` 等）都是在治标——真正的根因是全局规则没有作用域隔离。
+**Overall Assessment:** 四轮共 19 项发现。第三轮的关键教训：**antd 面板经 portal 渲染到 body，项目全局的元素级选择器（`table`/`th`/`td`/`tbody tr`/`button`）会泄漏进面板内部**，造成面板布局损坏。第四轮的关键教训：**antd 主题与项目 CSS 的暗色机制是两套**——CSS 走 `@media (prefers-color-scheme: dark)`，而 antd 的 ConfigProvider 需要 JS 显式传入 `darkAlgorithm`，只做前者会让 antd 组件在暗色页面上保持白底；且设计 token 的对比度需要实测而非目测（`#86868b` 看似「浅灰正常」，实测仅 3.18:1）。
 
-**方法论说明（三轮均严格执行「measure, don't eyeball」）：** vision 模型在三轮中共给出 **12 次与 DOM 测量直接矛盾的描述**（如声称"年份 2028-2030 缺失"而 DOM 实测 12 格全在、"日历与时间列重叠"而实测间隙 18px 等）。所有结论均以 `getBoundingClientRect()` / `getComputedStyle()` / CDP `CSS.getMatchedStylesForNode` 的测量为准；vision 仅用于初筛可疑区域，不用于定量判断。
+**方法论说明（四轮均严格执行「measure, don't eyeball」）：** vision 模型在四轮中共给出 **12 次与 DOM 测量直接矛盾的描述**（如声称"年份 2028-2030 缺失"而 DOM 实测 12 格全在、"日历与时间列重叠"而实测间隙 18px 等）。所有结论均以 `getBoundingClientRect()` / `getComputedStyle()` / CDP `CSS.getMatchedStylesForNode` 的测量为准；vision 仅用于初筛可疑区域，不用于定量判断。第四轮的对比度结论全部用 WCAG 相对亮度公式计算（含 alpha 合成）。
 
 ---
 
-## 第三轮 Issues（本轮新增）
+## 第四轮 Issues（本轮新增）
+
+### Issue #18: 暗色模式下 antd 组件保持白色硬编码，与全黑页面严重割裂
+
+| Field | Value |
+|-------|-------|
+| **Severity** | 🟠 High |
+| **Category** | Visual |
+| **URL** | `/inbox`（所有含 antd 组件的页面） |
+
+**Description:**
+项目的暗色模式由 CSS `@media (prefers-color-scheme: dark)` 驱动（`styles.css` 中完整的暗色 token 块），但 `App.tsx` 的 antd `ConfigProvider` 主题是**硬编码的浅色值**（`colorBorder: '#c7c7cc'`、`colorText: '#1d1d1f'`，无 `algorithm`）。结果：暗色系统下页面背景是纯黑，而 DatePicker 输入框是纯白（实测 `rgb(255,255,255)`），日期面板也是白底——vision 复核描述为「就像直接贴上去的补丁」。
+
+**Steps to Reproduce:**
+1. 系统切换到暗色模式（或 DevTools 模拟 `prefers-color-scheme: dark`）
+2. 打开 `/inbox`
+3. 观察：页面全黑，但「开始时间/结束时间」输入框和日期面板是白底
+
+**Expected:** antd 组件跟随系统暗色（深色容器、浅色文字）。
+
+**Actual:** antd 组件保持白底黑字，与页面割裂。
+
+**修复：**
+1. 新增 `web/src/antdTheme.ts` — `buildAntdTheme(dark)` 在暗色时启用 `antdTheme.darkAlgorithm` 并切换暗色 token（`colorBgContainer: #1d1d1f`、`colorText: #f5f5f7`、`colorBorder: #48484a`，与 `styles.css` 暗色块一致）。
+2. 新增 `web/src/usePrefersDark.ts` — 用 `useSyncExternalStore` 订阅 `matchMedia('(prefers-color-scheme: dark)')`（React 官方推荐的外部数据源订阅方式；初版 `useState+useEffect` 被 lint 判定 `setState synchronously within an effect`，已重写）。
+3. `App.tsx` 接入：`const dark = usePrefersDark()` → `theme={buildAntdTheme(dark)}`。
+
+**验证：** 暗色下 DatePicker 背景 `rgb(29,29,31)`、文字 `rgb(245,245,247)`、面板背景 `rgb(31,31,31)`；浅色下保持白色不变。测试 `web/src/antdTheme.test.ts`（3 用例）。
+
+---
+
+### Issue #19: 设计系统多处文字对比度低于 WCAG AA 4.5:1
+
+| Field | Value |
+|-------|-------|
+| **Severity** | 🟡 Medium |
+| **Category** | Accessibility |
+| **URL** | 全站（`/accounts`、`/logs`、`/inbox`、`/aliases` 均有命中） |
+
+**Description:**
+用 WCAG 相对亮度公式（含 alpha 合成）全站扫描后，发现 5 处系统性对比度不足：
+
+| 元素 | 原值 | 实测对比度 | 修复后 | 修复值对比度 |
+|------|------|-----------|--------|-------------|
+| `--color-text-tertiary` 表格表头/次要文字 | `#86868b` | 3.18:1 (bg-subtle) | `#6a6a6f` | 4.73:1 |
+| `--color-danger` 错误文字 | `#d93026` | 4.17:1 (danger-soft) | `#c22b21` | 5.02:1 |
+| 暗色主按钮（白字） | `#2997ff` | 3.02:1 | `#1d6fd6` | 4.89:1 |
+| 暗色主按钮 hover（白字） | `#64b5ff` | 2.19:1 | `#1e74dc` | 4.58:1 |
+| skip-link（白字） | `#0071e3`/`#2997ff` | 4.70:1 / 3.02:1 | `#1668c4` | 5.51:1 |
+
+**修复：**
+- `styles.css`：浅色 token 调整（tertiary、danger）；暗色块新增按钮专用 token `--color-primary-button` / `--color-primary-button-hover` / `--color-danger-button` / `--color-danger-button-hover`（**只影响按钮**，`--color-primary`/`--color-danger` 保持亮色供焦点环/错误文字/图标等前景场景使用）；skip-link 固定深蓝 `--color-skip-link`。
+- `antdTheme.ts`：`colorLink` 暗色用 `#64b5ff`（antd 暗色算法默认 link 色在深底上仅 3.18:1）。
+- `aliases-ui.css`：`.aliases-primary-btn` 迁移到按钮 token（审查发现的同类遗漏——首轮修复只改了 `button.primary`，别名页自定义主按钮未覆盖，暗色下白字仍 3.02:1）。
+
+**验证：** 浅色 `/inbox` 全页扫描 0 命中；暗色下 `button.primary`/`button.danger`/`.aliases-primary-btn` 实测按钮底色分别为 `rgb(29,111,214)`（4.89:1）、`rgb(194,43,33)`（5.74:1）、`rgb(29,111,214)`，浅色对应 `rgb(0,113,227)`/`rgb(194,43,33)` 不回归。日历相邻月份的灰日期（antd 刻意弱化样式）保留，非缺陷。
+
+**范围说明（审查后修正）：** 首轮扫描仅在 `/inbox` 页面执行，未覆盖 `/aliases` 的自定义主按钮与 `button.danger`——独立审查员发现此遗漏后已一并修复（同类问题应在全仓 grep 后一次修完，见「方法论」）。
+
+---
+
+## 第三轮 Issues（保留）
 
 ### Issue #16: 全局 `table { min-width: 920px }` 泄漏进 antd 日期面板，年份/日期网格被撑爆裁切
 
