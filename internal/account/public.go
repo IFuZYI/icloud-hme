@@ -106,20 +106,49 @@ func validateHost(host string) (string, error) {
 	return host, nil
 }
 
-// validateEmail 校验邮箱:用 net/mail.ParseAddress 并要求地址值等于输入。
-func validateEmail(email string) error {
-	email = strings.TrimSpace(email)
-	if email == "" {
-		return fmt.Errorf("iCloud 邮箱不能为空")
+// normalizeEmail 规范化并校验邮箱地址。
+//
+// 处理真实世界的输入瑕疵(用户报障「邮箱地址格式无效」的来源):
+//   - 全角＠(中文输入法)——net/mail.ParseAddress 直接拒绝,先转半角
+//   - 首尾空白,含全角空格
+//   - 显示名格式 `"名称" <a@b.com>`——提取出裸地址
+//
+// 校验规则: 必须是单一地址, 且解析结果包含 @ 与域名点号之外,
+// 至少要有本地部分与域名(裸 `a@b` 也接受——iCloud 短域名历史遗留)。
+// 返回规范化后的地址; 失败返回错误。
+func normalizeEmail(email string) (string, error) {
+	// 全角＠与全角空格 → 半角(中文输入法常见)
+	cleaned := strings.ReplaceAll(email, "＠", "@")
+	cleaned = strings.ReplaceAll(cleaned, "\u3000", " ")
+	cleaned = strings.TrimSpace(cleaned)
+	if cleaned == "" {
+		return "", fmt.Errorf("iCloud 邮箱不能为空")
 	}
-	addr, err := mail.ParseAddress(email)
+
+	// 先按裸地址解析(绝大多数情况); 失败再试显示名格式。
+	addr, err := mail.ParseAddress(cleaned)
 	if err != nil {
-		return fmt.Errorf("邮箱地址格式无效")
+		// 逗号分隔的多个地址: ParseAddress 对 "a@b, c@d" 报
+		// "expected single address", 此时明确拒绝——无法确定用哪个登录。
+		if strings.Contains(cleaned, ",") {
+			return "", fmt.Errorf("邮箱地址格式无效: 只能填写一个地址")
+		}
+		return "", fmt.Errorf("邮箱地址格式无效")
 	}
-	if addr.Address != email {
-		return fmt.Errorf("邮箱地址格式无效")
+	address := strings.TrimSpace(addr.Address)
+	if address == "" || !strings.Contains(address, "@") {
+		return "", fmt.Errorf("邮箱地址格式无效")
 	}
-	return nil
+	local, domain, _ := strings.Cut(address, "@")
+	if local == "" || domain == "" {
+		return "", fmt.Errorf("邮箱地址格式无效")
+	}
+	return address, nil
+}
+
+// validateEmail 校验邮箱; 校验通过时返回规范化后的值。
+func validateEmail(email string) (string, error) {
+	return normalizeEmail(email)
 }
 
 // validateProxy 校验代理;空表示清除。

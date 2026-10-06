@@ -2,7 +2,6 @@ package account
 
 import (
 	"encoding/json"
-	"net/mail"
 	"strings"
 	"testing"
 )
@@ -83,20 +82,26 @@ func TestAddAccountWithInputValidation(t *testing.T) {
 	}
 }
 
-// TestAddAccountWithInputValidatesEmailFormat 验证邮箱必须等于解析后的地址。
+// TestAddAccountWithInputValidatesEmailFormat 验证邮箱规范化后的行为。
+//
+// 旧行为: 显示名格式 `"Name" <a@b.com>` 被拒绝(要求解析结果等于输入)。
+// 新行为(dogfood 修复): 提取出裸地址——用户从通讯录粘贴是常见操作;
+// 但多个地址(逗号分隔)仍然拒绝, 因为无法确定用哪个登录。
 func TestAddAccountWithInputValidatesEmailFormat(t *testing.T) {
 	dir := t.TempDir()
 	m, err := NewManager(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = m.AddAccountWithInput(AddAccountInput{Name: "主号", ICloudEmail: `"Quoted" <a@icloud.com>`})
-	if err == nil {
-		t.Fatal("期望带显示名的邮箱被拒绝")
+	sum, err := m.AddAccountWithInput(AddAccountInput{Name: "主号", ICloudEmail: `"Quoted" <a@icloud.com>`})
+	if err != nil {
+		t.Fatalf("显示名格式应被提取而非拒绝: %v", err)
 	}
-	addr, err := mail.ParseAddress("a@icloud.com")
-	if err != nil || addr.Address != "a@icloud.com" {
-		t.Fatalf("测试前置错误: %v %q", err, addr)
+	if sum.ICloudEmail != "a@icloud.com" {
+		t.Fatalf("提取的邮箱 = %q, 期望 a@icloud.com", sum.ICloudEmail)
+	}
+	if _, err := m.AddAccountWithInput(AddAccountInput{Name: "多地址", ICloudEmail: "a@icloud.com, b@icloud.com"}); err == nil {
+		t.Fatal("多个地址应当被拒绝")
 	}
 }
 

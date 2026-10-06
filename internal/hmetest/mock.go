@@ -21,6 +21,8 @@ type Server struct {
 
 	// RequireOTP 为 true 时 signin/complete 返回 409,必须先提交验证码。
 	RequireOTP bool
+	// FailValidate 为 true 时 /validate 返回 401(模拟 Cookie 失效)。
+	FailValidate bool
 	// ExpectedCode 是 securitycode 端点的正确验证码。
 	ExpectedCode string
 	// InitC 是 signin/init 下发的 SRP 会话标识。
@@ -219,9 +221,24 @@ func New(t testing.TB) *Server {
 	mux.HandleFunc("/setup/ws/1/validate", func(w http.ResponseWriter, r *http.Request) {
 		m.mu.Lock()
 		m.ValidateHits++
+		fail := m.FailValidate
 		m.mu.Unlock()
+		if fail {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"invalid session"}`))
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"webservices":{"premiummailsettings":{"url":"https://p01-maildomainws.icloud.com/v2/hme"}},"dsInfo":{"dsid":"12345","appleId":"owner@example.com","primaryEmail":"owner@example.com"}}`))
+		// serviceURL 指回 mock 自身(不含路径后缀, 与真实 Apple 响应同构:
+		// 代码会拼 /v2/hme/list、/v1/hme/generate 等)。避免测试打到真实
+		// p01-maildomainws 域名(3s+ 网络超时, 且违背「测试不访问网络」)。
+		serviceURL := m.URL
+		_, _ = w.Write([]byte(`{"webservices":{"premiummailsettings":{"url":"` + serviceURL + `"}},"dsInfo":{"dsid":"12345","appleId":"owner@example.com","primaryEmail":"owner@example.com"}}`))
+	})
+
+	mux.HandleFunc("/v2/hme/list", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true,"result":{"hmeEmails":[]}}`))
 	})
 
 	srv := httptest.NewServer(mux)

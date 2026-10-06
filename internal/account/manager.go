@@ -224,7 +224,8 @@ func (m *Manager) AddAccountWithInput(input AddAccountInput) (Summary, error) {
 	if err != nil {
 		return Summary{}, err
 	}
-	if err := validateEmail(input.ICloudEmail); err != nil {
+	email, err := validateEmail(input.ICloudEmail)
+	if err != nil {
 		return Summary{}, err
 	}
 	host, err := validateHost(input.Host)
@@ -235,7 +236,7 @@ func (m *Manager) AddAccountWithInput(input AddAccountInput) (Summary, error) {
 	if err != nil {
 		return Summary{}, err
 	}
-	acc, err := m.newAccount(name, input.ICloudEmail, input.CookieInput, host, proxy)
+	acc, err := m.newAccount(name, email, input.CookieInput, host, proxy)
 	if err != nil {
 		return Summary{}, err
 	}
@@ -329,10 +330,10 @@ func (m *Manager) UpdateMetadata(id string, input UpdateAccountInput) (Summary, 
 		name = &v
 	}
 	if input.ICloudEmail != nil {
-		if err := validateEmail(*input.ICloudEmail); err != nil {
+		v, err := validateEmail(*input.ICloudEmail)
+		if err != nil {
 			return Summary{}, err
 		}
-		v := strings.TrimSpace(*input.ICloudEmail)
 		email = &v
 	}
 	if input.Host != nil {
@@ -571,6 +572,87 @@ func (m *Manager) persistLogin(id string, client *hme.Client) (Summary, error) {
 		return Summary{}, fmt.Errorf("账号不存在: %s", id)
 	}
 	return cur.Summary(), nil
+}
+
+// CheckAccount 检测指定账号的登录态是否仍然有效。
+//
+// 语义对齐参考项目 hme-manager 的 check(): 对现有 Cookie 做一次低风险的
+// validate 探活(不创建/不修改任何远端资源), 并把结果落库——
+//   - 有效: status=active、last_validated 刷新、last_error 清空
+//   - 失效: status=error、last_error 记录可读原因(绝不写 Cookie 值)
+//
+// 与 UpdateCookies 的区别: 不接收新 Cookie, 纯粹探测当前凭据;
+// 与 HME 业务调用的区别: 不触发创建冷却, 可随时手动执行。
+func (m *Manager) CheckAccount(id string) (Summary, error) {
+	m.mu.RLock()
+	acc, ok := m.accounts[id]
+	var snap *Account
+	if ok {
+		snap = copyAccount(acc)
+	}
+	m.mu.RUnlock()
+	if !ok {
+		return Summary{}, fmt.Errorf("账号不存在: %s", id)
+	}
+	if len(snap.Cookies) == 0 {
+		return Summary{}, fmt.Errorf("账号未配置 Cookie，无法检测登录状态")
+	}
+	if snap.Host == "" {
+		snap.Host = "icloud.com"
+	}
+
+	client, err := hme.NewClient(snap.Cookies, snap.Host, snap.Proxy, false)
+	var checkErr error
+	if err != nil {
+		checkErr = fmt.Errorf("创建客户端失败: %w", err)
+	} else if err := client.ValidateSession(); err != nil {
+		checkErr = err
+	}
+
+	m.mu.Lock()
+	cur, ok := m.accounts[id]
+	if !ok {
+		m.mu.Unlock()
+		return Summary{}, fmt.Errorf("账号不存在: %s", id)
+	}
+	if checkErr == nil {
+		// validate 成功响应可能刷新 Cookie, 保存最新值。
+		cur.Cookies = cloneCookies(client.Cookies)
+		cur.Status = "active"
+		cur.LastValidated = time.Now().Format(time.RFC3339)
+		cur.LastError = ""
+		if info := client.AccountInfo(); info != nil {
+			cur.RealEmail = firstNonEmpty(info.AppleID, info.PrimaryEmail)
+			if cur.ICloudEmail == "" {
+				cur.ICloudEmail = deriveICloudEmail(info)
+			}
+		}
+	} else {
+		// 失败响应也可能携带 Set-Cookie, 尽量保留服务端最新状态。
+		if client != nil {
+			cur.Cookies = cloneCookies(client.Cookies)
+		}
+		cur.Status = "error"
+		cur.LastError = truncate("登录态检测失败: "+checkErr.Error(), 300)
+	}
+	saveErr := m.save()
+	result := cur.Summary()
+	m.mu.Unlock()
+	if saveErr != nil {
+		return Summary{}, saveErr
+	}
+	if checkErr != nil {
+		return result, checkErr
+	}
+
+	// 检测通过后顺带刷新别名计数(失败不影响检测结果)。
+	if aliases, listErr := client.ListAliases(); listErr == nil {
+		_ = m.UpdateAliasCounts(id, aliases)
+		if updated, ok := m.GetAccount(id); ok {
+			result = updated.Summary()
+		}
+	}
+	return result, nil
 }
 
 // HMELoginSession 把 *hme.Client 的两段式登录与账号持久化绑在一起。

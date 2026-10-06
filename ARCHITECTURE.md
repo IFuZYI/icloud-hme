@@ -120,6 +120,7 @@ Gin Server /api ─────────────────────�
 | POST | `/api/accounts/:id/password` | 设置并验证 iCloud App Password（写） |
 | PUT | `/api/accounts/:id/mailbox` | 设置并验证外部 IMAP 收件邮箱（写） |
 | POST | `/api/accounts/:id/login` | 使用 iCloud 密码与可选 OTP 获取 Cookie（写） |
+| POST | `/api/accounts/:id/check` | 检测登录态: 对现有 Cookie 做 validate 探活并落库状态（写） |
 | DELETE | `/api/accounts/:id` | 删除账号（写） |
 
 ### 别名与自动任务
