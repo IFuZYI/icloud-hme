@@ -548,6 +548,19 @@
     max-width: 100% !important;
   }
 
+  /* 年份/月份视图: 默认固定 351px, 在撑满的 bottom-sheet 里会左对齐、
+     右侧留一大片空白。撑满整宽, 与日期视图保持一致、格子也更好点。 */
+  .ant-picker-dropdown .ant-picker-year-panel,
+  .ant-picker-dropdown .ant-picker-month-panel,
+  .ant-picker-dropdown .ant-picker-year-panel .ant-picker-body,
+  .ant-picker-dropdown .ant-picker-month-panel .ant-picker-body,
+  .ant-picker-dropdown .ant-picker-year-panel .ant-picker-content,
+  .ant-picker-dropdown .ant-picker-month-panel .ant-picker-content {
+    width: 100% !important;
+    min-width: 0 !important;
+    max-width: 100% !important;
+  }
+
   .ant-picker-dropdown .ant-picker-time-panel .ant-picker-content {
     display: flex;
     flex-direction: row;
