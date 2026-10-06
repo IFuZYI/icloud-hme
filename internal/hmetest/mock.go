@@ -47,8 +47,11 @@ type Server struct {
 	// ConflictWithToken 为 true 时上述 409 附带 X-Apple-Session-Token,
 	// 表示 Apple 实际已接受验证码(rclone #9488)。
 	ConflictWithToken bool
-	SMSSendBody       map[string]any
-	SMSVerifyBody     map[string]any
+	// AuthStateBody 覆盖 /appleauth/auth 的响应体(测试各条手机号解析路径)。
+	// 为空时用默认的顶层 phoneNumberVerification 结构。
+	AuthStateBody string
+	SMSSendBody   map[string]any
+	SMSVerifyBody map[string]any
 }
 
 // New 启动 mock 服务,测试结束自动关闭。
@@ -216,9 +219,13 @@ func New(t testing.TB) *Server {
 
 	mux.HandleFunc("/appleauth/auth", func(w http.ResponseWriter, r *http.Request) {
 		m.mu.Lock()
+		body := m.AuthStateBody
 		m.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"phoneNumberVerification":{"trustedPhoneNumbers":[{"id":2,"numberWithDialCode":"+86 138****1234"}]}}`))
+		if body == "" {
+			body = `{"phoneNumberVerification":{"trustedPhoneNumbers":[{"id":2,"numberWithDialCode":"+86 138****1234"}]}}`
+		}
+		_, _ = w.Write([]byte(body))
 	})
 
 	mux.HandleFunc("/appleauth/auth/verify/phone", func(w http.ResponseWriter, r *http.Request) {
