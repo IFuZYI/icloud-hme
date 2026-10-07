@@ -89,16 +89,21 @@ type AliasTask struct {
 	// Timezone 为调度使用的 IANA 时区名（如 America/Denver），跟随账号代理出口
 	// IP 的地理时区；空串表示使用服务器本地时区。作息窗口、日/周周期与每日配额
 	// 边界都按该时区计算。
-	Timezone     string `json:"timezone,omitempty"`
-	MaxTotal     int    `json:"max_total"`
-	CreatedCount int    `json:"created_count"`
-	NextNumber   int    `json:"next_number"`
-	DailyCount   int    `json:"daily_count"`
-	DailyDate    string `json:"daily_date,omitempty"`
-	LastRun      string `json:"last_run,omitempty"`
-	LastSuccess  int    `json:"last_success"`
-	LastError    string `json:"last_error,omitempty"`
-	NextRun      string `json:"next_run,omitempty"`
+	Timezone string `json:"timezone,omitempty"`
+	// QuotaTimezone 记录当前周期 TodayQuota 折算所用的时区（任务/代理 IP 口径）。
+	// 空串表示该配额尚未按任务时区折算（旧版本数据以服务器本地时区折算，或
+	// 时区尚未解析）——首次 runOnce 会按任务时区重算一次并写入此标记；之后
+	// 时区再变化不再重算，避免把「首日按剩余时间折算」的语义泄漏到后续周期。
+	QuotaTimezone string `json:"quota_timezone,omitempty"`
+	MaxTotal      int    `json:"max_total"`
+	CreatedCount  int    `json:"created_count"`
+	NextNumber    int    `json:"next_number"`
+	DailyCount    int    `json:"daily_count"`
+	DailyDate     string `json:"daily_date,omitempty"`
+	LastRun       string `json:"last_run,omitempty"`
+	LastSuccess   int    `json:"last_success"`
+	LastError     string `json:"last_error,omitempty"`
+	NextRun       string `json:"next_run,omitempty"`
 }
 
 type aliasTaskInput struct {
@@ -214,6 +219,9 @@ func normalizeAliasTaskAt(in aliasTaskInput, now time.Time) (AliasTask, error) {
 		task.Mode = taskModeAuto
 		task.DailyLimit = daily
 		// 今日配额: 按创建时刻在当天剩余时间折算(中午启动只生成半天目标)。
+		// 注意此刻任务时区未知, 先按服务器本地时区折算占位; 首次 runOnce
+		// 解析出代理 IP 时区后会按任务时区重新折算(见 refreshTimezone),
+		// 保证「今日总数」与计划安排同口径。
 		task.TodayQuota = firstDayQuota(daily, now)
 		// 「日」边界用画像的作息周期(睡醒→睡醒), 与 resetDailyCount 口径一致:
 		// 写日历日会让跨零点作息(如夜猫子)的首次 runOnce 被判为跨周期,
@@ -466,6 +474,25 @@ func (m *autoTaskManager) taskListLocked() []AliasTask {
 func (m *autoTaskManager) list() []AliasTask {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// 展示与调度同口径: 「今日已生成 / 今日总数」按任务(代理 IP)时区的作息
+	// 周期惰性刷新——跨周期后即使尚未触发 runOnce(任务暂停、睡眠期), 列表
+	// 也必须显示新周期的计数与配额, 否则显示与计划安排对不上; 尚未按任务
+	// 时区折算的配额(旧版本数据)也在读取时一次性迁移。
+	now := m.nowFunc()
+	changed := false
+	for id, t := range m.tasks {
+		if updated := resetDailyCount(t, now); updated != t {
+			m.tasks[id] = updated
+			changed = true
+		}
+		if migrated, ok := migrateQuotaTimezone(m.tasks[id], now); ok {
+			m.tasks[id] = migrated
+			changed = true
+		}
+	}
+	if changed {
+		_ = m.saveLocked()
+	}
 	return m.taskListLocked()
 }
 func (m *autoTaskManager) get(id string) (AliasTask, bool) {
@@ -555,6 +582,7 @@ func (m *autoTaskManager) update(id string, in aliasTaskInput) (AliasTask, error
 	n.CreatedCount = old.CreatedCount
 	n.DailyCount = old.DailyCount
 	n.DailyDate = old.DailyDate
+	n.QuotaTimezone = old.QuotaTimezone
 	if n.Mode == taskModeAuto {
 		// 周期日必须按任务时区计算(与 resetDailyCount 的 now.In(loc) 口径一致):
 		// 用服务器本地时区会在跨时区任务上误判跨周期, 编辑即重置当日计数。
@@ -567,9 +595,13 @@ func (m *autoTaskManager) update(id string, in aliasTaskInput) (AliasTask, error
 			n.TodayQuota = old.TodayQuota
 		} else {
 			// 跨周期编辑(旧任务停在上一周期或模式切换): 按当前时刻重新折算,
-			// 旧计数属于旧周期, 归零。
+			// 旧计数属于旧周期, 归零。折算必须按任务时区 —— 与调度及展示同
+			// 口径(用服务器本地时区会让「今日总数」与计划安排对不上, 用户实测),
+			// 并写入 QuotaTimezone 标记(避免旧版本迁移逻辑重复折算)。
 			n.DailyDate = cycle
 			n.DailyCount = 0
+			n.TodayQuota = firstDayQuota(n.DailyLimit, m.nowFunc().In(loc))
+			n.QuotaTimezone = n.Timezone
 		}
 	}
 	n.LastRun = old.LastRun
@@ -775,7 +807,33 @@ func (m *autoTaskManager) runAutoLoop(id string, stop, done chan struct{}, first
 	}
 }
 
-// refreshTimezone 从后端刷新任务的调度时区(跟随账号代理出口 IP 的地理时区)。
+// migrateQuotaTimezone 对配额尚未按任务时区折算过的自主任务做一次性口径
+// 修正(见 refreshTimezone): 满额配额直接打标记(已跨过首日, 或首日折算恰好
+// 满额); 折算值按任务时区重算, 并钳制到不低于当日已创建数(解析失败期间
+// 可能已按本地时区创建), 保证剩余不为负。返回更新后的任务与是否发生变化。
+func migrateQuotaTimezone(t AliasTask, now time.Time) (AliasTask, bool) {
+	if t.Mode != taskModeAuto || t.QuotaTimezone != "" || t.Timezone == "" {
+		return t, false
+	}
+	if t.TodayQuota < t.DailyLimit {
+		q := firstDayQuota(t.DailyLimit, now.In(taskTimezone(t.Timezone)))
+		if q < t.DailyCount {
+			q = t.DailyCount
+		}
+		t.TodayQuota = q
+	}
+	t.QuotaTimezone = t.Timezone
+	return t, true
+}
+
+// refreshTimezone 从后端刷新任务的调度时区(跟随账号代理出口 IP 的地理时区),
+// 并完成「首日配额口径」迁移。
+//
+// 创建任务时任务时区未知, TodayQuota 先按服务器本地时区折算占位; 首次拿到
+// 任务时区后按任务时区重新折算一次(与计划安排同口径)——旧版本数据(配额已按
+// 服务器时区折算、无 quota_timezone 标记)也在此时一次性修正。此后时区再变化
+// (如更换代理)只重写周期日, 不再动配额, 避免把「首日按剩余时间折算」的语义
+// 泄漏到后续周期; 满额配额(已跨过首日)直接打标记不折算。
 //
 // 后端(account.Manager.TimezoneFor)按账号缓存解析结果: 首次调用解析并缓存,
 // 之后是纯内存读取; 代理变更时缓存被清除, 下次调用自动重新解析。
@@ -789,20 +847,41 @@ func (m *autoTaskManager) refreshTimezone(id string) {
 		return
 	}
 	tz, err := m.backend.TimezoneFor(t.AccountID)
-	if err != nil || tz == "" || tz == t.Timezone {
+	if err != nil || tz == "" {
+		return
+	}
+	// 配额迁移待办: 自主任务的 TodayQuota 尚未按任务时区折算过(旧版本数据
+	// 无标记, 或任务时区还未解析)。此时即使时区没变也要跑一次迁移。
+	quotaPending := t.Mode == taskModeAuto && t.QuotaTimezone == ""
+	if tz == t.Timezone && !quotaPending {
 		return
 	}
 	m.mu.Lock()
 	if cur, ok := m.tasks[id]; ok {
+		tzChanged := tz != cur.Timezone
 		cur.Timezone = tz
-		// 时区从空(本地)解析为具体时区后, DailyDate 的旧字符串按本地时区表达;
-		// 若不重写, 下一次 resetDailyCount 按新时区算出不同周期日 → 误判跨周期,
-		// 把首日折算的配额重置为满额、计数清零(审查探针实测)。这里只把周期日
-		// 重写为新时区口径的当前值, 保留 DailyCount/TodayQuota 快照——
-		// 宁可在真实跨周期时晚一拍重置, 也不误重置(账号级 50/天安全上限兜底)。
-		if cur.Mode == taskModeAuto && cur.DailyDate != "" {
-			cur.DailyDate = personaByName(cur.Persona).cycleDateAt(m.nowFunc().In(taskTimezone(tz)))
+		if tzChanged && cur.DailyDate != "" {
+			// 时区解析/变化后 DailyDate 的口径修正: 旧字符串按旧时区表达,
+			// 重写为新时区口径的当前值, 避免下一次 resetDailyCount 因两地
+			// 日期不同而误判跨日/跨周期, 把计数清零、首日折算的配额重置
+			// (审查探针实测)。
+			//
+			// 仅当旧日期「在旧时区下也是当前日/周期」时才重写: 若任务停用
+			// 了数日(日期已过期), 重写会掩盖真实的跨日重置——计数不清零
+			// (回归测试 TestFirstResolveStaleCycleStillResets /
+			// TestScheduledStaleDateStillResetsOnTimezoneChange)。
+			// 过期时保留旧值, 让 resetDailyCount 按新时区正常重置。
+			oldLoc := taskTimezone(t.Timezone) // 刷新前的时区
+			if cur.Mode == taskModeAuto {
+				p := personaByName(cur.Persona)
+				if p.cycleDateAt(m.nowFunc().In(oldLoc)) == cur.DailyDate {
+					cur.DailyDate = p.cycleDateAt(m.nowFunc().In(taskTimezone(tz)))
+				}
+			} else if taskDate(m.nowFunc().In(oldLoc)) == cur.DailyDate {
+				cur.DailyDate = taskDate(m.nowFunc().In(taskTimezone(tz)))
+			}
 		}
+		cur, _ = migrateQuotaTimezone(cur, m.nowFunc())
 		m.tasks[id] = cur
 		_ = m.saveLocked()
 	}
@@ -835,7 +914,8 @@ func (m *autoTaskManager) runOnce(id string) AliasTask {
 			// 自主任务：睡到下一个睡醒（次日窗口起点），附加少量抖动。
 			t.NextRun = now.Add(m.nextAutoDelay(t, now)).Format(time.RFC3339)
 		} else {
-			t.NextRun = nextDailyRun(now).Format(time.RFC3339)
+			// 定时任务: 等到任务时区的次日零点(与每日边界同口径)。
+			t.NextRun = nextDailyRun(now, taskTimezone(t.Timezone)).Format(time.RFC3339)
 		}
 		m.tasks[id] = t
 		_ = m.saveLocked()
@@ -1012,7 +1092,8 @@ func (m *autoTaskManager) runOnce(id string) AliasTask {
 			// 否则跨零点作息(如夜猫子)会被午夜截断, 整个白天静默。
 			t.NextRun = m.nowFunc().Add(m.nextAutoDelay(t, m.nowFunc())).Format(time.RFC3339)
 		} else {
-			t.NextRun = nextDailyRun(m.nowFunc()).Format(time.RFC3339)
+			// 定时任务: 等到任务时区的次日零点(与每日边界同口径)。
+			t.NextRun = nextDailyRun(m.nowFunc(), taskTimezone(t.Timezone)).Format(time.RFC3339)
 		}
 	} else if t.Enabled && t.CreatedCount < t.MaxTotal {
 		if t.Mode == taskModeAuto {
@@ -1082,6 +1163,10 @@ func taskHasQuotaKey(probes []map[string]json.RawMessage, i int) bool {
 //   - 自主任务: 按作息周期(见 persona.cycleDateAt)——从睡醒到下次睡醒,
 //     使跨零点的作息(如夜猫子 09:00-03:00)不被日历零点截断;
 //   - 定时任务: 按自然日(日历零点)。
+//
+// 两者的时区口径一致: 都按任务(代理 IP)时区计算——字段契约声明「每日配额
+// 边界都按该时区计算」, 展示的「今日已生成 / 今日总数」才能与计划安排对
+// 得上(用服务器本地时区会让两地日期不同时误判跨日, 展示与调度不一致)。
 func resetDailyCount(task AliasTask, now time.Time) AliasTask {
 	if task.Mode == taskModeAuto {
 		p := personaByName(task.Persona)
@@ -1094,7 +1179,7 @@ func resetDailyCount(task AliasTask, now time.Time) AliasTask {
 		}
 		return task
 	}
-	today := taskDate(now)
+	today := taskDate(now.In(taskTimezone(task.Timezone)))
 	if task.DailyDate != today {
 		task.DailyDate = today
 		task.DailyCount = 0
@@ -1233,8 +1318,13 @@ func (m *autoTaskManager) releaseManualCreation(accountID string) {
 	}
 }
 
-func nextDailyRun(now time.Time) time.Time {
-	startOfTomorrow := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, now.Location())
+// nextDailyRun 返回任务时区下「次日零点 + 5 分钟」的时刻: 定时任务的每日
+// 配额按任务(代理 IP)时区的自然日重置, 配额用尽后等待到任务时区的次日
+// 零点再继续——与展示的「今日」口径一致(服务器零点会让跨时区任务的等待
+// 落点与任务日边界错位)。
+func nextDailyRun(now time.Time, loc *time.Location) time.Time {
+	local := now.In(loc)
+	startOfTomorrow := time.Date(local.Year(), local.Month(), local.Day()+1, 0, 0, 0, 0, loc)
 	return startOfTomorrow.Add(5 * time.Minute)
 }
 
