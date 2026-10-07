@@ -26,6 +26,7 @@ import (
 	"io"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"golang.org/x/crypto/pbkdf2"
@@ -60,6 +61,25 @@ const webUserAgent = defaultUserAgent
 
 // ErrOTPRequired 表示账号启用了双重认证,需要调用 CompleteOTP 提交验证码。
 var ErrOTPRequired = errors.New("账号启用了双重认证,需要提供 2FA 验证码")
+
+// 验证码投递方式。与 any-auto-register 的 delivery 语义对齐:
+//   - trusted_devices: 推送到受信任设备(账号有受信任设备时的默认路径);
+//   - sms: 短信验证码已自动发出(无受信任设备且只有一个手机号);
+//   - sms_selection_required: 无受信任设备且有多个手机号, 需用户选择接收号码。
+const (
+	DeliveryPush      = "trusted_devices"
+	DeliverySMS       = "sms"
+	DeliverySMSSelect = "sms_selection_required"
+)
+
+// 投递限流: 同一登录会话内防止触发 Apple 侧节流。
+const (
+	maxDeliveries    = 5
+	deliveryCooldown = 30 * time.Second
+)
+
+// errDeliveryRateLimited 表示投递次数/频率超出限制。
+var errDeliveryRateLimited = errors.New("验证码发送次数过多，请稍后重试")
 
 // authEndpoints 是可注入的端点集合,默认指向 idmsa/setup 生产域名。
 // 测试通过 OverrideEndpointsForTest 整体替换,避免真实网络访问。
@@ -131,6 +151,172 @@ type OTPProvider func() (string, error)
 type TrustedPhone struct {
 	ID                 int    `json:"id"`
 	NumberWithDialCode string `json:"numberWithDialCode"` // 脱敏显示,如 +86 138****1234
+	// PushMode 是该号码的投递方式(Apple 下发, 默认 "sms")。
+	PushMode string `json:"pushMode"`
+}
+
+// authStateInfo 是从 GET /appleauth/auth 解析出的验证码投递决策依据。
+type authStateInfo struct {
+	// NoTrustedDevices 表示账号没有任何受信任设备(推送无处可去)。
+	NoTrustedDevices bool
+	// Phones 是受信任手机号列表(可能为空)。
+	Phones []TrustedPhone
+}
+
+// fetchAuthState 读取 GET /appleauth/auth 并解析投递决策依据。
+//
+// 响应结构随 Apple 发版漂移: trustedPhoneNumbers 可能在
+// phoneNumberVerification、twoSV.bridgeInitiateData.phoneNumberVerification、
+// twoSV.phoneNumberVerification 或顶层(icloudpd #1325); noTrustedDevices 同理。
+func (c *Client) fetchAuthState(state *authState, ep authEndpoints) (*authStateInfo, error) {
+	req, err := http.NewRequest("GET", ep.info, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header = c.updateAuthHeaders(req.Header, state)
+	resp, err := c.httpc.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	c.captureSessionHeaders(state, resp)
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("读取 Apple 双重认证状态失败: HTTP %d", resp.StatusCode)
+	}
+	info, err := parseAuthState(body)
+	if err != nil {
+		return nil, fmt.Errorf("解析双重认证状态失败: %w", err)
+	}
+	return info, nil
+}
+
+// parseAuthState 解析 /appleauth/auth 响应, 兼容全部已知嵌套路径。
+//
+// noTrustedDevices 可能出现在顶层, 也可能在 phoneNumberVerification 内
+// (参考 any-auto-register 的 _auth_state: 无 authenticationType 时它会解包
+// phoneNumberVerification 再读该字段)。两处都检查, 任一为 true 即视为无设备。
+func parseAuthState(body []byte) (*authStateInfo, error) {
+	type phoneVerification struct {
+		TrustedPhoneNumbers []TrustedPhone `json:"trustedPhoneNumbers"`
+		NoTrustedDevices    bool           `json:"noTrustedDevices"`
+	}
+	type authStatePayload struct {
+		NoTrustedDevices        bool              `json:"noTrustedDevices"`
+		PhoneNumberVerification phoneVerification `json:"phoneNumberVerification"`
+		TwoSV                   struct {
+			PhoneNumberVerification phoneVerification `json:"phoneNumberVerification"`
+			BridgeInitiateData      struct {
+				PhoneNumberVerification phoneVerification `json:"phoneNumberVerification"`
+			} `json:"bridgeInitiateData"`
+		} `json:"twoSV"`
+		TrustedPhoneNumbers []TrustedPhone `json:"trustedPhoneNumbers"`
+	}
+	var result authStatePayload
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, err
+	}
+	phones := result.PhoneNumberVerification.TrustedPhoneNumbers
+	if len(phones) == 0 {
+		phones = result.TwoSV.BridgeInitiateData.PhoneNumberVerification.TrustedPhoneNumbers
+	}
+	if len(phones) == 0 {
+		phones = result.TwoSV.PhoneNumberVerification.TrustedPhoneNumbers
+	}
+	if len(phones) == 0 {
+		phones = result.TrustedPhoneNumbers
+	}
+	// pushMode 缺省为 sms(Apple 只在部分响应里下发该字段)。
+	for i := range phones {
+		if strings.TrimSpace(phones[i].PushMode) == "" {
+			phones[i].PushMode = "sms"
+		}
+	}
+	noTrustedDevices := result.NoTrustedDevices ||
+		result.PhoneNumberVerification.NoTrustedDevices ||
+		result.TwoSV.PhoneNumberVerification.NoTrustedDevices ||
+		result.TwoSV.BridgeInitiateData.PhoneNumberVerification.NoTrustedDevices
+	return &authStateInfo{NoTrustedDevices: noTrustedDevices, Phones: phones}, nil
+}
+
+// pushCode 触发向受信任设备推送验证码(含投递限流)。
+func (c *Client) pushCode(state *authState, ep authEndpoints) error {
+	if err := checkDeliveryLimit(state, c.nowFunc()); err != nil {
+		return err
+	}
+	if err := c.requestPushCode(ep); err != nil {
+		return err
+	}
+	recordDelivery(state, c.nowFunc())
+	return nil
+}
+
+// requestPushCode 执行实际的推送请求。
+func (c *Client) requestPushCode(ep authEndpoints) error {
+	state := c.pendingAuth
+	req, err := http.NewRequest("PUT", ep.verifyDevice+"/securitycode", nil)
+	if err != nil {
+		return err
+	}
+	req.Header = c.updateAuthHeaders(req.Header, state)
+	resp, err := c.httpc.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	c.captureSessionHeaders(state, resp)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("请求发送验证码失败: HTTP %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// sendSMSCode 向指定手机号发送短信验证码(含投递限流), 并记录选定号码。
+func (c *Client) sendSMSCode(state *authState, ep authEndpoints, phoneID int, mode string) error {
+	if err := checkDeliveryLimit(state, c.nowFunc()); err != nil {
+		return err
+	}
+	if strings.TrimSpace(mode) == "" {
+		mode = "sms"
+	}
+	body, _ := json.Marshal(map[string]interface{}{
+		"phoneNumber": map[string]int{"id": phoneID},
+		"mode":        mode,
+	})
+	req, err := http.NewRequest("PUT", ep.verifyPhone, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header = c.updateAuthHeaders(req.Header, state)
+	resp, err := c.httpc.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	c.captureSessionHeaders(state, resp)
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("发送短信验证码失败: HTTP %d", resp.StatusCode)
+	}
+	recordDelivery(state, c.nowFunc())
+	state.smsPhoneID = phoneID
+	state.smsMode = mode
+	return nil
+}
+
+// TrustedPhones 获取账号的受信任手机号列表。必须在 BeginLogin 返回 ErrOTPRequired 之后调用。
+func (c *Client) TrustedPhones() ([]TrustedPhone, error) {
+	state, err := c.pending()
+	if err != nil {
+		return nil, err
+	}
+	ep := c.endpoints()
+	info, err := c.fetchAuthState(state, ep)
+	if err != nil {
+		return nil, err
+	}
+	state.phones = info.Phones
+	return info.Phones, nil
 }
 
 // authState 保存认证过程中的状态。
@@ -145,6 +331,16 @@ type authState struct {
 	authToken  string
 	trustToken string
 	dsid       string
+	// delivery 记录当前验证码投递方式(push/sms/sms_select)。
+	delivery string
+	// smsPhoneID/smsMode 是已选定的短信接收号码与发送模式。
+	smsPhoneID int
+	smsMode    string
+	// deliveries/lastDelivery 用于投递限流(最多 5 次, 每次间隔 ≥30 秒)。
+	deliveries   int
+	lastDelivery time.Time
+	// phones 缓存本次会话读到的受信任手机号。
+	phones []TrustedPhone
 }
 
 // pendingAuth 是等待 2FA 的登录会话状态;由 BeginLogin 保存,CompleteOTP 消费。
@@ -164,6 +360,16 @@ func (c *Client) Login(username, password string, otpProvider OTPProvider) error
 	}
 	if otpProvider == nil {
 		return fmt.Errorf("账号启用了双重认证,需要提供 OTP")
+	}
+	// 2026 年起 409 不再自动推送: 必须先决定投递方式(推送/短信)并触发,
+	// 否则验证码永远不会到达任何设备(旧实现因此陷入无限等待)。
+	delivery, err := c.PrepareDelivery()
+	if err != nil {
+		return fmt.Errorf("准备验证码投递失败: %w", err)
+	}
+	// 多手机号待选: 单函数入口无法让用户选择号码, 明确报错而不是盲发到未知号码。
+	if delivery == DeliverySMSSelect {
+		return fmt.Errorf("账号有多个受信任手机号,请改用两段式登录选择接收号码")
 	}
 	code, codeErr := otpProvider()
 	if codeErr != nil {
@@ -224,11 +430,23 @@ func (c *Client) BeginLogin(username, password string) error {
 
 // CompleteOTP 提交 2FA 验证码(阶段二),完成登录。
 //
+// 必须按会话的实际投递通道路由: 短信通道(自动短信/已选号码)的验证码
+// 在 /verify/phone/securitycode 校验, 提交到 trusteddevice 会静默失败
+// (设备侧根本没有这个验证码, 用户表现为「收到了短信却验证不过」)。
 // 必须在 BeginLogin 返回 ErrOTPRequired 之后、对同一个 *Client 调用。
 func (c *Client) CompleteOTP(code string) error {
 	state, err := c.pending()
 	if err != nil {
 		return err
+	}
+	switch {
+	case state.delivery == DeliverySMS:
+		if state.smsPhoneID <= 0 {
+			return fmt.Errorf("短信会话缺少接收号码,请重新选择手机号")
+		}
+		return c.completeSMS(state, state.smsPhoneID, code)
+	case state.delivery == DeliverySMSSelect:
+		return fmt.Errorf("请先选择接收验证码的手机号")
 	}
 	ep := c.endpoints()
 	if err := c.submitSecurityCode(state, ep, code); err != nil {
@@ -248,6 +466,83 @@ func (c *Client) pending() (*authState, error) {
 		return nil, fmt.Errorf("无待验证的登录会话,请重新发起登录")
 	}
 	return c.pendingAuth, nil
+}
+
+// nowFunc 返回可注入的时钟, 缺省 time.Now。
+func (c *Client) nowFunc() time.Time {
+	if c.now == nil {
+		return time.Now()
+	}
+	return c.now()
+}
+
+// Delivery 返回当前会话的验证码投递方式(空串表示尚未决定)。
+func (c *Client) Delivery() string {
+	if c.pendingAuth == nil {
+		return ""
+	}
+	return c.pendingAuth.delivery
+}
+
+// checkDeliveryLimit 在发起一次投递前校验限流(最多 5 次, 每次间隔 ≥30 秒)。
+//
+// 参考 any-auto-register: 频繁请求验证码会触发 Apple 侧节流, 之后连
+// 正常请求都会被拒; 本地先拦一道比被上游拦更可控。
+func checkDeliveryLimit(state *authState, now time.Time) error {
+	if state.deliveries >= maxDeliveries {
+		return fmt.Errorf("%w: 已达到 5 次上限", errDeliveryRateLimited)
+	}
+	if !state.lastDelivery.IsZero() && now.Sub(state.lastDelivery) < deliveryCooldown {
+		return fmt.Errorf("%w: 请等待 %d 秒", errDeliveryRateLimited, int(deliveryCooldown.Seconds()))
+	}
+	return nil
+}
+
+// recordDelivery 记录一次成功的投递(用于限流)。
+func recordDelivery(state *authState, now time.Time) {
+	state.deliveries++
+	state.lastDelivery = now
+}
+
+// PrepareDelivery 决定验证码投递方式并发起投递。
+//
+// 参考 any-auto-register 的 prepare_verification:
+//   - 账号有受信任设备 → 推送(push);
+//   - 无受信任设备且只有一个手机号 → 自动改走短信(sms);
+//   - 无受信任设备且有多个手机号 → 需用户选择(sms_select);
+//   - 无受信任设备且无手机号 → 明确报错(推送无处可去, 等也等不到)。
+//
+// 返回投递方式; 必须在 BeginLogin 返回 ErrOTPRequired 之后调用。
+func (c *Client) PrepareDelivery() (string, error) {
+	state, err := c.pending()
+	if err != nil {
+		return "", err
+	}
+	ep := c.endpoints()
+	authStateBody, err := c.fetchAuthState(state, ep)
+	if err != nil {
+		return "", err
+	}
+	noTrustedDevices := authStateBody.NoTrustedDevices
+	state.phones = authStateBody.Phones
+	switch {
+	case noTrustedDevices && len(state.phones) == 1:
+		phone := state.phones[0]
+		if err := c.sendSMSCode(state, ep, phone.ID, phone.PushMode); err != nil {
+			return "", err
+		}
+		state.delivery = DeliverySMS
+	case noTrustedDevices && len(state.phones) > 1:
+		state.delivery = DeliverySMSSelect
+	case noTrustedDevices:
+		return "", fmt.Errorf("账号没有可用的双重认证设备或手机号,无法接收验证码")
+	default:
+		if err := c.pushCode(state, ep); err != nil {
+			return "", err
+		}
+		state.delivery = DeliveryPush
+	}
+	return state.delivery, nil
 }
 
 // finishLogin 登录收尾: 信任设备 → 获取 Web Cookie → 保存到 Client。
@@ -439,89 +734,26 @@ func (c *Client) authComplete(state *authState, ep authEndpoints, m1, m2 string)
 	}
 }
 
-// TrustedPhones 获取账号的受信任手机号列表。必须在 BeginLogin 返回 ErrOTPRequired 之后调用。
-func (c *Client) TrustedPhones() ([]TrustedPhone, error) {
-	state, err := c.pending()
-	if err != nil {
-		return nil, err
-	}
-	ep := c.endpoints()
-	req, err := http.NewRequest("GET", ep.info, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header = c.updateAuthHeaders(req.Header, state)
-
-	resp, err := c.httpc.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	c.captureSessionHeaders(state, resp)
-
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("获取手机号列表失败: HTTP %d", resp.StatusCode)
-	}
-	// 实际响应把列表嵌套在 phoneNumberVerification 里,兼容顶层平铺的旧结构。
-	// 2026 年起 Apple 又把它移到了 twoSV.bridgeInitiateData.phoneNumberVerification
-	// (icloudpd #1325)——三条路径依次回退,任一命中即用。
-	type phoneVerification struct {
-		TrustedPhoneNumbers []TrustedPhone `json:"trustedPhoneNumbers"`
-	}
-	var result struct {
-		PhoneNumberVerification phoneVerification `json:"phoneNumberVerification"`
-		TwoSV                   struct {
-			PhoneNumberVerification phoneVerification `json:"phoneNumberVerification"`
-			BridgeInitiateData      struct {
-				PhoneNumberVerification phoneVerification `json:"phoneNumberVerification"`
-			} `json:"bridgeInitiateData"`
-		} `json:"twoSV"`
-		TrustedPhoneNumbers []TrustedPhone `json:"trustedPhoneNumbers"`
-	}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, fmt.Errorf("解析手机号列表失败: %w", err)
-	}
-	phones := result.PhoneNumberVerification.TrustedPhoneNumbers
-	if len(phones) == 0 {
-		phones = result.TwoSV.BridgeInitiateData.PhoneNumberVerification.TrustedPhoneNumbers
-	}
-	if len(phones) == 0 {
-		phones = result.TwoSV.PhoneNumberVerification.TrustedPhoneNumbers
-	}
-	if len(phones) == 0 {
-		phones = result.TrustedPhoneNumbers
-	}
-	return phones, nil
-}
-
 // SendSMS 向指定受信任手机号发送短信验证码 (PUT /verify/phone, 成功 200)。
+//
+// 选定号码后会话的投递方式切换为短信: 后续 ResendOTP 会重发短信而非推送。
 func (c *Client) SendSMS(phoneID int) error {
 	state, err := c.pending()
 	if err != nil {
 		return err
 	}
 	ep := c.endpoints()
-	body, _ := json.Marshal(map[string]interface{}{
-		"phoneNumber": map[string]int{"id": phoneID},
-		"mode":        "sms",
-	})
-	req, err := http.NewRequest("PUT", ep.verifyPhone, bytes.NewReader(body))
-	if err != nil {
+	mode := "sms"
+	for _, p := range state.phones {
+		if p.ID == phoneID && strings.TrimSpace(p.PushMode) != "" {
+			mode = p.PushMode
+			break
+		}
+	}
+	if err := c.sendSMSCode(state, ep, phoneID, mode); err != nil {
 		return err
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header = c.updateAuthHeaders(req.Header, state)
-
-	resp, err := c.httpc.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	c.captureSessionHeaders(state, resp)
-	if resp.StatusCode != 200 {
-		return fmt.Errorf("发送短信验证码失败: HTTP %d", resp.StatusCode)
-	}
+	state.delivery = DeliverySMS
 	return nil
 }
 
@@ -531,11 +763,21 @@ func (c *Client) CompleteSMS(phoneID int, code string) error {
 	if err != nil {
 		return err
 	}
+	return c.completeSMS(state, phoneID, code)
+}
+
+// completeSMS 是短信验证码提交的共享实现(CompleteSMS 与 CompleteOTP 的
+// 短信通道路由共用)。成功后清空会话。
+func (c *Client) completeSMS(state *authState, phoneID int, code string) error {
 	ep := c.endpoints()
+	mode := state.smsMode
+	if strings.TrimSpace(mode) == "" {
+		mode = "sms"
+	}
 	body, _ := json.Marshal(map[string]interface{}{
 		"securityCode": map[string]string{"code": code},
 		"phoneNumber":  map[string]int{"id": phoneID},
-		"mode":         "sms",
+		"mode":         mode,
 	})
 	req, err := http.NewRequest("POST", ep.phoneCode, bytes.NewReader(body))
 	if err != nil {
@@ -573,22 +815,20 @@ func (c *Client) ResendOTP() error {
 		return err
 	}
 	ep := c.endpoints()
-	req, err := http.NewRequest("PUT", ep.verifyDevice+"/securitycode", nil)
-	if err != nil {
-		return err
+	// 已选短信通道 → 重发短信; 否则走设备推送。
+	// (多手机号待选时先要求选择, 避免重发到未知号码。)
+	switch state.delivery {
+	case DeliverySMSSelect:
+		return fmt.Errorf("请先选择接收验证码的手机号")
+	case DeliverySMS:
+		if state.smsPhoneID > 0 {
+			return c.sendSMSCode(state, ep, state.smsPhoneID, state.smsMode)
+		}
+		// 短信会话却缺号码: 不能静默改推——无受信任设备的账号根本收不到推送,
+		// 会重现「登录成功但永远收不到验证码」的故障。
+		return fmt.Errorf("短信会话缺少接收号码,请重新选择手机号")
 	}
-	req.Header = c.updateAuthHeaders(req.Header, state)
-
-	resp, err := c.httpc.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	c.captureSessionHeaders(state, resp)
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("请求发送验证码失败: HTTP %d", resp.StatusCode)
-	}
-	return nil
+	return c.pushCode(state, ep)
 }
 
 // submitSecurityCode 提交 2FA 验证码。

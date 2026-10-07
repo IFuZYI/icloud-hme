@@ -23,9 +23,24 @@ type fakeLoginSession struct {
 	resendHit bool
 	smsSent   int
 	phonesHit bool
+	// delivery/prepareErr 控制投递路由的测试行为。
+	delivery   string
+	prepareErr error
 }
 
 func (f *fakeLoginSession) Begin(password string) error { return f.beginErr }
+
+func (f *fakeLoginSession) PrepareDelivery() (string, error) {
+	if f.prepareErr != nil {
+		return "", f.prepareErr
+	}
+	if f.delivery == "" {
+		return hme.DeliveryPush, nil
+	}
+	return f.delivery, nil
+}
+
+func (f *fakeLoginSession) Delivery() string { return f.delivery }
 
 func (f *fakeLoginSession) CompleteOTP(code string) error {
 	f.codes = append(f.codes, code)
@@ -103,25 +118,42 @@ func TestLoginBeginOTPRequiredReturnsSession(t *testing.T) {
 	_ = beginLogin(t, base, s, csrf)
 }
 
-// 推送成功时 begin 响应带 push_sent=true; 推送失败时带 false,
-// 前端据此提示用户手动重发而不是无限等待。
-func TestLoginBeginReportsPushSent(t *testing.T) {
+// 投递路由对前端透明: 推送成功 → push_sent=true; 无设备走短信 → push_sent=false
+// 且 delivery=sms(前端提示"已发短信"而不是"已推送"); 投递失败 → 明确报错。
+func TestLoginBeginReportsDelivery(t *testing.T) {
 	cases := []struct {
-		name      string
-		resendErr error
-		want      bool
+		name       string
+		delivery   string
+		prepareErr error
+		wantPush   bool
+		wantCode   string
 	}{
-		{"推送成功", nil, true},
-		{"推送失败", errors.New("请求发送验证码失败: HTTP 500"), false},
+		{"推送成功", hme.DeliveryPush, nil, true, ""},
+		{"无设备走短信", hme.DeliverySMS, nil, false, ""},
+		{"多手机号待选", hme.DeliverySMSSelect, nil, false, ""},
+		{"投递失败", "", errors.New("请求发送验证码失败: HTTP 500"), false, "UPSTREAM_FAILURE"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			session := &fakeLoginSession{beginErr: hme.ErrOTPRequired, resendErr: tc.resendErr}
+			session := &fakeLoginSession{beginErr: hme.ErrOTPRequired, delivery: tc.delivery, prepareErr: tc.prepareErr}
 			_, ts := newLoginTestServer(t, session)
 			defer ts.Close()
 			s, csrf := login(t, ts, "admin-pass-2026-strong")
 
 			status, body := aliasTaskRequest(t, ts.URL, s, csrf, http.MethodPost, "/api/accounts/acc_1/login/begin", `{"password":"p@ssw0rd"}`)
+			if tc.wantCode != "" {
+				if status == http.StatusOK {
+					t.Fatalf("投递失败不应成功: %d %s", status, body)
+				}
+				var out struct {
+					Code string `json:"code"`
+				}
+				_ = json.Unmarshal([]byte(body), &out)
+				if out.Code != tc.wantCode {
+					t.Fatalf("code = %q, want %q (body: %s)", out.Code, tc.wantCode, body)
+				}
+				return
+			}
 			if status != http.StatusOK {
 				t.Fatalf("begin = %d: %s", status, body)
 			}
@@ -129,6 +161,7 @@ func TestLoginBeginReportsPushSent(t *testing.T) {
 				Data struct {
 					Status   string `json:"status"`
 					PushSent *bool  `json:"push_sent"`
+					Delivery string `json:"delivery"`
 				} `json:"data"`
 			}
 			if err := json.Unmarshal([]byte(body), &out); err != nil {
@@ -137,8 +170,11 @@ func TestLoginBeginReportsPushSent(t *testing.T) {
 			if out.Data.Status != "otp_required" {
 				t.Fatalf("status = %q", out.Data.Status)
 			}
-			if out.Data.PushSent == nil || *out.Data.PushSent != tc.want {
-				t.Fatalf("push_sent = %v, 期望 %v (body: %s)", out.Data.PushSent, tc.want, body)
+			if out.Data.PushSent == nil || *out.Data.PushSent != tc.wantPush {
+				t.Fatalf("push_sent = %v, 期望 %v (body: %s)", out.Data.PushSent, tc.wantPush, body)
+			}
+			if out.Data.Delivery != tc.delivery {
+				t.Fatalf("delivery = %q, want %q (body: %s)", out.Data.Delivery, tc.delivery, body)
 			}
 		})
 	}
@@ -229,6 +265,9 @@ func TestLoginPhonesResendSMS(t *testing.T) {
 	status, body, _ := do(t, req)
 	if status != http.StatusOK || !contains(body, "138****1234") {
 		t.Fatalf("phones = %d: %s", status, body)
+	}
+	if !session.phonesHit {
+		t.Fatal("phones 端点应调用会话的 TrustedPhones")
 	}
 
 	status, body = aliasTaskRequest(t, base, s, csrf, http.MethodPost, "/api/accounts/acc_1/login/resend", `{"session_id":"`+sid+`"}`)

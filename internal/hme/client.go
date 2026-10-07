@@ -83,6 +83,8 @@ type Client struct {
 	accountInfo *AccountInfo
 	// pendingAuth 保存等待 2FA 的登录会话(BeginLogin 写入,CompleteOTP 消费)。
 	pendingAuth *authState
+	// now 是可注入的时钟(缺省 time.Now), 用于投递限流的确定性测试。
+	now func() time.Time
 }
 
 // NewClient 创建一个新的 HME 客户端,底层使用 Chrome TLS 指纹。

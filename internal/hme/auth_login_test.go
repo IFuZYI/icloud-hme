@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/url"
 	"testing"
+	"time"
 
 	fhttp "github.com/bogdanfinn/fhttp"
 	"icloud-hme/internal/hmetest"
@@ -293,5 +294,272 @@ func TestLoginWithOTPProviderCompletes(t *testing.T) {
 	}
 	if c.Cookies["X-APPLE-WEBAUTH-TOKEN"] == "" {
 		t.Fatalf("应提取到 Cookie, got %v", c.Cookies)
+	}
+}
+
+// ====================================================================
+// 验证码投递路由 (参考 any-auto-register 的 prepare_verification)
+//
+// 账号没有受信任设备 (noTrustedDevices=true) 时, 推送验证码无处可去,
+// 必须自动改走短信; 有受信任设备时才推送。否则用户会陷入
+// 「登录成功但永远收不到验证码」。
+// ====================================================================
+
+// 有受信任设备(默认) → PrepareDelivery 推送, 且恰好命中一次推送端点。
+func TestDeliveryRoutesPushWhenTrustedDeviceExists(t *testing.T) {
+	m := hmetest.New(t)
+	m.RequireOTP = true
+	c := newMockedClient(t, m, "icloud.com")
+	if err := c.BeginLogin("owner@example.com", "p@ssw0rd"); err != ErrOTPRequired {
+		t.Fatalf("BeginLogin err = %v", err)
+	}
+	delivery, err := c.PrepareDelivery()
+	if err != nil {
+		t.Fatalf("PrepareDelivery: %v", err)
+	}
+	if delivery != DeliveryPush || c.Delivery() != DeliveryPush {
+		t.Fatalf("delivery = %q / %q, want %q", delivery, c.Delivery(), DeliveryPush)
+	}
+	if m.PushTriggerHits != 1 {
+		t.Fatalf("有受信任设备时应推送一次, got %d", m.PushTriggerHits)
+	}
+	if m.SMSSendHits != 0 {
+		t.Fatalf("有受信任设备时不应自动发短信, got %d", m.SMSSendHits)
+	}
+}
+
+// 无受信任设备 + 1 个手机号 → 自动改走短信, 不推送。
+func TestDeliveryRoutesSMSWhenNoTrustedDevices(t *testing.T) {
+	m := hmetest.New(t)
+	m.RequireOTP = true
+	m.NoTrustedDevices = true
+	// 显式设置 pushMode: 断言它透传到短信请求体(不再是死字段)。
+	m.PhonePushMode = "sms"
+	c := newMockedClient(t, m, "icloud.com")
+	if err := c.BeginLogin("owner@example.com", "p@ssw0rd"); err != ErrOTPRequired {
+		t.Fatalf("BeginLogin err = %v", err)
+	}
+	delivery, err := c.PrepareDelivery()
+	if err != nil {
+		t.Fatalf("PrepareDelivery: %v", err)
+	}
+	if delivery != DeliverySMS || c.Delivery() != DeliverySMS {
+		t.Fatalf("delivery = %q / %q, want %q", delivery, c.Delivery(), DeliverySMS)
+	}
+	// 投递准备必须读取 /appleauth/auth 的 noTrustedDevices 标志。
+	if m.AuthStateHits != 1 {
+		t.Fatalf("/appleauth/auth 应命中一次, got %d", m.AuthStateHits)
+	}
+	if m.PushTriggerHits != 0 {
+		t.Fatalf("无受信任设备时不应推送(推送无处可去), got %d 次", m.PushTriggerHits)
+	}
+	if m.SMSSendHits != 1 {
+		t.Fatalf("无受信任设备时应自动发短信一次, got %d", m.SMSSendHits)
+	}
+	// 短信发送的 mode 必须取自该手机号的 pushMode 字段(默认 sms)。
+	if m.SMSSendBody == nil {
+		t.Fatal("短信请求体未记录")
+	}
+	phone, ok := m.SMSSendBody["phoneNumber"].(map[string]any)
+	if !ok {
+		t.Fatalf("短信请求体缺少 phoneNumber 对象: %v", m.SMSSendBody)
+	}
+	id, ok := phone["id"].(float64)
+	if !ok || int(id) != 2 {
+		t.Fatalf("短信应发往手机号 id=2, got %v", m.SMSSendBody)
+	}
+	if mode, _ := m.SMSSendBody["mode"].(string); mode != "sms" {
+		t.Fatalf("短信 mode = %q, want sms", mode)
+	}
+}
+
+// 无受信任设备 + 多个手机号 → 需用户选择 (sms_selection_required), 不自动发送。
+func TestDeliverySelectionRequiredWithMultiplePhones(t *testing.T) {
+	m := hmetest.New(t)
+	m.RequireOTP = true
+	m.NoTrustedDevices = true
+	m.AuthStateBody = `{"noTrustedDevices":true,"phoneNumberVerification":{"trustedPhoneNumbers":[` +
+		`{"id":2,"numberWithDialCode":"+86 138****1234","pushMode":"sms"},` +
+		`{"id":3,"numberWithDialCode":"+86 139****5678","pushMode":"sms"}]}}`
+	c := newMockedClient(t, m, "icloud.com")
+	if err := c.BeginLogin("owner@example.com", "p@ssw0rd"); err != ErrOTPRequired {
+		t.Fatalf("BeginLogin err = %v", err)
+	}
+	delivery, err := c.PrepareDelivery()
+	if err != nil {
+		t.Fatalf("PrepareDelivery: %v", err)
+	}
+	if delivery != DeliverySMSSelect || c.Delivery() != DeliverySMSSelect {
+		t.Fatalf("delivery = %q / %q, want %q", delivery, c.Delivery(), DeliverySMSSelect)
+	}
+	if m.SMSSendHits != 0 || m.PushTriggerHits != 0 {
+		t.Fatalf("多手机号时不应自动发送, sms=%d push=%d", m.SMSSendHits, m.PushTriggerHits)
+	}
+	phones, err := c.TrustedPhones()
+	if err != nil || len(phones) != 2 {
+		t.Fatalf("应能列出 2 个手机号: %v / %+v", err, phones)
+	}
+	// 用户选定手机号后走显式短信。
+	if err := c.SendSMS(3); err != nil {
+		t.Fatalf("SendSMS: %v", err)
+	}
+	if c.Delivery() != DeliverySMS || m.SMSSendHits != 1 {
+		t.Fatalf("选定手机号后应走短信: delivery=%q sms=%d", c.Delivery(), m.SMSSendHits)
+	}
+}
+
+// 无受信任设备且无手机号 → 明确报错, 而不是静默等一个永远收不到的验证码。
+func TestDeliveryFailsWhenNoPhoneAtAll(t *testing.T) {
+	m := hmetest.New(t)
+	m.RequireOTP = true
+	m.NoTrustedDevices = true
+	m.AuthStateBody = `{"noTrustedDevices":true,"phoneNumberVerification":{"trustedPhoneNumbers":[]}}`
+	c := newMockedClient(t, m, "icloud.com")
+	if err := c.BeginLogin("owner@example.com", "p@ssw0rd"); err != ErrOTPRequired {
+		t.Fatalf("BeginLogin err = %v", err)
+	}
+	if _, err := c.PrepareDelivery(); err == nil {
+		t.Fatal("无设备无手机号时应明确报错")
+	}
+}
+
+// 选定短信后重发应重发短信(而非推送); 多手机号待选时重发应被拒绝。
+func TestResendFollowsSelectedDelivery(t *testing.T) {
+	m := hmetest.New(t)
+	m.RequireOTP = true
+	m.NoTrustedDevices = true
+	c := newMockedClient(t, m, "icloud.com")
+	now := time.Unix(1000000, 0)
+	c.now = func() time.Time { return now }
+	if err := c.BeginLogin("owner@example.com", "p@ssw0rd"); err != ErrOTPRequired {
+		t.Fatalf("BeginLogin err = %v", err)
+	}
+	if _, err := c.PrepareDelivery(); err != nil { // 自动发短信
+		t.Fatalf("PrepareDelivery: %v", err)
+	}
+	now = now.Add(31 * time.Second)
+	if err := c.ResendOTP(); err != nil {
+		t.Fatalf("重发: %v", err)
+	}
+	if m.SMSSendHits != 2 {
+		t.Fatalf("重发应走短信(共 2 次), got %d", m.SMSSendHits)
+	}
+	if m.PushTriggerHits != 0 {
+		t.Fatalf("短信通道下不应推送, got %d", m.PushTriggerHits)
+	}
+}
+
+// 多手机号待选时, 重发应先要求选择手机号(不能盲发到未知号码)。
+func TestResendRequiresSelectionWhenMultiplePhones(t *testing.T) {
+	m := hmetest.New(t)
+	m.RequireOTP = true
+	m.NoTrustedDevices = true
+	m.AuthStateBody = `{"noTrustedDevices":true,"phoneNumberVerification":{"trustedPhoneNumbers":[` +
+		`{"id":2,"numberWithDialCode":"+86 138****1234","pushMode":"sms"},` +
+		`{"id":3,"numberWithDialCode":"+86 139****5678","pushMode":"sms"}]}}`
+	c := newMockedClient(t, m, "icloud.com")
+	if err := c.BeginLogin("owner@example.com", "p@ssw0rd"); err != ErrOTPRequired {
+		t.Fatalf("BeginLogin err = %v", err)
+	}
+	if _, err := c.PrepareDelivery(); err != nil {
+		t.Fatalf("PrepareDelivery: %v", err)
+	}
+	if err := c.ResendOTP(); err == nil {
+		t.Fatal("多手机号待选时重发应被拒绝")
+	}
+	if m.SMSSendHits != 0 || m.PushTriggerHits != 0 {
+		t.Fatalf("不应发出任何投递, sms=%d push=%d", m.SMSSendHits, m.PushTriggerHits)
+	}
+}
+
+// 投递限流: 同一会话内 30 秒冷却 + 最多 5 次, 防止触发 Apple 节流。
+func TestDeliveryRateLimitEnforced(t *testing.T) {
+	m := hmetest.New(t)
+	m.RequireOTP = true
+	c := newMockedClient(t, m, "icloud.com")
+	now := time.Unix(1000000, 0)
+	c.now = func() time.Time { return now }
+	if err := c.BeginLogin("owner@example.com", "p@ssw0rd"); err != ErrOTPRequired {
+		t.Fatalf("BeginLogin err = %v", err)
+	}
+	if _, err := c.PrepareDelivery(); err != nil { // 第 1 次
+		t.Fatalf("PrepareDelivery: %v", err)
+	}
+	if err := c.ResendOTP(); err == nil {
+		t.Fatal("冷却期内的重发应被拒绝")
+	}
+	now = now.Add(31 * time.Second)
+	if err := c.ResendOTP(); err != nil { // 第 2 次
+		t.Fatalf("冷却后的重发应成功: %v", err)
+	}
+	for i := 0; i < 3; i++ { // 第 3-5 次
+		now = now.Add(31 * time.Second)
+		if err := c.ResendOTP(); err != nil {
+			t.Fatalf("第 %d 次重发应成功: %v", i+3, err)
+		}
+	}
+	now = now.Add(31 * time.Second)
+	if err := c.ResendOTP(); err == nil {
+		t.Fatal("超过 5 次投递应被拒绝")
+	}
+	if m.PushTriggerHits != 5 {
+		t.Fatalf("实际推送 %d 次, 期望恰好 5 次", m.PushTriggerHits)
+	}
+}
+
+// 自动短信投递必须贯通验证码提交端点: PrepareDelivery 自动发短信后,
+// CompleteOTP 提交的验证码必须到达 /verify/phone/securitycode, 而不是
+// trusteddevice(设备侧没有这个验证码, 用户表现为「收到短信却验证不过」)。
+// 反变异: CompleteOTP 不按 state.delivery 路由时此测试失败(mock 的
+// device 侧 VerifyCode 会记录验证码, 而 phone 侧请求体为空)。
+func TestAutoSMSCodeSubmitsToPhoneEndpoint(t *testing.T) {
+	m := hmetest.New(t)
+	m.RequireOTP = true
+	m.NoTrustedDevices = true
+	c := newMockedClient(t, m, "icloud.com")
+	if err := c.BeginLogin("owner@example.com", "p@ssw0rd"); err != ErrOTPRequired {
+		t.Fatalf("BeginLogin err = %v", err)
+	}
+	delivery, err := c.PrepareDelivery() // 无受信任设备 + 单手机号 → 自动短信
+	if err != nil {
+		t.Fatalf("PrepareDelivery: %v", err)
+	}
+	if delivery != DeliverySMS {
+		t.Fatalf("delivery = %q, want %q", delivery, DeliverySMS)
+	}
+	if err := c.CompleteOTP("123456"); err != nil {
+		t.Fatalf("CompleteOTP: %v", err)
+	}
+	// 验证码必须落在 phone 端点: mock 的 phone 侧请求体记录到 SMSVerifyBody。
+	if m.SMSVerifyBody == nil {
+		t.Fatal("验证码未提交到 /verify/phone/securitycode(自动短信会话端点错配)")
+	}
+	if code, _ := m.SMSVerifyBody["securityCode"].(map[string]any)["code"].(string); code != "123456" {
+		t.Fatalf("phone 端点收到的验证码 = %q, want 123456", code)
+	}
+	if m.VerifyCode != "" {
+		t.Fatalf("验证码不应提交到 device 端点, got %q", m.VerifyCode)
+	}
+	// phone 请求体必须携带选定号码与 mode, 供 Apple 定位校验目标。
+	if phone, ok := m.SMSVerifyBody["phoneNumber"].(map[string]any); !ok || int(phone["id"].(float64)) != 2 {
+		t.Fatalf("phone 端点应携带号码 id=2, got %v", m.SMSVerifyBody)
+	}
+	if mode, _ := m.SMSVerifyBody["mode"].(string); mode != "sms" {
+		t.Fatalf("phone 端点 mode = %q, want sms", mode)
+	}
+}
+
+// Login 单函数入口在多手机号待选时必须报错(不能盲发到未知号码)。
+func TestLoginSingleShotRejectsSelectionRequired(t *testing.T) {
+	m := hmetest.New(t)
+	m.RequireOTP = true
+	m.NoTrustedDevices = true
+	m.AuthStateBody = `{"noTrustedDevices":true,"phoneNumberVerification":{"trustedPhoneNumbers":[` +
+		`{"id":2,"numberWithDialCode":"+86 138****1234","pushMode":"sms"},` +
+		`{"id":3,"numberWithDialCode":"+86 139****5678","pushMode":"sms"}]}}`
+	c := newMockedClient(t, m, "icloud.com")
+	provider := func() (string, error) { return "123456", nil }
+	if err := c.Login("owner@example.com", "p@ssw0rd", provider); err == nil {
+		t.Fatal("多手机号待选时单函数 Login 应明确报错")
 	}
 }

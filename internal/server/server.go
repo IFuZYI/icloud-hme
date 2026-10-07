@@ -254,6 +254,10 @@ func (s *Server) createAliasHandler(c *gin.Context) {
 			failCode(c, http.StatusTooManyRequests, "CREATION_COOLDOWN", "该账号刚发起过创建请求，请至少等待 20 分钟再试")
 			return
 		}
+		if errors.Is(err, errCreationHourlyLimit) {
+			failCode(c, http.StatusTooManyRequests, "CREATION_HOURLY_LIMIT", "该账号最近一小时内创建已达 5 个上限，请稍后再试")
+			return
+		}
 		if errors.Is(err, errCreationDailyLimit) {
 			failCode(c, http.StatusTooManyRequests, "CREATION_LIMIT_REACHED", "该账号今日创建已达 50 个上限，请明日再试")
 			return

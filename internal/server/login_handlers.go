@@ -47,18 +47,24 @@ func (s *Server) loginBeginHandler(c *gin.Context) {
 	}
 	if err := session.Begin(req.Password); err != nil {
 		if errors.Is(err, hme.ErrOTPRequired) {
-			// 需要 2FA:尽力自动推送一次验证码,然后保存会话等待提交。
-			// push_sent 把推送结果反馈给前端——推送失败时用户可手动重发,
-			// 不再只躺在服务端日志里。
-			pushSent := true
-			if resendErr := session.ResendOTP(); resendErr != nil {
-				pushSent = false
-				slog.Warn("自动推送 2FA 验证码失败", "account", id, "err", resendErr.Error())
-			} else {
+			// 需要 2FA: 按账号实际条件决定投递方式(参考 any-auto-register):
+			// 有受信任设备 → 推送; 无设备且单手机号 → 自动发短信;
+			// 无设备且多手机号 → 让用户选择; 无设备无手机号 → 明确报错。
+			delivery := ""
+			var deliverErr error
+			if delivery, deliverErr = session.PrepareDelivery(); deliverErr != nil {
+				slog.Warn("验证码投递失败", "account", id, "err", deliverErr.Error())
+				backendFail(c, classifyLoginErr(deliverErr))
+				return
+			}
+			pushSent := delivery == hme.DeliveryPush
+			if pushSent {
 				slog.Info("2FA 验证码已推送到受信任设备", "account", id)
+			} else {
+				slog.Info("2FA 验证码改走短信通道", "account", id, "delivery", delivery)
 			}
 			sessionID := s.logins.put(id, session)
-			ok(c, gin.H{"status": "otp_required", "session_id": sessionID, "push_sent": pushSent})
+			ok(c, gin.H{"status": "otp_required", "session_id": sessionID, "push_sent": pushSent, "delivery": delivery})
 			return
 		}
 		backendFail(c, classifyLoginErr(err))
@@ -199,7 +205,9 @@ func (s *Server) loginResendHandler(c *gin.Context) {
 		backendFail(c, classifyLoginErr(err))
 		return
 	}
-	ok(c, gin.H{"sent": true})
+	// 返回重发实际使用的投递通道: 前端据此渲染正确的提示(推送/短信),
+	// 而不是无条件声称「已推送到受信任设备」。
+	ok(c, gin.H{"sent": true, "delivery": session.Delivery()})
 }
 
 // mapLoginSessionErr 把账号级错误映射为稳定错误码。

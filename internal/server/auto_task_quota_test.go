@@ -30,13 +30,18 @@ func TestEffectiveDailyQuotaTreatsZeroAsValid(t *testing.T) {
 func TestRunOnceWithZeroQuotaSkipsToday(t *testing.T) {
 	be := &taskBackend{}
 	m := newAutoTaskManager(t.TempDir()+"/task.json", be)
+	// 固定时钟与画像: 配额按作息周期重置, 测试的 DailyDate 必须与周期一致。
+	now := testWeekday(10, 0)
+	m.now = func() time.Time { return now }
 	task, err := m.create(aliasTaskInput{Enabled: true, AccountID: "a", Mode: taskModeAuto, TargetCount: 100, DailyLimit: 20})
 	if err != nil {
 		t.Fatal(err)
 	}
+	p := personaByName("standard")
 	m.mu.Lock()
+	task.Persona = "standard"
 	task.TodayQuota = 0 // 深夜创建: 今日不排
-	task.DailyDate = taskDate(time.Now())
+	task.DailyDate = p.cycleDateAt(now.In(time.Local))
 	m.tasks[task.ID] = task
 	m.mu.Unlock()
 

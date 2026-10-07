@@ -193,6 +193,206 @@ it('push_sent=false 时提示推送失败并允许重发', async () => {
   expect(await screen.findByText(/已重新请求推送验证码/)).toBeInTheDocument()
 })
 
+// 无受信任设备时服务端自动改走短信(delivery=sms): 界面应提示已发短信,
+// 而不是误报"推送失败"。回归背景: 旧实现无条件推送, 没有受信任设备的
+// 账号永远收不到验证码(参考 any-auto-register 的 prepare_verification)。
+it('delivery=sms 时提示验证码已通过短信发送', async () => {
+  server.use(
+    http.post('/api/accounts/:id/login/begin', () =>
+      HttpResponse.json({
+        success: true,
+        data: { status: 'otp_required', session_id: 'login-session-1', push_sent: false, delivery: 'sms' },
+      }),
+    ),
+  )
+  render(
+    <ICloudLoginDialog accountId="acc_1" accountEmail="owner@icloud.com" open onClose={vi.fn()} onSaved={vi.fn()} />,
+  )
+  const user = userEvent.setup()
+  await user.type(screen.getByLabelText('密码'), 'p@ssw0rd')
+  await user.click(screen.getByRole('button', { name: '登录' }))
+
+  expect(await screen.findByText(/验证码已通过短信发送/)).toBeInTheDocument()
+  expect(screen.queryByText(/验证码推送失败/)).not.toBeInTheDocument()
+})
+
+// 多手机号待选(delivery=sms_selection_required): 界面应引导用户选择手机号。
+it('delivery=sms_selection_required 时提示选择手机号', async () => {
+  server.use(
+    http.post('/api/accounts/:id/login/begin', () =>
+      HttpResponse.json({
+        success: true,
+        data: {
+          status: 'otp_required',
+          session_id: 'login-session-1',
+          push_sent: false,
+          delivery: 'sms_selection_required',
+        },
+      }),
+    ),
+  )
+  render(
+    <ICloudLoginDialog accountId="acc_1" accountEmail="owner@icloud.com" open onClose={vi.fn()} onSaved={vi.fn()} />,
+  )
+  const user = userEvent.setup()
+  await user.type(screen.getByLabelText('密码'), 'p@ssw0rd')
+  await user.click(screen.getByRole('button', { name: '登录' }))
+
+  expect(await screen.findByText(/请选择手机号接收短信验证码/)).toBeInTheDocument()
+})
+
+// 多手机号时必须真正让用户选择: 列出全部号码, 用户点哪个才给哪个发。
+// 回归背景: 旧实现静默取 phones[0], 与「请选择手机号」的提示矛盾
+// (user-facing-copy: 不得声称动作不检查的条件)。
+it('sms_selection_required 多手机号时列出号码并只向选中的发送', async () => {
+  const calls: Array<{ path: string; phoneId?: number }> = []
+  server.use(
+    http.post('/api/accounts/:id/login/begin', () =>
+      HttpResponse.json({
+        success: true,
+        data: {
+          status: 'otp_required',
+          session_id: 'login-session-1',
+          push_sent: false,
+          delivery: 'sms_selection_required',
+        },
+      }),
+    ),
+    http.get('/api/accounts/:id/login/phones', () =>
+      HttpResponse.json({
+        success: true,
+        data: {
+          phones: [
+            { id: 2, number_with_dial_code: '+86 138****1234' },
+            { id: 7, number_with_dial_code: '+1 555****9876' },
+          ],
+        },
+      }),
+    ),
+    http.post('/api/accounts/:id/login/sms', async ({ request }) => {
+      const body = (await request.json()) as Record<string, unknown>
+      calls.push({ path: 'sms', phoneId: body.phone_id as number })
+      return HttpResponse.json({ success: true, data: { sent: true } })
+    }),
+    http.post('/api/accounts/:id/login/otp', async ({ request }) => {
+      const body = (await request.json()) as Record<string, unknown>
+      calls.push({ path: 'otp', phoneId: body.phone_id as number })
+      return HttpResponse.json({ success: true, data: { status: 'done' } })
+    }),
+  )
+  const onSaved = vi.fn()
+  render(
+    <ICloudLoginDialog accountId="acc_1" accountEmail="owner@icloud.com" open onClose={vi.fn()} onSaved={onSaved} />,
+  )
+  const user = userEvent.setup()
+  await user.type(screen.getByLabelText('密码'), 'p@ssw0rd')
+  await user.click(screen.getByRole('button', { name: '登录' }))
+  await screen.findByText(/请选择手机号接收短信验证码/)
+
+  // 点「改用短信验证」拉取号码后, 两个号码都应可见, 且此时尚未发送。
+  await user.click(screen.getByRole('button', { name: '改用短信验证' }))
+  expect(await screen.findByText('+86 138****1234')).toBeInTheDocument()
+  expect(screen.getByText('+1 555****9876')).toBeInTheDocument()
+  expect(calls).toEqual([])
+
+  // 选择第二个号码 → 只向它发送。
+  await user.click(screen.getByRole('button', { name: /\+1 555\*\*\*\*9876/ }))
+  expect(await screen.findByText(/已向 \+1 555\*\*\*\*9876 发送短信验证码/)).toBeInTheDocument()
+  expect(calls).toEqual([{ path: 'sms', phoneId: 7 }])
+
+  // 提交验证码时携带所选号码。
+  await user.type(screen.getByLabelText('验证码'), '654321')
+  await user.click(screen.getByRole('button', { name: '验证并登录' }))
+  await waitFor(() => expect(onSaved).toHaveBeenCalledOnce())
+  expect(calls).toEqual([
+    { path: 'sms', phoneId: 7 },
+    { path: 'otp', phoneId: 7 },
+  ])
+})
+
+// 选定号码发送后, 再提交错误验证码(横幅重现)时不得再要求「选择手机号」——
+// 号码列表已收起, 提示会指向一个界面上不存在的操作。
+it('选号发送后横幅不再要求选择手机号', async () => {
+  server.use(
+    http.post('/api/accounts/:id/login/begin', () =>
+      HttpResponse.json({
+        success: true,
+        data: {
+          status: 'otp_required',
+          session_id: 'login-session-1',
+          push_sent: false,
+          delivery: 'sms_selection_required',
+        },
+      }),
+    ),
+    http.get('/api/accounts/:id/login/phones', () =>
+      HttpResponse.json({
+        success: true,
+        data: {
+          phones: [
+            { id: 2, number_with_dial_code: '+86 138****1234' },
+            { id: 7, number_with_dial_code: '+1 555****9876' },
+          ],
+        },
+      }),
+    ),
+    http.post('/api/accounts/:id/login/sms', () =>
+      HttpResponse.json({ success: true, data: { sent: true } }),
+    ),
+    http.post('/api/accounts/:id/login/otp', () =>
+      HttpResponse.json(
+        { success: false, code: 'OTP_INVALID', message: 'OTP 验证码错误' },
+        { status: 401 },
+      ),
+    ),
+  )
+  render(
+    <ICloudLoginDialog accountId="acc_1" accountEmail="owner@icloud.com" open onClose={vi.fn()} onSaved={vi.fn()} />,
+  )
+  const user = userEvent.setup()
+  await user.type(screen.getByLabelText('密码'), 'p@ssw0rd')
+  await user.click(screen.getByRole('button', { name: '登录' }))
+  await screen.findByText(/请选择手机号接收短信验证码/)
+
+  await user.click(screen.getByRole('button', { name: '改用短信验证' }))
+  // 多号码: 列出全部待选, 点第二个只发第二个。
+  await user.click(await screen.findByRole('button', { name: '+1 555****9876' }))
+  await screen.findByText(/已向 \+1 555\*\*\*\*9876 发送短信验证码/)
+
+  // 提交错误验证码 → 横幅重现: 此时必须提示「已发短信」而非「请选择手机号」。
+  await user.type(screen.getByLabelText('验证码'), '000000')
+  await user.click(screen.getByRole('button', { name: '验证并登录' }))
+  expect(await screen.findByText(/验证码已通过短信发送|已向 \+1 555\*\*\*\*9876 发送短信验证码/)).toBeInTheDocument()
+  expect(screen.queryByText(/请选择手机号接收短信验证码/)).not.toBeInTheDocument()
+})
+
+// 短信通道下「重发验证码」不得声称推送(账号没有受信任设备, 推送不存在)。
+it('短信通道下重发提示走短信而非推送', async () => {
+  server.use(
+    http.post('/api/accounts/:id/login/begin', () =>
+      HttpResponse.json({
+        success: true,
+        data: { status: 'otp_required', session_id: 'login-session-1', push_sent: false, delivery: 'sms' },
+      }),
+    ),
+    http.post('/api/accounts/:id/login/resend', () =>
+      HttpResponse.json({ success: true, data: { sent: true, delivery: 'sms' } }),
+    ),
+  )
+  render(
+    <ICloudLoginDialog accountId="acc_1" accountEmail="owner@icloud.com" open onClose={vi.fn()} onSaved={vi.fn()} />,
+  )
+  const user = userEvent.setup()
+  await user.type(screen.getByLabelText('密码'), 'p@ssw0rd')
+  await user.click(screen.getByRole('button', { name: '登录' }))
+  await screen.findByText(/验证码已通过短信发送/)
+
+  await user.click(screen.getByRole('button', { name: '重发验证码' }))
+  expect(await screen.findByText(/已重新发送短信验证码/)).toBeInTheDocument()
+  expect(screen.queryByText(/已重新请求推送验证码/)).not.toBeInTheDocument()
+  expect(screen.queryByText(/验证码已推送到受信任设备/)).not.toBeInTheDocument()
+})
+
 // 推送失败时可用短信验证作为备选通道: 取手机号 → 发短信 → 提交短信验证码。
 it('推送失败时可改用短信验证', async () => {
   const calls: string[] = []
