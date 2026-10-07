@@ -61,6 +61,16 @@ jobs:
       - name: Test
         run: go test -race ./internal/... .
 
+      # 时区矩阵: 调度/作息/周期日逻辑按任务时区计算, DST 折叠与跨时区一致性
+      # 回归只在非 UTC 时区暴露(曾发生 Denver/Berlin 下失败而 UTC 全绿)。
+      # 用固定的一组代表时区锁住该类回归, 避免 CI 在默认 UTC 下静默放行。
+      - name: Test (timezone matrix)
+        run: |
+          for tz in America/Denver America/New_York Europe/Berlin Asia/Shanghai Australia/Brisbane; do
+            echo "=== TZ=$tz ==="
+            TZ=$tz go test ./internal/server/ ./internal/account/ ./internal/hme/ -count=1
+          done
+
       - name: Vet
         run: go vet ./internal/... .
 
