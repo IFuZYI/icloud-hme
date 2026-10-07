@@ -28,7 +28,9 @@ type WebClient struct {
 	clientID      string
 	mccGatewayURL string
 	host          string // "icloud.com" 或 "icloud.com.cn"
-	httpc         tls_client.HttpClient
+	// setupBaseURL 覆盖 validate 端点前缀; 空时用生产地址(测试注入用)。
+	setupBaseURL string
+	httpc        tls_client.HttpClient
 }
 
 // NewWebClient 创建一个 Web 邮件客户端。
@@ -117,7 +119,11 @@ func (c *WebClient) resolveMccGateway() error {
 		return nil
 	}
 
-	setupURL := "https://setup." + c.host + "/setup/ws/1/validate"
+	setupBase := c.setupBaseURL
+	if setupBase == "" {
+		setupBase = "https://setup." + c.host
+	}
+	setupURL := setupBase + "/setup/ws/1/validate"
 	req, err := http.NewRequest("POST", c.withParams(setupURL), nil)
 	if err != nil {
 		return err
@@ -131,7 +137,9 @@ func (c *WebClient) resolveMccGateway() error {
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != 200 {
+	// 任意 2xx 为成功: Apple 对成功响应不保证恰好 200(实测 201),
+	// 与 hme 包同口径(参考 any-auto-register 的 response.ok)。
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("validate 失败: HTTP %d - %s", resp.StatusCode, truncate(string(body), 200))
 	}
 
@@ -195,7 +203,8 @@ func (c *WebClient) search(payload string) ([]Message, error) {
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != 200 {
+	// 任意 2xx 为成功(与 validate 同口径)。
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("获取邮件失败: HTTP %d - %s", resp.StatusCode, truncate(string(body), 300))
 	}
 	if strings.Contains(string(body), `"success":false`) {

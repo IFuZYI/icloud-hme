@@ -163,6 +163,16 @@ type authStateInfo struct {
 	Phones []TrustedPhone
 }
 
+// isSuccessStatus 判断 HTTP 状态是否为 2xx 成功。
+//
+// 回归背景(生产日志实测): Apple 对成功响应不一定返回恰好 200——
+// GET /appleauth/auth 实测返回 201。参考实现(any-auto-register)对全部
+// 端点使用 response.ok(任意 2xx); 严格 ==200 会把成功误判为失败
+// (表现为「读取 Apple 双重认证状态失败: HTTP 201」→ 502 无法登录)。
+func isSuccessStatus(code int) bool {
+	return code >= 200 && code < 300
+}
+
 // fetchAuthState 读取 GET /appleauth/auth 并解析投递决策依据。
 //
 // 响应结构随 Apple 发版漂移: trustedPhoneNumbers 可能在
@@ -181,7 +191,7 @@ func (c *Client) fetchAuthState(state *authState, ep authEndpoints) (*authStateI
 	defer resp.Body.Close()
 	c.captureSessionHeaders(state, resp)
 	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != 200 {
+	if !isSuccessStatus(resp.StatusCode) {
 		return nil, fmt.Errorf("读取 Apple 双重认证状态失败: HTTP %d", resp.StatusCode)
 	}
 	info, err := parseAuthState(body)
@@ -265,7 +275,7 @@ func (c *Client) requestPushCode(ep authEndpoints) error {
 	}
 	defer resp.Body.Close()
 	c.captureSessionHeaders(state, resp)
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+	if !isSuccessStatus(resp.StatusCode) {
 		return fmt.Errorf("请求发送验证码失败: HTTP %d", resp.StatusCode)
 	}
 	return nil
@@ -295,7 +305,7 @@ func (c *Client) sendSMSCode(state *authState, ep authEndpoints, phoneID int, mo
 	}
 	defer resp.Body.Close()
 	c.captureSessionHeaders(state, resp)
-	if resp.StatusCode != 200 {
+	if !isSuccessStatus(resp.StatusCode) {
 		return fmt.Errorf("发送短信验证码失败: HTTP %d", resp.StatusCode)
 	}
 	recordDelivery(state, c.nowFunc())
@@ -584,7 +594,7 @@ func (c *Client) authStart(state *authState, ep authEndpoints) error {
 		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
+	if !isSuccessStatus(resp.StatusCode) {
 		return fmt.Errorf("unexpected status: %d", resp.StatusCode)
 	}
 
@@ -608,7 +618,7 @@ func (c *Client) authFederate(state *authState, ep authEndpoints) error {
 		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
+	if !isSuccessStatus(resp.StatusCode) {
 		return fmt.Errorf("unexpected status: %d", resp.StatusCode)
 	}
 	return nil
@@ -654,7 +664,7 @@ func (c *Client) authInit(state *authState, ep authEndpoints, a string) (*authIn
 	if err != nil {
 		return nil, err
 	}
-	if resp.StatusCode != 200 {
+	if !isSuccessStatus(resp.StatusCode) {
 		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	var result authInitResp
@@ -717,16 +727,17 @@ func (c *Client) authComplete(state *authState, ep authEndpoints, m1, m2 string)
 	// 每次响应(包括 401/409)都可能轮换 scnt/sessionID,必须取最新值。
 	c.captureSessionHeaders(state, resp)
 
-	switch resp.StatusCode {
-	case 200:
+	switch {
+	case isSuccessStatus(resp.StatusCode):
+		// 任意 2xx 均为成功(Apple 不保证恰好 200)。
 		return nil
-	case 409:
+	case resp.StatusCode == http.StatusConflict:
 		// 需要 2FA: 409 响应下发的 session token 是后续 MFA 请求的必需头部,
 		// 已由上方 captureSessionHeaders 按「非空才覆盖」捕获。
 		return ErrOTPRequired
-	case 403:
+	case resp.StatusCode == http.StatusForbidden:
 		return fmt.Errorf("用户名或密码错误")
-	case 412:
+	case resp.StatusCode == http.StatusPreconditionFailed:
 		return fmt.Errorf("需要先在 appleid.apple.com 同意隐私条款")
 	default:
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
@@ -792,7 +803,7 @@ func (c *Client) completeSMS(state *authState, phoneID int, code string) error {
 	}
 	defer resp.Body.Close()
 	c.captureSessionHeaders(state, resp)
-	if resp.StatusCode != 200 {
+	if !isSuccessStatus(resp.StatusCode) {
 		return fmt.Errorf("短信验证码校验失败: HTTP %d", resp.StatusCode)
 	}
 	err = c.finishLogin(state, ep)
@@ -863,7 +874,7 @@ func (c *Client) submitSecurityCode(state *authState, ep authEndpoints, code str
 	if resp.StatusCode == http.StatusConflict && resp.Header.Get("X-Apple-Session-Token") != "" {
 		return nil
 	}
-	if resp.StatusCode != 204 && resp.StatusCode != 200 {
+	if !isSuccessStatus(resp.StatusCode) {
 		return fmt.Errorf("2FA 验证失败: HTTP %d", resp.StatusCode)
 	}
 	return nil
@@ -882,7 +893,7 @@ func (c *Client) getTrust(state *authState, ep authEndpoints) error {
 		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != 204 {
+	if !isSuccessStatus(resp.StatusCode) {
 		return fmt.Errorf("trust 失败: HTTP %d", resp.StatusCode)
 	}
 	// 非空才覆盖: 204 缺头时保留此前捕获的 authToken(captureSessionHeaders 同约定)。
@@ -916,7 +927,7 @@ func (c *Client) authenticateWeb(state *authState, ep authEndpoints) error {
 		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
+	if !isSuccessStatus(resp.StatusCode) {
 		return fmt.Errorf("auth web 失败: HTTP %d (host=%s)", resp.StatusCode, c.Host)
 	}
 

@@ -563,3 +563,89 @@ func TestLoginSingleShotRejectsSelectionRequired(t *testing.T) {
 		t.Fatal("多手机号待选时单函数 Login 应明确报错")
 	}
 }
+
+// ====================================================================
+// 成功状态码兼容性: Apple 对成功响应不一定返回恰好 200
+//
+// 回归背景(生产日志实测): GET /appleauth/auth 返回 HTTP 201(2xx 成功),
+// 旧实现只接受 ==200 → 误报「读取 Apple 双重认证状态失败」→ 502
+// 「iCloud 登录失败,请稍后重试」, 用户完全无法登录。
+// 参考实现(any-auto-register)对全部端点使用 response.ok(任意 2xx)。
+// ====================================================================
+
+// 投递准备在 /appleauth/auth 返回 201 时必须成功(而非误报失败)。
+func TestDeliveryAccepts201FromAuthState(t *testing.T) {
+	m := hmetest.New(t)
+	m.RequireOTP = true
+	m.AuthStateStatus = http.StatusCreated // 201: 生产实测的成功形态
+	c := newMockedClient(t, m, "icloud.com")
+	if err := c.BeginLogin("owner@example.com", "p@ssw0rd"); err != ErrOTPRequired {
+		t.Fatalf("BeginLogin err = %v", err)
+	}
+	delivery, err := c.PrepareDelivery()
+	if err != nil {
+		t.Fatalf("201 是成功状态, PrepareDelivery 不应报错: %v", err)
+	}
+	if delivery != DeliveryPush {
+		t.Fatalf("delivery = %q, want %q", delivery, DeliveryPush)
+	}
+	if m.PushTriggerHits != 1 {
+		t.Fatalf("应推送一次, got %d", m.PushTriggerHits)
+	}
+}
+
+// 无受信任设备 + 201: 自动短信通道同样必须贯通(201 不得中断路由)。
+func TestDeliveryRoutesSMSWith201AuthState(t *testing.T) {
+	m := hmetest.New(t)
+	m.RequireOTP = true
+	m.NoTrustedDevices = true
+	m.AuthStateStatus = http.StatusCreated
+	c := newMockedClient(t, m, "icloud.com")
+	if err := c.BeginLogin("owner@example.com", "p@ssw0rd"); err != ErrOTPRequired {
+		t.Fatalf("BeginLogin err = %v", err)
+	}
+	delivery, err := c.PrepareDelivery()
+	if err != nil {
+		t.Fatalf("PrepareDelivery: %v", err)
+	}
+	if delivery != DeliverySMS || m.SMSSendHits != 1 {
+		t.Fatalf("delivery=%q sms=%d, want sms/1", delivery, m.SMSSendHits)
+	}
+}
+
+// 短信发送返回 201(成功)时不得误报失败; 且必须记录号码供提交使用。
+func TestSendSMSAccepts201(t *testing.T) {
+	m := hmetest.New(t)
+	m.RequireOTP = true
+	m.SMSSendStatus = http.StatusCreated
+	c := newMockedClient(t, m, "icloud.com")
+	if err := c.BeginLogin("owner@example.com", "p@ssw0rd"); err != ErrOTPRequired {
+		t.Fatalf("BeginLogin err = %v", err)
+	}
+	if err := c.SendSMS(2); err != nil {
+		t.Fatalf("201 是成功状态, SendSMS 不应报错: %v", err)
+	}
+	if c.Delivery() != DeliverySMS {
+		t.Fatalf("delivery = %q, want sms", c.Delivery())
+	}
+}
+
+// 短信验证码提交返回 201(成功)时必须完成登录。
+func TestCompleteSMSAccepts201(t *testing.T) {
+	m := hmetest.New(t)
+	m.RequireOTP = true
+	m.SMSVerifyStatus = http.StatusCreated
+	c := newMockedClient(t, m, "icloud.com")
+	if err := c.BeginLogin("owner@example.com", "p@ssw0rd"); err != ErrOTPRequired {
+		t.Fatalf("BeginLogin err = %v", err)
+	}
+	if err := c.SendSMS(2); err != nil {
+		t.Fatalf("SendSMS: %v", err)
+	}
+	if err := c.CompleteSMS(2, "654321"); err != nil {
+		t.Fatalf("201 是成功状态, CompleteSMS 不应报错: %v", err)
+	}
+	if c.Cookies["X-APPLE-WEBAUTH-TOKEN"] == "" {
+		t.Fatalf("登录成功后应提取到 Cookie, got %v", c.Cookies)
+	}
+}
