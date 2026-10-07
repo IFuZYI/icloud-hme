@@ -41,7 +41,12 @@ export default function ICloudLoginDialog({
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [pushSent, setPushSent] = useState(true)
+  // delivery 记录服务端实际选择的验证码通道:
+  //   trusted_devices(推送) / sms(已自动发短信) / sms_selection_required(需选手机号)。
+  const [delivery, setDelivery] = useState('')
   const [smsPhone, setSmsPhone] = useState<TrustedPhone | null>(null)
+  // phones 非空时展示手机号选择列表(多号码待选场景)。
+  const [phones, setPhones] = useState<TrustedPhone[]>([])
   const [busy, setBusy] = useState(false)
   // 只要已拿到 session_id 就处于验证码流——LOADING 期间也必须保持验证码 UI,
   // 否则提交在途时界面会闪回密码输入框、恢复按钮随之消失(审查探针抓到的缺陷)。
@@ -57,7 +62,9 @@ export default function ICloudLoginDialog({
     setError('')
     setNotice('')
     setPushSent(true)
+    setDelivery('')
     setSmsPhone(null)
+    setPhones([])
     setBusy(false)
   }
 
@@ -76,7 +83,7 @@ export default function ICloudLoginDialog({
     setNotice('')
     try {
       if (!otpRequired) {
-        const data = await request<{ status: string; session_id?: string; push_sent?: boolean }>(
+        const data = await request<{ status: string; session_id?: string; push_sent?: boolean; delivery?: string }>(
           `/api/accounts/${accountId}/login/begin`,
           { method: 'POST', body: JSON.stringify({ password }) },
         )
@@ -91,6 +98,7 @@ export default function ICloudLoginDialog({
           setSessionId(data.session_id)
           // push_sent 缺省视为已推送(兼容旧服务端)。
           setPushSent(data.push_sent !== false)
+          setDelivery(data.delivery ?? '')
           setStep('2FA_INPUT')
           return
         }
@@ -125,19 +133,26 @@ export default function ICloudLoginDialog({
     }
   }
 
-  /** 重新请求推送验证码(推送失败或未收到时的恢复路径)。 */
+  /** 重发验证码(按当前投递通道: 短信会话重发短信, 否则重发推送)。 */
   async function handleResend() {
     if (busy || !sessionId) return
     setBusy(true)
     setError('')
     setNotice('')
     try {
-      await request(`/api/accounts/${accountId}/login/resend`, {
+      const data = await request<{ sent: boolean; delivery?: string }>(`/api/accounts/${accountId}/login/resend`, {
         method: 'POST',
         body: JSON.stringify({ session_id: sessionId }),
       })
-      setPushSent(true)
-      setNotice('已重新请求推送验证码到受信任设备。')
+      // 服务端返回重发实际使用的通道(短信会话重发短信): 文案必须与之一致,
+      // 否则用户会等待一个根本不存在设备的推送(与本次修复的通道误报同类)。
+      const actual = data.delivery || delivery
+      if (actual === 'sms') {
+        setNotice(smsPhone ? `已重新向 ${smsPhone.number_with_dial_code} 发送短信验证码。` : '已重新发送短信验证码。')
+      } else {
+        setPushSent(true)
+        setNotice('已重新请求推送验证码到受信任设备。')
+      }
     } catch (err) {
       setError(err instanceof ApiError ? err.message : '重发失败，请检查服务状态')
     } finally {
@@ -145,7 +160,12 @@ export default function ICloudLoginDialog({
     }
   }
 
-  /** 改用短信验证: 取受信任手机号并向第一个号码发送短信验证码。 */
+  /**
+   * 改用短信验证: 取受信任手机号。
+   *
+   * 单号码直接发送; 多号码时列出全部待用户选择(不静默取第一个——那与
+   * 「请选择手机号」的提示矛盾), 用户点选后才发送。
+   */
   async function handleUseSMS() {
     if (busy || !sessionId) return
     setBusy(true)
@@ -159,12 +179,34 @@ export default function ICloudLoginDialog({
         setError('该账号没有受信任手机号，无法使用短信验证')
         return
       }
-      const phone = data.phones[0]
+      if (data.phones.length === 1) {
+        await sendSMS(data.phones[0])
+        return
+      }
+      setPhones(data.phones)
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : '发送短信验证码失败，请检查服务状态')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /** 向指定手机号发送短信验证码。 */
+  async function sendSMS(phone: TrustedPhone) {
+    if (busy || !sessionId) return
+    setBusy(true)
+    setError('')
+    setNotice('')
+    try {
       await request(`/api/accounts/${accountId}/login/sms`, {
         method: 'POST',
         body: JSON.stringify({ session_id: sessionId, phone_id: phone.id }),
       })
       setSmsPhone(phone)
+      setPhones([])
+      // 服务端已把会话切到短信通道: 同步本地 delivery, 否则横幅会继续要求
+      // 「选择手机号」而号码列表已收起 —— 提示一个界面上不存在的操作。
+      setDelivery('sms')
       setNotice(`已向 ${phone.number_with_dial_code} 发送短信验证码。`)
     } catch (err) {
       setError(err instanceof ApiError ? err.message : '发送短信验证码失败，请检查服务状态')
@@ -189,10 +231,14 @@ export default function ICloudLoginDialog({
         </div>
       )}
       {otpRequired && !notice && (
-        <div className={pushSent ? 'alert-info' : 'alert-warning'} role="status">
+        <div className={pushSent || delivery === 'sms' ? 'alert-info' : 'alert-warning'} role="status">
           {pushSent
             ? '验证码已推送到受信任设备。'
-            : '验证码推送失败。可点击「重发验证码」，或改用短信验证。'}
+            : delivery === 'sms'
+              ? '该账号没有受信任设备，验证码已通过短信发送。'
+              : delivery === 'sms_selection_required'
+                ? '该账号没有受信任设备，请选择手机号接收短信验证码。'
+                : '验证码推送失败。可点击「重发验证码」，或改用短信验证。'}
         </div>
       )}
       {notice && (
@@ -228,6 +274,24 @@ export default function ICloudLoginDialog({
           />
         </div>
       )}
+      {otpRequired && phones.length > 0 && (
+        <fieldset className="form-field login-phone-field">
+          <legend>选择接收短信的手机号</legend>
+          <div className="login-phone-list">
+            {phones.map((phone) => (
+              <button
+                key={phone.id}
+                type="button"
+                className="text-button login-phone-option"
+                onClick={() => void sendSMS(phone)}
+                disabled={submitting}
+              >
+                {phone.number_with_dial_code}
+              </button>
+            ))}
+          </div>
+        </fieldset>
+      )}
       {otpRequired && (
         <div className="form-actions login-recovery-actions">
           <button type="button" className="text-button" onClick={() => void handleResend()} disabled={submitting}>
@@ -239,7 +303,7 @@ export default function ICloudLoginDialog({
         </div>
       )}
       <div className="form-actions">
-        <button onClick={onClose}>取消</button>
+        <button onClick={() => { reset(); onClose() }}>取消</button>
         <button className="primary" onClick={() => void handleSubmit()} disabled={submitting}>
           {submitting ? '登录中…' : otpRequired ? '验证并登录' : '登录'}
         </button>

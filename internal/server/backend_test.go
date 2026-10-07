@@ -51,9 +51,21 @@ type fakeBackend struct {
 	aliasCallTimes []time.Time
 	listInboxQuery InboxQuery
 	reloadCount    int
+	tzID           string
+	tzValue        string
+	tzErr          error
 }
 
 func (f *fakeBackend) ListAccounts() []account.Summary { return f.accounts }
+
+// TimezoneFor 返回测试注入的账号时区;缺省为空(本地时区)。
+func (f *fakeBackend) TimezoneFor(id string) (string, error) {
+	f.tzID = id
+	if f.tzErr != nil {
+		return "", f.tzErr
+	}
+	return f.tzValue, nil
+}
 
 func (f *fakeBackend) AddAccount(in account.AddAccountInput) (account.Summary, error) {
 	f.addedInput = in

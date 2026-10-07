@@ -211,7 +211,7 @@ X-CSRF-Token: <token>
 > ```http
 > POST /api/accounts/:id/login/begin     {"password":"..."}
 >   → {"status":"done","account":{...}}                   无需 2FA
->   → {"status":"otp_required","session_id":"...","push_sent":true}   需要 2FA
+>   → {"status":"otp_required","session_id":"...","push_sent":true,"delivery":"trusted_devices"}   需要 2FA
 > POST /api/accounts/:id/login/otp       {"session_id":"...","code":"123456"}
 >   → {"status":"done","account":{...}}                   验证通过
 > POST /api/accounts/:id/login/sms       {"session_id":"...","phone_id":2}
@@ -219,9 +219,19 @@ X-CSRF-Token: <token>
 > POST /api/accounts/:id/login/resend    {"session_id":"..."}
 > ```
 >
-> `push_sent` 表示验证码是否已成功推送到受信任设备：`false` 时用户可调用
-> `login/resend` 手动重发，或改用短信验证（`login/phones` + `login/sms`）。
+> `delivery` 表示服务端实际选择的验证码通道（参考 any-auto-register 的
+> prepare_verification，409 之后按账号条件自动决定）：
 >
+> | delivery | 含义 | 前端提示 |
+> |---|---|---|
+> | `trusted_devices` | 已推送到受信任设备 | 验证码已推送到受信任设备 |
+> | `sms` | 无受信任设备、单手机号 → 已自动发短信 | 验证码已通过短信发送 |
+> | `sms_selection_required` | 无受信任设备、多手机号 → 需选择号码 | 请选择手机号接收短信验证码 |
+>
+> `push_sent` 等价于 `delivery == "trusted_devices"`（保留兼容）。
+> 无受信任设备且无手机号时投递失败并返回错误（不会静默等一个收不到的验证码）。
+>
+> 投递限流：同一会话最多 5 次、每次间隔 ≥30 秒；超限返回 `429 OTP_DELIVERY_LIMITED`。
 > 会话有效期 5 分钟；验证码错误时会话保留，可直接重试；成功或过期后会话失效。
 
 ### 10b. 检测账号登录态
@@ -262,7 +272,8 @@ X-CSRF-Token: <token>
 
 - `account_id` 必填
 - `label` 必填，长度 ≤200 字符；可自由输入（不再限定名称库）
-- 同一账号任何两次创建尝试（成功或失败、人工或自动）至少相隔 20 分钟；过早请求返回 `429 CREATION_COOLDOWN`
+- 同一账号任意连续 60 分钟内创建尝试（成功或失败、人工或自动）最多 5 次；超限返回 `429 CREATION_HOURLY_LIMIT`
+- 同一账号两次「人工」创建尝试至少相隔 20 分钟；过早请求返回 `429 CREATION_COOLDOWN`
 - 单个账号当天最多创建 50 个（人工创建与自动任务合并统计）；超过上限返回 `429 CREATION_LIMIT_REACHED`
 - 若上游创建失败，已预留的人工创建额度会归还
 
@@ -564,7 +575,7 @@ curl -b cookies.txt "$BASE/api/inbox?account_id=acc_1&limit=10"
 
 ## 限制
 
-- **创建频率**：同账号所有创建尝试至少相隔 20 分钟；自动任务分自主（每天 1–50 个，按当天剩余时间分摊，含活跃度权重与随机扰动）与定时（每 20–1440 分钟创建 1–20 个）两类，并对人工与自动创建合计执行每账号每天 50 个上限；上游失败不自动重试，自动任务会暂停等待人工确认。
+- **创建频率**：同账号任意连续 60 分钟内创建尝试（成功或失败、人工或自动）最多 5 次；两次「人工」创建尝试至少相隔 20 分钟。自动任务分自主（每天 1–50 个，按拟人模型分摊：用户画像 + 日/周周期 + 会话自激 + 对数正态间隔，作息时区跟随账号代理出口 IP）与定时（每 20–1440 分钟创建 1–20 个，同样受滚动小时上限约束）两类，并对人工与自动创建合计执行每账号每天 50 个上限；上游失败不自动重试，自动任务会暂停等待人工确认。
 - **Cookie 有效期**：约 24 小时，需定期更新
 - **邮件读取**：依赖 IMAP 连接，超时默认 30 秒
 - **请求体上限**：1 MiB

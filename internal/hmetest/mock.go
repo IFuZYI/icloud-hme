@@ -52,6 +52,15 @@ type Server struct {
 	AuthStateBody string
 	SMSSendBody   map[string]any
 	SMSVerifyBody map[string]any
+	// NoTrustedDevices 为 true 时 /appleauth/auth 返回 noTrustedDevices=true
+	// (账号没有任何受信任设备, 推送验证码无处可去)。
+	NoTrustedDevices bool
+	// PhonePushMode 是 /appleauth/auth 里首个手机号的 pushMode(默认 "sms")。
+	PhonePushMode string
+	// AuthStateHits 是 /appleauth/auth 的命中次数。
+	AuthStateHits int
+	// SMSSendHits 是 /verify/phone 的命中次数。
+	SMSSendHits int
 }
 
 // New 启动 mock 服务,测试结束自动关闭。
@@ -220,10 +229,20 @@ func New(t testing.TB) *Server {
 	mux.HandleFunc("/appleauth/auth", func(w http.ResponseWriter, r *http.Request) {
 		m.mu.Lock()
 		body := m.AuthStateBody
+		noDevices := m.NoTrustedDevices
+		pushMode := m.PhonePushMode
+		m.AuthStateHits++
 		m.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		if body == "" {
-			body = `{"phoneNumberVerification":{"trustedPhoneNumbers":[{"id":2,"numberWithDialCode":"+86 138****1234"}]}}`
+			if pushMode == "" {
+				pushMode = "sms"
+			}
+			noDevicesField := ""
+			if noDevices {
+				noDevicesField = `"noTrustedDevices":true,`
+			}
+			body = `{` + noDevicesField + `"phoneNumberVerification":{"trustedPhoneNumbers":[{"id":2,"numberWithDialCode":"+86 138****1234","pushMode":"` + pushMode + `"}]}}`
 		}
 		_, _ = w.Write([]byte(body))
 	})
@@ -234,6 +253,7 @@ func New(t testing.TB) *Server {
 		_ = json.Unmarshal(body, &payload)
 		m.mu.Lock()
 		m.SMSSendBody = payload
+		m.SMSSendHits++
 		m.mu.Unlock()
 		w.WriteHeader(http.StatusOK)
 	})

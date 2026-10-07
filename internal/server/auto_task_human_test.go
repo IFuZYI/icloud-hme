@@ -143,15 +143,20 @@ func TestResetDailyCountRestoresFullQuotaNextDay(t *testing.T) {
 func TestRunOnceHonorsTodayQuota(t *testing.T) {
 	be := &taskBackend{}
 	m := newAutoTaskManager(t.TempDir()+"/task.json", be)
+	// 固定时钟与画像: 配额按作息周期重置, 必须让测试的 DailyDate 与周期一致。
+	now := testWeekday(10, 0)
+	m.now = func() time.Time { return now }
 	task, err := m.create(aliasTaskInput{Enabled: false, AccountID: "a", Mode: taskModeAuto, TargetCount: 100, DailyLimit: 20})
 	if err != nil {
 		t.Fatal(err)
 	}
+	p := personaByName("standard")
 	m.mu.Lock()
 	task.Enabled = true
+	task.Persona = "standard"
 	task.DailyCount = 10
 	task.TodayQuota = 10 // 今天只该创建 10 个(中午启动)
-	task.DailyDate = taskDate(time.Now())
+	task.DailyDate = p.cycleDateAt(now.In(time.Local))
 	m.tasks[task.ID] = task
 	m.mu.Unlock()
 
@@ -169,90 +174,39 @@ func TestRunOnceHonorsTodayQuota(t *testing.T) {
 
 func TestNextAutoDelayUsesTodayQuota(t *testing.T) {
 	m := newAutoTaskManager(t.TempDir()+"/task.json", &taskBackend{})
-	m.jitter = func() float64 { return 1.0 }
+	m.rand = func() float64 { return 0.5 }
 
-	// DailyLimit=20 但今日配额 10、已建 9:剩余 1 个,应在窗口内配速而非按 20 计。
-	task := AliasTask{Mode: taskModeAuto, DailyLimit: 20, DailyCount: 9, TodayQuota: 10}
-	now := atHour(12, 0)
+	// DailyLimit=20 但今日配额 10、已建 9: 剩余 1 个, 应给出正间隔而非按 20 计。
+	task := AliasTask{Mode: taskModeAuto, DailyLimit: 20, DailyCount: 9, TodayQuota: 10, Persona: "standard"}
+	now := testWeekday(12, 0)
 	delay := m.nextAutoDelay(task, now)
 	if delay <= 0 || delay > 12*time.Hour {
 		t.Fatalf("delay = %v, 应在窗口内", delay)
 	}
-	// 已建 10(达到今日配额):推迟到次日。
-	exhausted := AliasTask{Mode: taskModeAuto, DailyLimit: 20, DailyCount: 10, TodayQuota: 10}
-	if got := m.nextAutoDelay(exhausted, now); got != nextDailyRun(now).Sub(now) {
-		t.Fatalf("配额用尽应推迟到次日, got %v", got)
+	// 已建 10(达到今日配额): 必须推迟到下一作息段(次日睡醒), 而不是按
+	// DailyLimit=20 继续排——若实现忽略 TodayQuota, 落点会留在当天。
+	// 反变异: nextAutoDelay 用 DailyLimit-DailyCount 时此断言失败。
+	exhausted := AliasTask{Mode: taskModeAuto, DailyLimit: 20, DailyCount: 10, TodayQuota: 10, Persona: "standard"}
+	got := m.nextAutoDelay(exhausted, now)
+	if got <= 16*time.Hour {
+		t.Fatalf("配额用尽的间隔 %v 应推到次日睡醒(约 17h)", got)
 	}
 }
 
-// ============ 自主任务: 拟人化扰动与活跃度权重 ============
+// ============ 自主任务: 拟人模型（画像 / 会话自激 / 滚动门控） ============
 
-func TestActivityWeightCurveShape(t *testing.T) {
-	if activityWeight(10) <= activityWeight(23) {
+func TestPersonaCurveShape(t *testing.T) {
+	p := personaByName("standard")
+	if p.weightAt(testWeekday(10, 0)) <= p.weightAt(testWeekday(22, 0)) {
 		t.Fatal("上午权重应高于深夜")
 	}
-	if activityWeight(12) >= activityWeight(10) {
+	if p.weightAt(testWeekday(12, 0)) >= p.weightAt(testWeekday(10, 0)) {
 		t.Fatal("午休权重应低于上午高峰")
 	}
-	if activityWeight(0) != 0 || activityWeight(7) != 0 {
-		t.Fatal("窗口外(0-7 点)权重应为 0")
+	if p.weightAt(testWeekday(3, 0)) != 0 {
+		t.Fatal("睡眠时段(03:00)权重应为 0")
 	}
-	if avg := averageActivityWeight(); avg <= 0 {
-		t.Fatalf("平均权重应为正, got %v", avg)
-	}
-}
-
-func TestPaceDelayScalesByActivityWeight(t *testing.T) {
-	m := newAutoTaskManager(t.TempDir()+"/task.json", &taskBackend{})
-	m.jitter = func() float64 { return 1.0 }
-	_, end := autoActiveWindow(atHour(10, 0), 1)
-
-	// 高活跃时段(14:00)间隔应小于均匀配速;深夜(23:00)权重最低,
-	// 结果被钳制在窗口剩余时长内(不会再往外推)。
-	uniform := end.Sub(atHour(14, 0)) / 4
-	fast := m.paceDelay(atHour(14, 0), end, 4)
-	if fast >= uniform {
-		t.Fatalf("14:00 的间隔 %v 应小于均匀配速 %v", fast, uniform)
-	}
-	remaining := end.Sub(atHour(23, 0))
-	slow := m.paceDelay(atHour(23, 0), end, 1)
-	if slow > remaining {
-		t.Fatalf("23:00 的间隔 %v 不应超过窗口剩余 %v", slow, remaining)
-	}
-	// 深夜权重(0.4)低于全天平均: 未钳制前应比均匀配速更长。
-	if w := activityWeight(23); w >= averageActivityWeight() {
-		t.Fatalf("23:00 权重 %v 应低于平均 %v", w, averageActivityWeight())
-	}
-}
-
-func TestNextAutoDelayNeverBelowCooldownWithWeights(t *testing.T) {
-	m := newAutoTaskManager(t.TempDir()+"/task.json", &taskBackend{})
-	m.jitter = func() float64 { return 1.0 }
-	// 深夜(权重最低)配速会被压到 20 分钟以下,必须由冷却地板兜住。
-	task := AliasTask{Mode: taskModeAuto, DailyLimit: 50, DailyCount: 0, TodayQuota: 50}
-	delay := m.nextAutoDelay(task, atHour(23, 55))
-	if delay < minCreationCooldown {
-		t.Fatalf("delay %v 低于冷却下限 %v", delay, minCreationCooldown)
-	}
-}
-
-func TestHumanJitterProducesOccasionalBreaks(t *testing.T) {
-	lo, hi := 1-autoJitterSigma, 1+autoJitterSigma
-	breaks := 0
-	const n = 20000
-	for i := 0; i < n; i++ {
-		f := humanJitter()
-		switch {
-		case f >= lo-1e-9 && f <= hi+1e-9:
-			// 常规扰动
-		case f >= 2.0 && f < 4.0:
-			breaks++
-		default:
-			t.Fatalf("jitter %v 落在常规与长暂停之外", f)
-		}
-	}
-	ratio := float64(breaks) / float64(n)
-	if ratio < 0.06 || ratio > 0.20 {
-		t.Fatalf("长暂停比例 %.3f 偏离预期(≈%.2f)", ratio, autoBreakChance)
+	if p.avgWeekday <= 0 {
+		t.Fatalf("平均权重应为正, got %v", p.avgWeekday)
 	}
 }

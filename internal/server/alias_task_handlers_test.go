@@ -77,11 +77,9 @@ func TestCreateAliasRejectsManualCreationWhenAccountDailyLimitIsReached(t *testi
 	f := &fakeBackend{created: &hme.CreateResult{Email: "new@icloud.com", Label: "GitHub"}}
 	s, ts := newTestServer(t, f)
 	defer ts.Close()
+	// 账号级自然日计数器已用满(自动创建占用 50 个)。
 	today := time.Now().Format("2006-01-02")
-	s.task.tasks["task_daily_cap"] = AliasTask{
-		ID: "task_daily_cap", AccountID: "acc_1", Enabled: true, Mode: taskModeScheduled, IntervalMinutes: 60, BatchCount: 1,
-		DailyLimit: maxTaskDailyLimit, MaxTotal: 100, DailyCount: maxTaskDailyLimit, DailyDate: today,
-	}
+	s.task.autoDaily["acc_1"] = dailyCreationCounter{Date: today, Count: maxTaskDailyLimit}
 	session, csrf := login(t, ts, "admin-pass-2026-strong")
 	status, body := aliasTaskRequest(t, ts.URL, session, csrf, http.MethodPost, "/api/create", `{"account_id":"acc_1","label":"GitHub"}`)
 	if status != http.StatusTooManyRequests {

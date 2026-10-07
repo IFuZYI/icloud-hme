@@ -125,16 +125,20 @@ func TestAutoTaskScheduledBatchCreatesMultiplePerRun(t *testing.T) {
 func TestAutoTaskUsesLabelLibraryAndEnforcesDailyCap(t *testing.T) {
 	be := &taskBackend{}
 	m := newAutoTaskManager(t.TempDir()+"/task.json", be)
+	// 固定时钟与画像, 使每日上限行为与运行时刻无关。
+	now := testWeekday(10, 0)
+	m.now = func() time.Time { return now }
 	task, e := m.create(aliasTaskInput{Enabled: false, AccountID: "a", IntervalMinutes: 20, TargetCount: 25, DailyLimit: 20})
 	if e != nil {
 		t.Fatal(e)
 	}
 	m.mu.Lock()
 	task.Enabled = true
+	task.Persona = "standard"
 	task.CreatedCount = 19
 	task.DailyCount = 19
 	task.TodayQuota = task.DailyLimit // 满额当日配额,隔离首日折算的影响
-	task.DailyDate = taskDate(time.Now())
+	task.DailyDate = taskDate(now)
 	m.tasks[task.ID] = task
 	m.mu.Unlock()
 	task = m.runOnce(task.ID)
@@ -153,12 +157,16 @@ func TestAutoTaskUsesLabelLibraryAndEnforcesDailyCap(t *testing.T) {
 func TestAutoTaskPausesImmediatelyAfterCreationFailure(t *testing.T) {
 	be := &taskBackend{createErr: errors.New("iCloud 提示操作过于频繁")}
 	m := newAutoTaskManager(t.TempDir()+"/task.json", be)
+	// 固定时钟到白天(画像清醒时段), 隔离睡眠推迟逻辑对断言的干扰。
+	now := testWeekday(10, 0)
+	m.now = func() time.Time { return now }
 	task, err := m.create(aliasTaskInput{Enabled: false, AccountID: "a", IntervalMinutes: 20, TargetCount: 2, DailyLimit: 20})
 	if err != nil {
 		t.Fatal(err)
 	}
 	m.mu.Lock()
 	task.Enabled = true
+	task.Persona = "standard"
 	m.tasks[task.ID] = task
 	m.mu.Unlock()
 
@@ -174,12 +182,15 @@ func TestAutoTaskPausesImmediatelyAfterCreationFailure(t *testing.T) {
 func TestAutoTaskReservesDailyCapacityBeforeCallingUpstream(t *testing.T) {
 	be := &taskBackend{createErr: errors.New("upstream timeout")}
 	m := newAutoTaskManager(t.TempDir()+"/task.json", be)
+	now := testWeekday(10, 0)
+	m.now = func() time.Time { return now }
 	task, err := m.create(aliasTaskInput{Enabled: false, AccountID: "a", IntervalMinutes: 20, TargetCount: 2, DailyLimit: 20})
 	if err != nil {
 		t.Fatal(err)
 	}
 	m.mu.Lock()
 	task.Enabled = true
+	task.Persona = "standard"
 	m.tasks[task.ID] = task
 	m.mu.Unlock()
 

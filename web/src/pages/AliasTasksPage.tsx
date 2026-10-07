@@ -62,7 +62,7 @@ export default function AliasTasksPage() {
 
   return <section>
     <div className="task-page-header">
-      <div><h2>自动创建任务</h2><p>自主任务按每天数量自动安排时间，定时任务按固定周期创建；两者都在达到目标数量后停止。同账号创建尝试至少间隔 20 分钟、每日合计最多 50 个，任何失败立即暂停。</p></div>
+      <div><h2>自动创建任务</h2><p>自主任务按每天数量自动安排时间，定时任务按固定周期创建；两者都在达到目标数量后停止。同账号任意连续 60 分钟内创建最多 5 个、两次手动创建至少间隔 20 分钟、每日合计最多 50 个，任何失败立即暂停。</p></div>
       <button className="primary task-create-button" onClick={() => { setEdit(undefined); setOpen(true) }}><IconPlus size={16} />新建任务</button>
     </div>
     {error && <div className="alert-error" role="alert">{error}</div>}

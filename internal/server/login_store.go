@@ -18,6 +18,11 @@ import (
 // 该接口让 server 层不直接依赖 *hme.Client,便于测试注入脚本化会话。
 type LoginSession interface {
 	Begin(password string) error
+	// PrepareDelivery 决定验证码投递方式并发起投递, 返回
+	// trusted_devices / sms / sms_selection_required。
+	PrepareDelivery() (string, error)
+	// Delivery 返回当前会话的验证码投递方式(未决定时为空串)。
+	Delivery() string
 	CompleteOTP(code string) error
 	CompleteSMS(phoneID int, code string) error
 	ResendOTP() error
@@ -43,6 +48,18 @@ func (l *lockedSession) Begin(password string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.raw.Begin(password)
+}
+
+func (l *lockedSession) PrepareDelivery() (string, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.raw.PrepareDelivery()
+}
+
+func (l *lockedSession) Delivery() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.raw.Delivery()
 }
 
 func (l *lockedSession) CompleteOTP(code string) error {

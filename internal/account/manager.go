@@ -5,6 +5,7 @@
 package account
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"icloud-hme/internal/geo"
 	"icloud-hme/internal/hme"
 	"icloud-hme/internal/mail"
 )
@@ -36,6 +38,9 @@ type Account struct {
 	LastValidated string            `json:"last_validated"`
 	LastError     string            `json:"last_error,omitempty"`
 	CreatedAt     string            `json:"created_at"`
+	// Timezone 为代理出口 IP 的地理时区（IANA 名称，如 America/Denver），
+	// 由 TimezoneFor 解析并缓存；代理变更时清除。空串表示尚未解析或使用本地时区。
+	Timezone string `json:"timezone,omitempty"`
 }
 
 // MailboxConfig describes an external mailbox used to receive forwarded mail.
@@ -54,6 +59,9 @@ type Manager struct {
 	dataDir  string
 	dataFile string
 	imapPool *mail.Pool // IMAP 长连接池
+	// tzResolver 解析代理出口 IP 的地理时区;缺省为 geo.NewResolver()。
+	// 惰性解析并按账号缓存(见 TimezoneFor)。测试可在同包内直接替换。
+	tzResolver geo.Resolver
 }
 
 // cloneCookies 返回 Cookie map 的独立副本。
@@ -378,10 +386,51 @@ func (m *Manager) UpdateProxy(id, proxy string) (Summary, error) {
 		return Summary{}, fmt.Errorf("账号不存在: %s", id)
 	}
 	acc.Proxy = proxy
+	// 代理变更后旧时区不再可信，清除缓存；下一次调度会按新出口 IP 重新解析。
+	acc.Timezone = ""
 	if err := m.save(); err != nil {
 		return Summary{}, err
 	}
 	return acc.Summary(), nil
+}
+
+// TimezoneFor 返回账号调度应使用的 IANA 时区名：优先返回已缓存的解析结果，
+// 否则通过账号代理请求地理服务解析（跟随代理出口 IP），成功后写入缓存并持久化。
+//
+// 无代理的账号直接返回空串（调用方回退服务器本地时区）。解析失败时返回错误，
+// 调用方应回退本地时区，绝不让调度因解析失败而停摆。
+func (m *Manager) TimezoneFor(id string) (string, error) {
+	m.mu.RLock()
+	acc, ok := m.accounts[id]
+	var proxy, cached string
+	if ok {
+		proxy, cached = acc.Proxy, acc.Timezone
+	}
+	resolver := m.tzResolver
+	m.mu.RUnlock()
+	if !ok {
+		return "", fmt.Errorf("账号不存在: %s", id)
+	}
+	if cached != "" {
+		return cached, nil
+	}
+	if proxy == "" {
+		return "", nil
+	}
+	if resolver == nil {
+		resolver = geo.NewResolver()
+	}
+	tz, err := resolver.TimezoneFor(context.Background(), proxy)
+	if err != nil {
+		return "", err
+	}
+	m.mu.Lock()
+	if acc := m.accounts[id]; acc != nil && acc.Proxy == proxy {
+		acc.Timezone = tz
+		_ = m.save()
+	}
+	m.mu.Unlock()
+	return tz, nil
 }
 
 // RemoveAccount 删除账号。
@@ -674,6 +723,14 @@ func (s *HMELoginSession) CompleteSMS(phoneID int, code string) error {
 }
 
 func (s *HMELoginSession) ResendOTP() error { return s.client.ResendOTP() }
+
+// PrepareDelivery 决定验证码投递方式并发起投递(推送/短信/待选)。
+func (s *HMELoginSession) PrepareDelivery() (string, error) {
+	return s.client.PrepareDelivery()
+}
+
+// Delivery 返回当前会话的验证码投递方式。
+func (s *HMELoginSession) Delivery() string { return s.client.Delivery() }
 
 func (s *HMELoginSession) TrustedPhones() ([]hme.TrustedPhone, error) {
 	return s.client.TrustedPhones()

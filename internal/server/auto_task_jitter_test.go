@@ -5,116 +5,75 @@ import (
 	"time"
 )
 
-// atHour 返回今天指定小时的时刻，便于活动窗口相关断言。
+// atHour 返回固定日期(2026-10-07 周三)的时刻, 与 testWeekday 同源,
+// 避免测试依赖运行时刻的日历日(跨零点运行时可能翻转, 曾造成偶发失败)。
 func atHour(hour, min int) time.Time {
-	now := time.Now()
-	return time.Date(now.Year(), now.Month(), now.Day(), hour, min, 0, 0, now.Location())
+	return time.Date(2026, 10, 7, hour, min, 0, 0, time.Local)
 }
 
-func TestNextAutoDelayPacesRemainingBudgetWithinWindow(t *testing.T) {
-	m := newAutoTaskManager(t.TempDir()+"/task.json", &taskBackend{})
-	// 关闭随机扰动，验证纯配速逻辑。
-	m.jitter = func() float64 { return 1.0 }
-
-	// 每日 10 个，已创建 0 个，正处于窗口起点 08:00。
-	task := AliasTask{Mode: taskModeAuto, DailyLimit: 10, DailyCount: 0, TodayQuota: 10}
-	now := atHour(autoActiveStartHour, 0)
-	delay := m.nextAutoDelay(task, now)
-
-	// 基准 = 窗口剩余 16h ÷ 10 个，再按 08:00 的活跃度权重缩放
-	// (清晨权重低 → 间隔拉长,权重曲线见 activityWeight)。
-	_, end := autoActiveWindow(now, 10)
-	want := m.paceDelay(now, end, 10)
-	if delay != want {
-		t.Fatalf("base pacing delay = %v, want %v", delay, want)
-	}
-}
+// ---- 拟人模型在调度路径上的行为（配速/自校正/窗口边界）----
 
 func TestNextAutoDelaySelfCorrectsWhenBehind(t *testing.T) {
 	m := newAutoTaskManager(t.TempDir()+"/task.json", &taskBackend{})
-	m.jitter = func() float64 { return 1.0 }
+	m.rand = func() float64 { return 0.5 }
 
-	// 每日 10 个，已到 20:00 还剩 8 个未创建：剩余 4h/8 = 30 分钟基准,
-	// 比窗口起点(08:00)的基准更密 —— 配速随剩余预算自校正。
-	task := AliasTask{Mode: taskModeAuto, DailyLimit: 10, DailyCount: 2, TodayQuota: 10}
-	now := atHour(20, 0)
-	delay := m.nextAutoDelay(task, now)
-
-	_, end := autoActiveWindow(now, 8)
-	want := m.paceDelay(now, end, 8)
-	if delay != want {
-		t.Fatalf("self-correct delay = %v, want %v", delay, want)
+	// 20:00(standard 画像): 剩余配额越少, 平均间隔越长(把配额铺开到入睡前),
+	// 即落后时自动加速、完成多时自动放缓——自校正方向必须被定量断言。
+	// 反变异: 实现若用 DailyLimit 而非剩余配额(丢掉自校正), 两者相等, 本测试失败。
+	now := testWeekday(20, 0)
+	full := AliasTask{Mode: taskModeAuto, DailyLimit: 10, DailyCount: 0, TodayQuota: 10, Persona: "standard"}
+	late := AliasTask{Mode: taskModeAuto, DailyLimit: 10, DailyCount: 8, TodayQuota: 10, Persona: "standard"}
+	dFull := m.nextAutoDelay(full, now)
+	dLate := m.nextAutoDelay(late, now)
+	if dFull <= 0 || dLate <= 0 {
+		t.Fatalf("delay 应为正: full=%v late=%v", dFull, dLate)
 	}
-	// 与清晨相比更密(晚间高峰权重 0.9 > 清晨 0.5)。
-	early := atHour(autoActiveStartHour, 0)
-	_, earlyEnd := autoActiveWindow(early, 8)
-	if delay >= m.paceDelay(early, earlyEnd, 8) {
-		t.Fatalf("晚间配速 %v 应比清晨更密", delay)
+	if dLate <= dFull {
+		t.Fatalf("自校正方向错误: 剩余少应间隔更长(late=%v), 剩余多应更短(full=%v)", dLate, dFull)
 	}
 }
 
-func TestNextAutoDelayNeverBelowCooldown(t *testing.T) {
+func TestNextAutoDelayNeverBelowSpacingFloor(t *testing.T) {
 	m := newAutoTaskManager(t.TempDir()+"/task.json", &taskBackend{})
-	m.jitter = func() float64 { return 1.0 }
+	m.rand = func() float64 { return 0.5 }
 
-	// 每日 50 个但只剩 5 分钟窗口：基准会远小于冷却下限，必须被夹到 20 分钟。
-	task := AliasTask{Mode: taskModeAuto, DailyLimit: 50, DailyCount: 0, TodayQuota: 50}
-	now := atHour(autoActiveEndHour, 0).Add(-5 * time.Minute) // 23:55
-	delay := m.nextAutoDelay(task, now)
-	if delay < minCreationCooldown {
-		t.Fatalf("delay %v breached cooldown floor %v", delay, minCreationCooldown)
+	// 每日 50 个但已接近入睡：间隔不得低于最短间隔地板。
+	task := AliasTask{Mode: taskModeAuto, DailyLimit: 50, DailyCount: 0, TodayQuota: 50, Persona: "standard"}
+	delay := m.nextAutoDelay(task, testWeekday(22, 50))
+	if delay < minCreationSpacing {
+		t.Fatalf("delay %v 低于最短间隔 %v", delay, minCreationSpacing)
 	}
 }
 
-func TestNextAutoDelayWaitsForWindowStart(t *testing.T) {
+func TestNextAutoDelayWaitsForWakeDuringSleep(t *testing.T) {
 	m := newAutoTaskManager(t.TempDir()+"/task.json", &taskBackend{})
-	m.jitter = func() float64 { return 1.0 }
+	m.rand = func() float64 { return 0.5 }
 
-	// 凌晨 03:00 处于窗口外，应顺延到窗口起点 08:00。
-	task := AliasTask{Mode: taskModeAuto, DailyLimit: 10, DailyCount: 0, TodayQuota: 10}
-	now := atHour(3, 0)
+	// 03:00 处于 standard 画像(23-5 睡)的睡眠期，应顺延到睡醒之后。
+	task := AliasTask{Mode: taskModeAuto, DailyLimit: 10, DailyCount: 0, TodayQuota: 10, Persona: "standard"}
+	now := testWeekday(3, 0)
 	delay := m.nextAutoDelay(task, now)
-	want := atHour(autoActiveStartHour, 0).Sub(now)
-	if delay != want {
-		t.Fatalf("pre-window delay = %v, want %v (until %02d:00)", delay, want, autoActiveStartHour)
+	at := now.Add(delay)
+	if p := personaByName("standard"); p.sleepingAt(at) {
+		t.Fatalf("落点 %v 仍在睡眠期 (delay=%v)", at, delay)
+	}
+	if delay < 2*time.Hour {
+		t.Fatalf("delay = %v, 应至少等到 05:00 后", delay)
 	}
 }
 
 func TestNextAutoDelayDefersWhenDailyBudgetExhausted(t *testing.T) {
 	m := newAutoTaskManager(t.TempDir()+"/task.json", &taskBackend{})
-	m.jitter = func() float64 { return 1.0 }
+	m.rand = func() float64 { return 0.5 }
 
-	task := AliasTask{Mode: taskModeAuto, DailyLimit: 10, DailyCount: 10, TodayQuota: 10}
-	now := atHour(14, 0)
+	task := AliasTask{Mode: taskModeAuto, DailyLimit: 10, DailyCount: 10, TodayQuota: 10, Persona: "standard"}
+	now := testWeekday(14, 0)
 	delay := m.nextAutoDelay(task, now)
-	want := nextDailyRun(now).Sub(now)
-	if delay != want {
-		t.Fatalf("exhausted-budget delay = %v, want defer to next day %v", delay, want)
+	at := now.Add(delay)
+	if p := personaByName("standard"); p.sleepingAt(at) {
+		t.Fatalf("配额耗尽后的落点 %v 不应在睡眠期", at)
 	}
-}
-
-func TestTriangularJitterStaysWithinBounds(t *testing.T) {
-	lo := 1 - autoJitterSigma
-	hi := 1 + autoJitterSigma
-	for i := 0; i < 10000; i++ {
-		f := triangularJitter()
-		if f < lo-1e-9 || f > hi+1e-9 {
-			t.Fatalf("jitter factor %v out of [%v,%v]", f, lo, hi)
-		}
-	}
-}
-
-func TestActiveWindowExpandsForLargeDailyCount(t *testing.T) {
-	now := atHour(12, 0)
-	// 50 个 × 20 分钟冷却 = 1000 分钟 = 16.67h，超过默认 16h 窗口，起点须前移。
-	start, end := autoActiveWindow(now, 50)
-	span := end.Sub(start)
-	needed := time.Duration(50) * minCreationCooldown
-	if span < needed {
-		t.Fatalf("window span %v cannot fit %v of required cooldown", span, needed)
-	}
-	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-	if start.Before(dayStart) {
-		t.Fatalf("window start %v moved before midnight", start)
+	if delay < time.Hour {
+		t.Fatalf("配额耗尽应推迟到下一作息段, got %v", delay)
 	}
 }

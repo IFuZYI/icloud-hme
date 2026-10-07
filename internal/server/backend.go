@@ -72,11 +72,19 @@ type Backend interface {
 	GetMessage(string, string) (*mail.FullMessage, error)
 	DeleteMessage(string, string) error
 	Reload() error
+	// TimezoneFor 返回账号调度使用的 IANA 时区名（跟随代理出口 IP 解析并缓存）；
+	// 无代理返回空串，解析失败返回错误（调用方回退本地时区）。
+	TimezoneFor(string) (string, error)
 }
 
 // managerBackend 是生产 Backend,包装 *account.Manager。
 type managerBackend struct {
 	mgr *account.Manager
+}
+
+// TimezoneFor 返回账号调度时区（跟随代理出口 IP）。
+func (b *managerBackend) TimezoneFor(id string) (string, error) {
+	return b.mgr.TimezoneFor(id)
 }
 
 // ListAccounts 返回账号安全摘要列表。
@@ -200,6 +208,18 @@ func classifyLoginErr(err error) *BackendError {
 	}
 	if strings.Contains(msg, "2FA 验证失败") {
 		return &BackendError{Status: http.StatusUnauthorized, Code: "OTP_INVALID", Message: "OTP 验证码错误"}
+	}
+	// 验证码投递限流(30 秒冷却 / 5 次上限): 映射为 429, 让前端提示稍后重试。
+	if strings.Contains(msg, "验证码发送次数过多") || strings.Contains(msg, "发送过于频繁") {
+		return &BackendError{Status: http.StatusTooManyRequests, Code: "OTP_DELIVERY_LIMITED", Message: msg}
+	}
+	// 确定性投递错误(无设备/无号码/待选/缺号码): 属于用户可修正的条件,
+	// 映射为 400 而不是 502——502 的「稍后重试」对这些场景是误导。
+	if strings.Contains(msg, "没有可用的双重认证设备或手机号") ||
+		strings.Contains(msg, "请先选择接收验证码的手机号") ||
+		strings.Contains(msg, "短信会话缺少接收号码") ||
+		strings.Contains(msg, "请改用两段式登录选择接收号码") {
+		return &BackendError{Status: http.StatusBadRequest, Code: "VALIDATION_ERROR", Message: msg}
 	}
 	if strings.Contains(msg, "账号不存在") {
 		return &BackendError{Status: http.StatusNotFound, Code: "ACCOUNT_NOT_FOUND", Message: "账号不存在"}
