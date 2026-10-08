@@ -35,7 +35,7 @@ type Message struct {
 	Subject string `json:"subject"`
 	Date    string `json:"date"`
 	Preview string `json:"preview"`
-	// Folder 是邮件所在文件夹(INBOX / Junk)。IMAP 的 UID 按文件夹生效,
+	// Folder 是邮件所在文件夹(INBOX / Junk / 网易「垃圾邮件」)。IMAP 的 UID 按文件夹生效,
 	// 读正文/删除必须带上它才能定位到正确的邮件。
 	Folder string `json:"folder,omitempty"`
 }
@@ -44,7 +44,9 @@ type Message struct {
 //
 // HME 转发到 iCloud 邮箱的邮件常被 iCloud 判为垃圾邮件(实测如此),
 // 只查 INBOX 会漏掉整箱验证码。扫描顺序无关紧要,结果按时间合并排序。
-var MailFolders = []string{"INBOX", "Junk"}
+// 「垃圾邮件」是网易 163/126 的垃圾邮件夹名(非 Junk), 不扫同样会漏;
+// 文件夹名由 go-imap 自动做 UTF-7 编码, 不存在的候选会被跳过。
+var MailFolders = []string{"INBOX", "Junk", "垃圾邮件"}
 
 // FullMessage 是一封邮件的完整内容(含正文)。
 type FullMessage struct {
@@ -72,6 +74,19 @@ func NewClientWithServer(username, password, server string, port int) *Client {
 	return &Client{username: username, password: password, server: server, port: port}
 }
 
+// dialIMAP 拨号 TLS IMAP 服务器。抽成变量供测试注入进程内服务器
+// (自签证书无法通过默认校验), 生产路径行为不变。
+var dialIMAP = func(addr string) (*client.Client, error) {
+	return client.DialTLS(addr, nil)
+}
+
+// OverrideDialForTest 替换 IMAP 拨号函数(仅测试使用), 返回恢复函数。
+func OverrideDialForTest(fn func(addr string) (*client.Client, error)) func() {
+	prev := dialIMAP
+	dialIMAP = fn
+	return func() { dialIMAP = prev }
+}
+
 // Connect 连接并登录 IMAP 服务器。已连接且存活时直接复用。
 func (c *Client) Connect() error {
 	if c.cli != nil {
@@ -81,7 +96,7 @@ func (c *Client) Connect() error {
 		c.forceClose()
 	}
 	addr := fmt.Sprintf("%s:%d", c.server, c.port)
-	cli, err := client.DialTLS(addr, nil)
+	cli, err := dialIMAP(addr)
 	if err != nil {
 		return fmt.Errorf("IMAP 连接失败: %w", err)
 	}
@@ -89,8 +104,46 @@ func (c *Client) Connect() error {
 		_ = cli.Logout()
 		return fmt.Errorf("IMAP 登录失败 — 请检查邮箱账号、授权码和服务器地址: %w", err)
 	}
+	c.sendClientID(cli)
 	c.cli = cli
 	return nil
+}
+
+// sendClientID 按 RFC 2971 发送 ID 命令声明客户端身份(best-effort)。
+//
+// 网易 163/126(Coremail) 要求客户端读取前声明身份: 未声明时 LOGIN 可以
+// 成功, 但随后所有 SELECT/EXAMINE 都被拒绝("Unsafe Login. Please contact
+// kefu@188.com for help"), 表现为「接入收件邮箱」验证失败(502)。
+// QQ/Gmail/Outlook 同样支持 ID; 不支持 ID 的服务器(如 iCloud
+// imap.mail.me.com)先查能力再发送, 避免无谓的 BAD 响应。
+// 发送失败不影响连接可用性(仅记 debug 日志)。
+func (c *Client) sendClientID(cli *client.Client) {
+	ok, err := cli.Support("ID")
+	if err != nil {
+		slog.Debug("IMAP ID 能力查询失败(忽略)", "server", c.server, "err", err.Error())
+		return
+	}
+	if !ok {
+		return
+	}
+	cmd := &imap.Command{
+		Name: "ID",
+		Arguments: []interface{}{
+			[]interface{}{
+				"name", "icloud-hme",
+				"version", "1.0",
+				"vendor", "icloud-hme",
+			},
+		},
+	}
+	status, err := cli.Execute(cmd, nil)
+	if err != nil {
+		slog.Debug("IMAP ID 声明失败(忽略)", "server", c.server, "err", err.Error())
+		return
+	}
+	if err := status.Err(); err != nil {
+		slog.Debug("IMAP ID 声明被拒(忽略)", "server", c.server, "err", err.Error())
+	}
 }
 
 // Ping 探测连接是否仍可用(NOOP)。
@@ -280,12 +333,21 @@ func ParseMessageID(id string) (string, uint32, error) {
 }
 
 // isNoSuchFolder 判断错误是否为「文件夹不存在」。
+//
+// 各服务商措辞不一: 标准实现为 "No such mailbox"(iCloud), 网易 163/126
+// 为 "Folder not exist"——必须都识别, 否则一个缺失的垃圾邮件夹会让整个
+// 列表读取报错, 而不是静默跳过。
+//
+// 已知局限(审查记录): go-imap v1 的 status.Err() 只保留响应文本、丢弃
+// 响应码, 因此 [NONEXISTENT] 类响应码拿不到; Dovecot 的
+// "Mailbox doesn't exist" 也匹配不上。两者都比「把门禁错误静默吞掉」
+// 更安全——宁可在这些服务商上直接报错, 也不扩大谓词误吞其它 SELECT 错误。
 func isNoSuchFolder(err error) bool {
 	if err == nil {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "no such mailbox") || strings.Contains(msg, "does not exist")
+	return strings.Contains(msg, "no such mailbox") || strings.Contains(msg, "not exist")
 }
 
 // folderUIDsRange 返回指定文件夹中符合日期区间的 UID(升序)。

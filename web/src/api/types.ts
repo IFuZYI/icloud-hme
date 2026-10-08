@@ -53,7 +53,7 @@ export interface InboxMessage {
   subject: string
   date: string
   preview: string
-  /** 所在文件夹(INBOX / Junk); 缺省视为 INBOX。Junk 里的邮件来自垃圾邮件箱 */
+  /** 所在文件夹(INBOX / Junk / 网易「垃圾邮件」); 缺省视为 INBOX。非 INBOX 均来自垃圾邮件箱 */
   folder?: string
 }
 

@@ -447,8 +447,9 @@ export default function InboxPage() {
                   <span className={`inbox-subject${m.subject ? '' : ' is-empty'}`} title={m.subject || undefined}>
                     {m.subject || '（无主题）'}
                   </span>
-                  {/* 垃圾邮件箱来源角标: iCloud 常把转发邮件判为垃圾, 标出来避免用户误以为丢失 */}
-                  {m.folder === 'Junk' && <span className="inbox-junk-badge">垃圾邮件</span>}
+                  {/* 垃圾邮件箱来源角标: iCloud 常把转发邮件判为垃圾, 标出来避免用户误以为丢失;
+                      非 INBOX 文件夹(iCloud 的 Junk、网易的「垃圾邮件」)都算垃圾来源 */}
+                  {m.folder && m.folder !== 'INBOX' && <span className="inbox-junk-badge">垃圾邮件</span>}
                 </span>
                 <span className="inbox-item-date">{formatRelativeDate(m.date)}</span>
                 <span className="inbox-preview">
