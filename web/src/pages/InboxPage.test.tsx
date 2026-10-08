@@ -408,6 +408,59 @@ describe('InboxPage', () => {
     expect(screen.getAllByText('垃圾邮件')).toHaveLength(1)
   })
 
+  it('网易「垃圾邮件」文件夹的邮件同样显示来源角标', async () => {
+    // 网易 163/126 的垃圾邮件夹名不是 Junk 而是「垃圾邮件」, 角标判定
+    // 必须按「非 INBOX」而非按 Junk 名字匹配, 否则网易邮件混在列表里无标识。
+    server.use(
+      http.get('/api/accounts', () => HttpResponse.json({ success: true, data: accounts })),
+      http.get('/api/inbox', () =>
+        HttpResponse.json({
+          success: true,
+          data: {
+            ...inboxResult,
+            count: 2,
+            total: 2,
+            messages: [
+              { ...inboxResult.messages[0], id: '垃圾邮件:1', subject: '网易垃圾箱里的验证码', folder: '垃圾邮件' },
+              { ...inboxResult.messages[0], id: '2', subject: '普通邮件', folder: 'INBOX' },
+            ],
+          },
+        }),
+      ),
+    )
+    renderPage()
+    await screen.findByText('网易垃圾箱里的验证码')
+    expect(screen.getByText('垃圾邮件')).toBeInTheDocument()
+    expect(screen.getAllByText('垃圾邮件')).toHaveLength(1)
+  })
+
+  it('无 folder 字段的邮件(web_api 回退路径)不显示来源角标', async () => {
+    // web_api 回退路径的消息没有 folder 字段(omitempty 不序列化)。
+    // 角标判定必须带存在性守卫: 缺字段时 `undefined !== 'INBOX'` 恒真,
+    // 会把全部邮件误标成垃圾来源。
+    server.use(
+      http.get('/api/accounts', () => HttpResponse.json({ success: true, data: accounts })),
+      http.get('/api/inbox', () =>
+        HttpResponse.json({
+          success: true,
+          data: {
+            ...inboxResult,
+            count: 2,
+            total: 2,
+            method: 'web_api',
+            messages: [
+              { ...inboxResult.messages[0], id: '1', subject: '回退路径邮件一' },
+              { ...inboxResult.messages[0], id: '2', subject: '回退路径邮件二' },
+            ],
+          },
+        }),
+      ),
+    )
+    renderPage()
+    await screen.findByText('回退路径邮件一')
+    expect(screen.queryByText('垃圾邮件')).not.toBeInTheDocument()
+  })
+
   it('空收件箱仍展示摘要行(共 0 封 + 读取方式)', async () => {
     server.use(
       http.get('/api/accounts', () => HttpResponse.json({ success: true, data: accounts })),

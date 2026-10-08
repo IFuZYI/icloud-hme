@@ -353,7 +353,7 @@ GET /api/inbox?account_id=acc_1&alias=xyz123@icloud.com&limit=20&start=2026-08-0
 
 **时间范围参数**：`start`/`end` 由前端两个日期时间选择器（开始时间/结束时间，Ant Design `DatePicker showTime`）产生，格式 `YYYY-MM-DDTHH:mm:ss`，后端原样保留到分钟/秒精度，不做整天对齐。
 
-**文件夹与消息 ID**：IMAP 读取同时扫描收件箱与垃圾邮件箱（iCloud 常把转发邮件判为垃圾），`folder` 字段标出来源。IMAP 的 UID 按文件夹生效，因此非 INBOX 邮件的 `id` 带文件夹前缀（`Junk:88`），INBOX 保持纯数字（`1042`，兼容旧格式）。`GET /api/inbox/:message_id`、`DELETE /api/inbox/:message_id` 与 `POST /api/inbox/previews` 的 `ids` 均接受这两种格式，原样回传列表里的 `id` 即可。
+**文件夹与消息 ID**：IMAP 读取同时扫描收件箱与垃圾邮件箱（iCloud 常把转发邮件判为垃圾；网易 163/126 的垃圾邮件夹名为「垃圾邮件」而非 Junk，一并扫描），`folder` 字段标出来源。IMAP 的 UID 按文件夹生效，因此非 INBOX 邮件的 `id` 带文件夹前缀（`Junk:88`），INBOX 保持纯数字（`1042`，兼容旧格式）。`GET /api/inbox/:message_id`、`DELETE /api/inbox/:message_id` 与 `POST /api/inbox/previews` 的 `ids` 均接受这两种格式，原样回传列表里的 `id` 即可。
 
 IMAP 不可用而回退到 Web API 时，响应会额外带 `warning` 字段说明降级原因（缺省表示走 IMAP 成功）：
 

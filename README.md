@@ -249,7 +249,7 @@ GET /api/inbox?account_id=acc_1&alias=xyz123@icloud.com&limit=20&start=2026-08-0
 #   limit      - 可选: 返回邮件数量 (默认 20)
 #   start/end  - 可选: 日期区间 (YYYY-MM-DD 或 RFC3339; end 含当天)
 #   days       - 可选: 旧的"最近 N 天"参数, 无 start/end 时生效 (默认 7)
-# 注: 同时扫描收件箱与垃圾邮件箱(Junk); 非 INBOX 邮件的 id 形如 "Junk:88"
+# 注: 同时扫描收件箱与垃圾邮件箱(Junk; 网易邮箱为「垃圾邮件」); 非 INBOX 邮件的 id 形如 "Junk:88"
 
 # 响应
 {

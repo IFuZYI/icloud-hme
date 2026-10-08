@@ -145,7 +145,7 @@ Gin Server /api ─────────────────────�
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/api/inbox` | 信封分页列表；`account_id` 必填，`limit=1..50`（默认 20），`offset=0..10000`，`start`/`end` 日期区间优先、否则回退 `days=0..3650`（0 为不限）；扫描 INBOX + Junk |
+| GET | `/api/inbox` | 信封分页列表；`account_id` 必填，`limit=1..50`（默认 20），`offset=0..10000`，`start`/`end` 日期区间优先、否则回退 `days=0..3650`（0 为不限）；扫描 INBOX + Junk + 「垃圾邮件」（网易夹名） |
 | POST | `/api/inbox/previews?account_id=…` | 批量补摘要，body 为 `{"ids":[…]}`，最多 20 个 ID（写） |
 | GET | `/api/inbox/:message_id?account_id=…` | 读取完整正文，仅走 IMAP；`message_id` 为 `1042`（INBOX）或 `Junk:88`（其它文件夹） |
 | DELETE | `/api/inbox/:message_id?account_id=…` | 删除邮件，仅走 IMAP（写） |
@@ -186,7 +186,7 @@ GET /api/inbox
 
 注意：Web API 的别名筛选依赖主题/发件人等局部匹配，无法可靠按收件人过滤；完整邮件读取和删除只支持 IMAP 路径。
 
-IMAP 路径同时扫描 INBOX 与 Junk（iCloud 常把转发邮件判为垃圾），消息 ID 对非 INBOX 文件夹带 `folder:` 前缀消歧（UID 按文件夹生效会撞号）；读取正文/删除/取摘要都经 `mail.ParseMessageID` 解析回 (folder, uid) 定位。
+IMAP 路径同时扫描 INBOX 与垃圾邮件夹（Junk / 网易「垃圾邮件」；iCloud 常把转发邮件判为垃圾），消息 ID 对非 INBOX 文件夹带 `folder:` 前缀消歧（UID 按文件夹生效会撞号）；读取正文/删除/取摘要都经 `mail.ParseMessageID` 解析回 (folder, uid) 定位。外部邮箱为网易 163/126 时，登录后按 RFC 2971 补发 ID 声明（否则所有 SELECT 被拒「Unsafe Login」），缺失文件夹错误措辞（「Folder not exist」）会被静默跳过。
 
 ## 7. 构建、测试与发布
 
