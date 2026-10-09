@@ -472,8 +472,11 @@ PATCH  /api/alias-tasks/:id          # 编辑（保存后自动重新启用）
 POST   /api/alias-tasks/:id/toggle   # 启用 / 暂停
 DELETE /api/alias-tasks/:id          # 删除
 GET    /api/alias-task-logs          # 运行日志（逐邮箱成功/失败）
+POST   /api/alias-task-logs/cleanup  # 按时间清理日志（写）
 X-CSRF-Token: <token>                # 非 GET 请求需要
 ```
+
+**清理日志请求体：** `{"older_than_days": 7}` —— 删除严格早于「now - N 天」的条目（N 为 1–3650 的整数；前端提供 1 天前 / 1 周前 / 1 个月前 三档）。恰好等于 cutoff 时刻的条目保留（「1 天前」= 保留最近 24 小时）；时间无法解析的条目保守保留。响应 `{"deleted": N, "remaining": M}`。
 
 **新建请求体（字段校验）：**
 
