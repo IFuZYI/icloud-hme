@@ -167,6 +167,7 @@ func (s *Server) register() {
 			authed.POST("/create", csrfCheck(s.auth), s.createAliasHandler)
 			authed.GET("/alias-tasks", s.listAliasTasksHandler)
 			authed.GET("/alias-task-logs", s.listAliasTaskLogsHandler)
+			authed.POST("/alias-task-logs/cleanup", csrfCheck(s.auth), s.cleanupAliasTaskLogsHandler)
 			authed.POST("/alias-tasks", csrfCheck(s.auth), s.createAliasTaskHandler)
 			authed.PATCH("/alias-tasks/:id", csrfCheck(s.auth), s.updateAliasTaskHandler)
 			authed.POST("/alias-tasks/:id/toggle", csrfCheck(s.auth), s.toggleAliasTaskHandler)

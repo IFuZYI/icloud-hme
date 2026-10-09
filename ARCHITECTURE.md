@@ -140,6 +140,7 @@ Gin Server /api ─────────────────────�
 | POST | `/api/alias-tasks/:id/toggle` | 启用/暂停任务（写） |
 | DELETE | `/api/alias-tasks/:id` | 删除任务（写） |
 | GET | `/api/alias-task-logs` | 倒序读取自动任务和批量操作日志 |
+| POST | `/api/alias-task-logs/cleanup` | 按时间清理日志（写）；body `{"older_than_days":1..3650}`，删除严格早于该天数的条目，返回 `{deleted, remaining}` |
 
 ### 收件箱与系统
 
