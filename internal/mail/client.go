@@ -522,8 +522,10 @@ func (c *Client) FindByRecipientRange(recipient string, limit, offset int, r Dat
 // 同时扫描 MailFolders(INBOX + Junk), 合并后按时间新→旧分页——转发邮件
 // 常被 iCloud 判为垃圾邮件, 只查 INBOX 会漏掉验证码。
 //
-// 各文件夹先用服务端 SEARCH 拿符合条件的 UID 集合; SEARCH 不可用时
-// 退化为扫最近信封本地过滤。本页邮件再按文件夹定位拉取完整摘要。
+// 各文件夹先用服务端 SEARCH 拿符合条件的 UID 集合; SEARCH 不可用、或对
+// 非空邮箱静默返回空(网易 Coremail 对 TO/FROM/SUBJECT/HEADER/TEXT 的已知
+// 缺陷, 原始协议实测: 返回 OK 但零结果, 邮件确实在箱里)时, 退化为扫最近
+// 信封本地过滤——否则「按别名筛选」在这类服务商上永远查不到邮件。
 //
 // totalOut 非 nil 时写回符合条件的邮件总数(不受本页 limit/offset 影响)。
 func (c *Client) forEachByRecipientRange(recipient string, limit, offset int, r DateRange, onMsg func(Message) bool, totalOut *int) error {
@@ -544,12 +546,17 @@ func (c *Client) forEachByRecipientRange(recipient string, limit, offset int, r 
 	criteria := dateRangeSearchCriteria(r)
 	criteria.Header.Add("To", recipient)
 	var all []folderUID
+	boxHasMessages := false
 	for _, folder := range MailFolders {
-		if _, err := c.cli.Select(folder, true); err != nil {
+		mbox, err := c.cli.Select(folder, true)
+		if err != nil {
 			if isNoSuchFolder(err) {
 				continue
 			}
 			return err
+		}
+		if mbox.Messages > 0 {
+			boxHasMessages = true
 		}
 		uids, err := c.cli.UidSearch(criteria)
 		if err != nil {
@@ -559,6 +566,11 @@ func (c *Client) forEachByRecipientRange(recipient string, limit, offset int, r 
 		for _, uid := range uids {
 			all = append(all, folderUID{folder: folder, uid: uid})
 		}
+	}
+	if len(all) == 0 && boxHasMessages {
+		// SEARCH 报成功但零命中, 而箱里确实有邮件: 服务端可能静默失效。
+		// 本地信封过滤复核: 命中用本地结果, 仍无命中才判定真为空。
+		return c.forEachRecentMatchingRange(recipient, limit, offset, r, onMsg, totalOut)
 	}
 	if totalOut != nil {
 		// 各文件夹 SEARCH 命中数之和即符合条件总数(不受本页分页影响)。

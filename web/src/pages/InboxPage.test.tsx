@@ -118,6 +118,12 @@ describe('InboxPage', () => {
     renderPage()
     expect(await screen.findByText('请先选择账号查看邮件')).toBeInTheDocument()
     expect(inboxCalls).toBe(0)
+    // 未选账号时不应显示统计摘要(「共 0 封」会让用户误以为查询过且没有邮件)
+    expect(screen.queryByText(/共.*封/)).toBeNull()
+    expect(screen.queryByText(/读取方式/)).toBeNull()
+    // 未选账号时刷新/查询按钮应禁用, 避免点击后静默无响应
+    expect(screen.getByRole('button', { name: '刷新收件箱' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '查询' })).toBeDisabled()
   })
 
   it('点击查询/刷新时携带 refresh=1 绕过服务端缓存', async () => {
@@ -181,6 +187,25 @@ describe('InboxPage', () => {
       ).toBe(true)
     })
     expect(await screen.findByText('第二封')).toBeInTheDocument()
+  })
+
+  it('messages 为 null 时不崩溃(防御性: 空结果应显示暂无邮件)', async () => {
+    // dogfood 实测: 按别名筛选无命中时服务端曾返回 "messages":null,
+    // data.messages.filter(...) 抛 TypeError → 整页白屏。后端已修契约,
+    // 前端也必须有 null 守卫, 否则任何旧版/异常响应仍会炸掉整页。
+    server.use(
+      http.get('/api/accounts', () => HttpResponse.json({ success: true, data: accounts })),
+      http.get('/api/inbox', () =>
+        HttpResponse.json({
+          success: true,
+          data: { account_id: 'acc_1', count: 0, total: 0, offset: 0, messages: null, method: 'imap' },
+        }),
+      ),
+    )
+    renderPage()
+    expect(await screen.findByText(/暂无邮件/)).toBeInTheDocument()
+    // 页面没有崩溃: 筛选栏仍在
+    expect(screen.getByRole('button', { name: /查询/ })).toBeInTheDocument()
   })
 
   it('从 URL 的 alias 参数初始化筛选,支持别名页直达收件箱', async () => {

@@ -137,6 +137,8 @@ describe('LogsPage', () => {
 
     await waitFor(() => expect(cleanupBodies).toHaveLength(1))
     expect(cleanupBodies[0]).toEqual({ older_than_days: 30 })
+    // 没有可清理的条目时提示「没有符合条件」而非「已清理 0 条」
+    expect(await screen.findByRole('status')).toHaveTextContent('没有符合条件')
   })
 
   it('清理日志: 取消不发请求', async () => {

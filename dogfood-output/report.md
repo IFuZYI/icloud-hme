@@ -1,8 +1,8 @@
 # Dogfood QA Report
 
 **Target:** http://127.0.0.1:8081 (iCloud HME 管理台)
-**Date:** 2026-10-06
-**Scope:** 全站探索性 QA × 五轮（第一轮：日期选择器与筛选栏；第二轮：全量——全部页面 × 3 视口 × 有数据状态 × 对话框/弹层；第三轮：日期面板年份视图——用户截图定位；第四轮：全量 UI 复测——6 视口矩阵 + 交互深度 + 对比度/暗色模式审计；第五轮：2FA 登录对话框恢复路径——push_sent 三态 × 恢复链路 × 键盘可达性 × 暗色对比度）
+**Date:** 2026-10-09
+**Scope:** 全站探索性 QA × 六轮（第一轮：日期选择器与筛选栏；第二轮：全量——全部页面 × 3 视口 × 有数据状态 × 对话框/弹层；第三轮：日期面板年份视图——用户截图定位；第四轮：全量 UI 复测——6 视口矩阵 + 交互深度 + 对比度/暗色模式审计；第五轮：2FA 登录对话框恢复路径；第六轮：新增功能验证（多账号默认不选/凭据 chips/读缓存 refresh/连接复用/日志清理）+ 全站回归）
 **Tester:** Hermes Agent (automated exploratory QA)
 
 ---
@@ -26,10 +26,153 @@
 | 第三轮 | 1 | 0 | 1 | 0 | 2（全部修复） |
 | 第四轮 | 0 | 1 | 1 | 0 | 2（全部修复） |
 | 第五轮 | 0 | 0 | 0 | 1 | 1（观察项，不修） |
+| 第六轮 | 2 | 0 | 1 | 2 | 5（全部修复） |
 
-**Overall Assessment:** 五轮共 20 项发现（19 修复/驳回 + 1 观察项）。第三轮的关键教训：**antd 面板经 portal 渲染到 body，项目全局的元素级选择器（`table`/`th`/`td`/`tbody tr`/`button`）会泄漏进面板内部**，造成面板布局损坏。第四轮的关键教训：**antd 主题与项目 CSS 的暗色机制是两套**——CSS 走 `@media (prefers-color-scheme: dark)`，而 antd 的 ConfigProvider 需要 JS 显式传入 `darkAlgorithm`，只做前者会让 antd 组件在暗色页面上保持白底；且设计 token 的对比度需要实测而非目测（`#86868b` 看似「浅灰正常」，实测仅 3.18:1）。第五轮验证了「推送失败 → 用户可见 → 可恢复」的完整链路：**此前的缺陷模式是「失败只写服务端日志」**——用户界面与真实状态脱节（显示「请输入验证码」而验证码永远不会到），恢复手段（重发/短信端点）虽已实现但 UI 从未接上。
+**第六轮摘要（新增功能验证 + 全站回归，5 项全部修复）：** 两个 Critical 均与本轮新功能/真实使用场景直接相关——①「按别名筛选无命中 → `messages:null` → 前端 `.filter()` TypeError → 整页白屏」（React 无错误边界，白屏无任何提示）；②「163/126 邮箱按别名筛选永远 0 结果」——网易 Coremail 对 `SEARCH TO/FROM/SUBJECT/HEADER/TEXT` 静默返回空（返回 OK 但不报错），原始协议双探针（imaplib + go-imap）实测确认，`ALL`/`SINCE`/`UID` 正常。②正是用户核心场景「按别名查验证码」在 163 上的完全失效。修复后真实 163 实测：白屏 URL 正常渲染、按别名搜索 0 → 1 封（命中 SpaceXAI 验证码邮件）。其余 3 项为 Medium/Low 体验项（未选账号摘要误导、chips 对比度差 0.05 不到 AA、0 条清理提示不友好）。新增功能本身（多账号默认不选、凭据 chips、refresh 缓存、日志清理对话框）经三处验证（单元测试 + API 实测 + 浏览器实测）均无缺陷。
+
+**Overall Assessment:** 六轮共 25 项发现（24 修复/驳回 + 1 观察项）。第三轮的关键教训：**antd 面板经 portal 渲染到 body，项目全局的元素级选择器（`table`/`th`/`td`/`tbody tr`/`button`）会泄漏进面板内部**，造成面板布局损坏。第四轮的关键教训：**antd 主题与项目 CSS 的暗色机制是两套**——CSS 走 `@media (prefers-color-scheme: dark)`，而 antd 的 ConfigProvider 需要 JS 显式传入 `darkAlgorithm`，只做前者会让 antd 组件在暗色页面上保持白底；且设计 token 的对比度需要实测而非目测（`#86868b` 看似「浅灰正常」，实测仅 3.18:1）。第五轮验证了「推送失败 → 用户可见 → 可恢复」的完整链路：**此前的缺陷模式是「失败只写服务端日志」**——用户界面与真实状态脱节（显示「请输入验证码」而验证码永远不会到），恢复手段（重发/短信端点）虽已实现但 UI 从未接上。第六轮的关键教训：**上游「静默失效」是最隐蔽的缺陷类**——163 的 SEARCH 返回 OK 但零结果、后端 nil 切片序列化成 null、前端对契约过于信任，三者叠加造成「白屏 + 功能静默失效」；修复必须同时钉住契约（`messages` 恒为数组）、加防御层（前端 null 守卫）与行为兜底（SEARCH 零命中且箱非空时本地复核）。
 
 **方法论说明（五轮均严格执行「measure, don't eyeball」）：** vision 模型在四轮中共给出 **12 次与 DOM 测量直接矛盾的描述**（如声称"年份 2028-2030 缺失"而 DOM 实测 12 格全在、"日历与时间列重叠"而实测间隙 18px 等）。所有结论均以 `getBoundingClientRect()` / `getComputedStyle()` / CDP `CSS.getMatchedStylesForNode` 的测量为准；vision 仅用于初筛可疑区域，不用于定量判断。第四轮的对比度结论全部用 WCAG 相对亮度公式计算（含 alpha 合成）。第五轮对登录恢复路径采用**页面内 fetch 拦截**（真实浏览器 + 真实 React 代码 + 受控响应），逐态驱动 UI 并测量渲染与请求体——不依赖真实 2FA 账号即可覆盖三态。
+
+---
+
+## 第六轮 Issues（本轮新增，5 项全部修复）
+
+### Issue #21: 按别名筛选无命中时整页白屏（Critical）
+
+| Field | Value |
+|-------|-------|
+| **Severity** | 🔴 Critical |
+| **Category** | Functional |
+| **URL** | `/inbox?account_id=acc_335ee74c&alias=temper.clap.2e%40icloud.com` |
+
+**Description:**
+当按别名筛选且该别名当前无命中邮件时，后端 `FindByRecipientRange` 返回 nil 切片，JSON 序列化为 `"messages":null`；前端 `data.messages.filter(...)` 抛 `TypeError: Cannot read properties of null (reading 'filter')`，React 无错误边界 → 整个应用白屏（无任何错误提示、无导航、无恢复手段，只能手动改 URL）。
+
+**Steps to Reproduce:**
+1. 打开 `/inbox?account_id=acc_335ee74c&alias=temper.clap.2e%40icloud.com`（一个在日期范围内无邮件的别名）
+2. 观察页面白屏
+
+**Expected Behavior:** 显示「暂无邮件」空态，页面可用。
+
+**Actual Behavior:** 整页白屏；控制台 `Uncaught TypeError: Cannot read properties of null (reading 'filter')`。
+
+**证据:**
+- 服务端响应字节级确认：`{"success":true,"data":{...,"messages":null,...}}`
+- 浏览器控制台：`ERROR: Uncaught TypeError ... @ index-DG8QNQa6.js:177` + `REJECTION: TypeError`
+- MEDIA:/home/icloud-hme/dogfood-output/screenshots/r6-06-inbox-alias-white-screen.png
+
+**修复:** 后端契约钉死 `messages` 恒为 `[]`（`managerBackend.ListInbox` 统一归一化）+ 前端防御性 null 守卫（`data.messages ?? []`）。修复后同一 URL 正常渲染，`messages:[]`。
+
+---
+
+### Issue #22: 163/126 邮箱「按别名筛选」永远 0 结果（Critical）
+
+| Field | Value |
+|-------|-------|
+| **Severity** | 🔴 Critical |
+| **Category** | Functional |
+| **URL** | `/inbox?account_id=acc_335ee74c&alias=temper.clap.2e%40icloud.com` |
+
+**Description:**
+真实 163 收件邮箱下，列表中明明有 `to=temper.clap.2e@icloud.com` 的邮件，但按该别名筛选永远返回 0 条。根因：网易 Coremail 对 `SEARCH TO/FROM/SUBJECT/HEADER/TEXT` 条件**静默返回空结果**（返回 `OK` 但不报错，也不给任何错误提示），客户端只依赖服务端 SEARCH，于是「按别名查验证码」这一核心场景在 163 上完全失效。原始协议双探针（Python imaplib + go-imap SetDebug）实测确认：`TO`/`FROM`/`SUBJECT`/`TEXT` 全部返回 `* SEARCH`（空），而 `ALL`/`SINCE`/`UID SEARCH` 正常返回全部 UID。
+
+**Steps to Reproduce:**
+1. 账号接入 163 收件邮箱（imap.163.com:993）
+2. 收件箱确认存在发给某别名的邮件（列表可见）
+3. 按该别名筛选 → 结果 0 条
+
+**Expected Behavior:** 返回该别名的邮件。
+
+**Actual Behavior:** 永远 0 条（且无错误提示）。
+
+**证据:**
+- 原始协议（imaplib）：`UID SEARCH TO "temper"` → `OK [b'']`（空）而 `UID SEARCH ALL` → 全部 5 个 UID
+- go-imap 探针（SetDebug 原始协议帧）：`UID SEARCH CHARSET UTF-8 TO "..."` → `* SEARCH`（空）+ `OK SEARCH completed`
+- API 实测：无 alias → count=5（含 to=temper.clap.2e）；alias=temper.clap.2e → count=0
+
+**修复:** `forEachByRecipientRange` 增加行为兜底：SEARCH 零命中且邮箱非空时，退化为本地信封过滤复核（`forEachRecentMatchingRange`）——命中用本地结果，仍无命中才判定真为空。修复后真实 163 实测：0 → 1 封（命中 SpaceXAI 验证码邮件）。
+
+---
+
+### Issue #23: 未选账号时收件箱摘要与按钮误导（Medium）
+
+| Field | Value |
+|-------|-------|
+| **Severity** | 🟡 Medium |
+| **Category** | UX |
+| **URL** | `/inbox`（多账号初始态） |
+
+**Description:**
+本轮「多账号默认不自动选择」新功能下，未选账号时仍显示「共 0 封 / 读取方式：IMAP」统计摘要——用户会误读为「已查询过且没有邮件」（实际是「还没查」）；且「刷新」「查询」按钮可点击但静默无响应（无请求、无提示）。
+
+**Steps to Reproduce:**
+1. 打开 `/inbox`（不选账号）
+2. 观察摘要行显示「共 0 封」
+3. 点击「刷新」或「查询」→ 无任何反应
+
+**Expected Behavior:** 未选账号时不显示统计摘要；按钮禁用或给出提示。
+
+**Actual Behavior:** 显示误导性「共 0 封」；按钮可点击但静默无响应。
+
+**修复:** 未选账号时隐藏摘要行（`!loading && !error && accountId`）+ 刷新/查询按钮 `disabled={!accountId}`。
+
+**证据:** MEDIA:/home/icloud-hme/dogfood-output/screenshots/r6-03-inbox-no-account-summary.png
+
+---
+
+### Issue #24: 浅色模式凭据 chips 对比度 4.456:1（Low）
+
+| Field | Value |
+|-------|-------|
+| **Severity** | 🔵 Low |
+| **Category** | Accessibility |
+| **URL** | `/accounts` |
+
+**Description:**
+本轮新增的凭据 chips 使用 `--color-text-secondary`(#6e6e73)，在 `--color-bg-subtle`(#f0f0f2) 上实测 4.456:1——差 0.044 不到 WCAG AA 4.5:1 门槛（12px 常规文字）。合成背景后精确计算确认（非目测）。
+
+**修复:** 改用 `--color-text-tertiary`(#6a6a6f)，实测 4.726:1 过 AA。
+
+**证据:** MEDIA:/home/icloud-hme/dogfood-output/screenshots/r6-02-accounts-chips-light.png
+
+---
+
+### Issue #25: 「已清理 0 条日志」提示不友好（Low）
+
+| Field | Value |
+|-------|-------|
+| **Severity** | 🔵 Low |
+| **Category** | UX |
+| **URL** | `/logs` |
+
+**Description:**
+日志清理对话框在无可清理条目时提示「已清理 0 条日志」——读起来像操作失败或数据异常，实际是正常结果。
+
+**修复:** 0 条时提示「没有符合条件的日志，未删除任何条目」。
+
+---
+
+## 第六轮验证矩阵（新功能，全部通过）
+
+| 功能 | 检查项 | 结果 | 证据 |
+|------|--------|------|------|
+| 多账号默认不选 | 别名页初始不选账号、显示引导 | ✅ | 「请选择账号」+「请先选择账号查看别名」；无账号请求发出 |
+| 多账号默认不选 | 收件箱页初始不选账号 | ✅ | 「请先选择账号查看邮件」；inbox 请求数 0 |
+| 多账号默认不选 | 任务表单多账号默认不选、保存禁用 | ✅ | 保存按钮 DISABLED；选账号后 ENABLED |
+| 多账号默认不选 | 单账号仍自动选中 | ✅ | 单账号场景直接加载 |
+| 凭据 chips | 渲染紧凑标签（桌面/移动/暗色） | ✅ | chips 无溢出、无截断；暗色 6.61:1、浅色 4.726:1 |
+| 凭据 chips | 长邮箱只进 title | ✅ | `title="fuzy_public@163.com"`，可见文本「收件箱」 |
+| 读缓存 | 首屏不带 refresh、命中缓存 | ✅ | 回源 2.9s → 二次 0.001s |
+| 读缓存 | 查询/刷新/加载更多带 refresh=1 | ✅ | performance entries 确认 |
+| 读缓存 | 删除邮件后缓存失效 | ✅ | 删除后列表回源更新 |
+| 连接复用 | 外部邮箱长连接复用 | ✅ | mock 连接计数：2 次读信仅 1 连接 |
+| 日志清理 | 三档选择（1天/1周/1月） | ✅ | 对话框三 radio；请求体 older_than_days=7/30 正确 |
+| 日志清理 | 成功/失败/取消三态 | ✅ | 成功关闭+toast；失败保留+错误；取消零请求 |
+| 日志清理 | 键盘可达性 | ✅ | Tab 循环无遗漏、Escape 关闭、初始焦点正确 |
+| 日志清理 | 移动端布局 | ✅ | 390px 对话框三档并排 111px、按钮 40px 高 |
+| 全站回归 | 控制台零错误（5 页面） | ✅ | accounts/aliases/alias-tasks/logs/inbox 全空 |
+| 全站回归 | 移动端 390px 无溢出 | ✅ | 表格横向滚动为既有设计；按钮 ≥40px |
 
 ---
 
@@ -551,6 +694,15 @@ vision 模型报告「查询按钮高度略低于输入框，底部没有和输�
 | 5 | 查询按钮基线错位（vision 幻觉） | 🔵 Low | — | /inbox | ⛔ 非缺陷 |
 | 6 | 退出登录按钮 37px | 🔵 Low | Visual | 全站 | ⛔ 复核后非缺陷 |
 | 7 | 低视窗下日期面板溢出 | 🔵 Low | Visual | /inbox | ✅ 随 #1 解决 |
+| 8–15 | 第二轮：表格渲染/ISO 时间/`toLocaleString`/工具栏溢出等 | 🟠🟡🔵 | 多类 | 多页 | ✅ 7 修复 + 1 驳回 |
+| 16–17 | 第三轮：`table min-width` 泄漏进 antd 面板 / bottom-sheet 对齐 | 🔴🟡 | Visual | /inbox | ✅ 已修复 |
+| 18–19 | 第四轮：暗色 antd 硬编码白底 / 对比度 token 低于 AA | 🟠🟡 | Visual/A11y | 全站 | ✅ 已修复 |
+| 20 | 第五轮：恢复按钮触控目标 25px（观察项） | 🔵 | — | /login | ⛔ 记录不修 |
+| 21 | 按别名筛选无命中 → `messages:null` → 整页白屏 | 🔴 Critical | Functional | /inbox | ✅ 已修复 |
+| 22 | 163/126 邮箱「按别名筛选」永远 0 结果（SEARCH 静默失效） | 🔴 Critical | Functional | /inbox | ✅ 已修复 |
+| 23 | 未选账号时收件箱摘要与按钮误导 | 🟡 Medium | UX | /inbox | ✅ 已修复 |
+| 24 | 浅色凭据 chips 对比度 4.456:1（差 0.05 不到 AA） | 🔵 Low | Accessibility | /accounts | ✅ 已修复 |
+| 25 | 「已清理 0 条日志」提示不友好 | 🔵 Low | UX | /logs | ✅ 已修复 |
 
 ## Testing Coverage
 

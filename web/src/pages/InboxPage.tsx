@@ -151,14 +151,17 @@ export default function InboxPage() {
         setWarning(data.warning ?? '')
         setTotal(data.total)
         setError('')
+        // 防御性 null 守卫: 服务端契约是 messages 恒为数组, 但旧版/异常响应
+        // 可能返回 null——直接 .filter() 会抛 TypeError 白屏整页。
+        const incoming = data.messages ?? []
         setMessages((prev) => {
-          const next = append ? [...prev, ...data.messages] : data.messages
+          const next = append ? [...prev, ...incoming] : incoming
           // 去重(刷新与追加竞态时可能重叠)
           const seen = new Set<string>()
           return next.filter((m) => (seen.has(m.id) ? false : seen.add(m.id)))
         })
         // 信封到手后渐进补摘要(不阻塞首屏)
-        void fillPreviews(data.messages, accountId)
+        void fillPreviews(incoming, accountId)
       } catch (err) {
         if (err instanceof ApiError && err.status === 0) return
         setError(err instanceof ApiError ? err.message : '网络连接失败，请检查服务状态')
@@ -341,7 +344,7 @@ export default function InboxPage() {
             className={`inbox-action${busy ? ' is-busy' : ''}`}
             onClick={() => runQuery()}
             aria-label="刷新收件箱"
-            disabled={busy}
+            disabled={busy || !accountId}
           >
             <IconRefresh size={15} />
             刷新
@@ -413,7 +416,7 @@ export default function InboxPage() {
           />
         </div>
         <div className="inbox-field inbox-field-submit">
-          <button className="inbox-action primary" onClick={() => runQuery()}>
+          <button className="inbox-action primary" onClick={() => runQuery()} disabled={!accountId}>
             查询
           </button>
         </div>
@@ -427,8 +430,9 @@ export default function InboxPage() {
       )}
 
       {/* 摘要行放在 AsyncState 之外: 空结果时 AsyncState 只渲染空状态,
-          放在里面会导致"共 0 封/读取方式"永远看不到 */}
-      {!loading && !error && (
+          放在里面会导致"共 0 封/读取方式"永远看不到。
+          未选账号(多账号初始态)时不显示: 「共 0 封」会被误读为「查询过且没有邮件」 */}
+      {!loading && !error && accountId && (
         <div className="inbox-summary">
           <span className="inbox-count">
             共 <strong>{total}</strong> 封{hasMore ? `（已加载 ${messages.length}）` : ''}

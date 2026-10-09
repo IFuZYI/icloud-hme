@@ -520,6 +520,12 @@ func (b *managerBackend) ListInbox(q InboxQuery) (InboxResult, error) {
 	if err != nil {
 		return result, err
 	}
+	// JSON 契约: messages 永远是数组([]), 不能是 null。
+	// 空结果时上游返回 nil 切片, 直接序列化成 "messages":null 会让前端
+	// data.messages.filter(...) 抛 TypeError → 整页白屏(dogfood 实测)。
+	if result.Messages == nil {
+		result.Messages = []mail.Message{}
+	}
 	b.respCache().set(cacheKey, result, inboxCacheTTL)
 	return result, nil
 }
