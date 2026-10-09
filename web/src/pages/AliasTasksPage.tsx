@@ -20,6 +20,9 @@ export default function AliasTasksPage() {
   const [accounts, setAccounts] = useState<AccountSummary[]>([])
   const [open, setOpen] = useState(false)
   const [edit, setEdit] = useState<AliasTask>()
+  // 表单常驻挂载而账号列表异步到达: 每次打开时用 key 强制重建,
+  // 让 initialState 在最新 accounts/edit 上重新初始化(编辑回填/单账号自动选中)。
+  const [formSession, setFormSession] = useState(0)
   const [error, setError] = useState('')
   const { show } = useToast()
 
@@ -63,7 +66,7 @@ export default function AliasTasksPage() {
   return <section>
     <div className="task-page-header">
       <div><h2>自动创建任务</h2><p>自主任务按每天数量自动安排时间，定时任务按固定周期创建；两者都在达到目标数量后停止。同账号任意连续 60 分钟内创建最多 5 个、两次手动创建至少间隔 20 分钟、每日合计最多 50 个，任何失败立即暂停。</p></div>
-      <button className="primary task-create-button" onClick={() => { setEdit(undefined); setOpen(true) }}><IconPlus size={16} />新建任务</button>
+      <button className="primary task-create-button" onClick={() => { setEdit(undefined); setFormSession((s) => s + 1); setOpen(true) }}><IconPlus size={16} />新建任务</button>
     </div>
     {error && <div className="alert-error" role="alert">{error}</div>}
     {tasks.length === 0 ? <p className="empty-state">暂无自动创建任务</p> : <div className="task-card-grid">
@@ -71,7 +74,7 @@ export default function AliasTasksPage() {
         const percent = Math.min(100, Math.round((task.created_count / task.max_total) * 100))
         const isAuto = task.mode === 'auto'
         return <article className={`task-card ${task.enabled ? 'task-card-enabled' : 'task-card-disabled'}`} key={task.id}>
-          <div className="task-card-header"><div className="task-card-title"><div className="task-title-line"><h3>{labelText(task)}</h3><span className="task-type-badge">{isAuto ? '自主任务' : '定时任务'}</span></div><p title={accountName(task.account_id)}>{accountName(task.account_id)}</p></div><TaskMoreMenu enabled={task.enabled} onToggle={() => void action(task, 'toggle')} onEdit={() => { setEdit(task); setOpen(true) }} onDelete={() => void action(task, 'delete')} /></div>
+          <div className="task-card-header"><div className="task-card-title"><div className="task-title-line"><h3>{labelText(task)}</h3><span className="task-type-badge">{isAuto ? '自主任务' : '定时任务'}</span></div><p title={accountName(task.account_id)}>{accountName(task.account_id)}</p></div><TaskMoreMenu enabled={task.enabled} onToggle={() => void action(task, 'toggle')} onEdit={() => { setEdit(task); setFormSession((s) => s + 1); setOpen(true) }} onDelete={() => void action(task, 'delete')} /></div>
           <div className="task-card-meta"><span><small>{isAuto ? '每天数量' : '创建周期'}</small><strong>{isAuto ? `${task.daily_limit} 个/天` : `每${formatIntervalMinutes(task.interval_minutes)} ${task.batch_count} 个`}</strong></span><span><small>今日</small><strong>{task.daily_count} / {task.mode === 'auto' ? (task.today_quota ?? 0) : task.daily_limit} 个</strong></span></div>
           <div className="task-progress-label"><span>进度</span><strong>{task.created_count} / {task.max_total}（{percent}%）</strong></div>
           <div className="task-next-run">下次执行：{task.enabled ? (task.next_run ? formatNextRun(task.next_run) : '已达上限或等待下一轮') : '已暂停'}</div>
@@ -80,6 +83,6 @@ export default function AliasTasksPage() {
         </article>
       })}
     </div>}
-    <AliasTaskForm open={open} accounts={accounts.map((a) => ({ id: a.id, name: a.name }))} edit={edit} onClose={() => setOpen(false)} onSaved={() => { show('任务已保存'); void load() }} />
+    <AliasTaskForm key={formSession} open={open} accounts={accounts.map((a) => ({ id: a.id, name: a.name }))} edit={edit} onClose={() => setOpen(false)} onSaved={() => { show('任务已保存'); void load() }} />
   </section>
 }
