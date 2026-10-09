@@ -17,6 +17,21 @@ function stubCreate(bodyRef: { current?: Record<string, unknown> }) {
 }
 
 describe('AliasTaskForm', () => {
+  it('账号大于 1 时默认不选择账号, 选定后才可保存', async () => {
+    const two = [
+      { id: 'acc_1', name: '主账号' },
+      { id: 'acc_2', name: '二号' },
+    ]
+    render(<AliasTaskForm open accounts={two} onClose={vi.fn()} onSaved={vi.fn()} />)
+    // 未选账号时保存按钮禁用, 触发按钮显示占位符
+    expect(screen.getByRole('button', { name: '保存' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: /选择账号/ }).textContent).toContain('请选择账号')
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: /选择账号/ }))
+    await user.click(screen.getByRole('option', { name: '二号' }))
+    expect(screen.getByRole('button', { name: '保存' })).not.toBeDisabled()
+  })
+
   it('父组件以等价账号数据重渲染时保留用户输入', async () => {
     const props = {
       open: true,

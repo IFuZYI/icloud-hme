@@ -16,6 +16,8 @@ interface Props {
   block?: boolean
   /** 无障碍关联的 label id(表单内用 htmlFor 指向触发按钮)。 */
   id?: string
+  /** 未选中(值为空串)时的占位文本。 */
+  placeholder?: string
 }
 
 /**
@@ -24,7 +26,7 @@ interface Props {
  * 替代原生 <select>: 统一视觉(圆角胶囊/毛玻璃弹层/选中勾)、
  * 键盘可达(方向键/Home/End/Esc)、点击外部关闭、滚动/缩放自动重定位。
  */
-export default function SelectMenu({ value, options, onChange, ariaLabel, className = '', ghost = false, disabled = false, block = false, id }: Props) {
+export default function SelectMenu({ value, options, onChange, ariaLabel, className = '', ghost = false, disabled = false, block = false, id, placeholder }: Props) {
   const [open, setOpen] = useState(false)
   const [position, setPosition] = useState({ top: 0, left: 0 })
   const triggerRef = useRef<HTMLButtonElement>(null)
@@ -111,7 +113,7 @@ export default function SelectMenu({ value, options, onChange, ariaLabel, classN
         disabled={disabled}
         onClick={() => setOpen((open) => !open)}
       >
-        <span className="select-trigger-label">{selected?.label ?? value}</span>
+        <span className="select-trigger-label">{selected?.label ?? (value !== '' ? value : placeholder ?? '')}</span>
         <IconChevronDown size={14} className={`select-trigger-chevron${open ? ' is-open' : ''}`} aria-hidden="true" />
       </button>
       {menu}

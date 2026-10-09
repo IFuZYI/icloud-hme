@@ -145,7 +145,7 @@ Gin Server /api ─────────────────────�
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/api/inbox` | 信封分页列表；`account_id` 必填，`limit=1..50`（默认 20），`offset=0..10000`，`start`/`end` 日期区间优先、否则回退 `days=0..3650`（0 为不限）；扫描 INBOX + Junk + 「垃圾邮件」（网易夹名） |
+| GET | `/api/inbox` | 信封分页列表；`account_id` 必填，`limit=1..50`（默认 20），`offset=0..10000`，`start`/`end` 日期区间优先、否则回退 `days=0..3650`（0 为不限）；`refresh=1` 绕过服务端 TTL 缓存强制回源（前端「查询/刷新」按钮携带，首屏/自动加载不携带、可命中缓存）；扫描 INBOX + Junk + 「垃圾邮件」（网易夹名） |
 | POST | `/api/inbox/previews?account_id=…` | 批量补摘要，body 为 `{"ids":[…]}`，最多 20 个 ID（写） |
 | GET | `/api/inbox/:message_id?account_id=…` | 读取完整正文，仅走 IMAP；`message_id` 为 `1042`（INBOX）或 `Junk:88`（其它文件夹） |
 | DELETE | `/api/inbox/:message_id?account_id=…` | 删除邮件，仅走 IMAP（写） |
@@ -187,6 +187,15 @@ GET /api/inbox
 注意：Web API 的别名筛选依赖主题/发件人等局部匹配，无法可靠按收件人过滤；完整邮件读取和删除只支持 IMAP 路径。
 
 IMAP 路径同时扫描 INBOX 与垃圾邮件夹（Junk / 网易「垃圾邮件」；iCloud 常把转发邮件判为垃圾），消息 ID 对非 INBOX 文件夹带 `folder:` 前缀消歧（UID 按文件夹生效会撞号）；读取正文/删除/取摘要都经 `mail.ParseMessageID` 解析回 (folder, uid) 定位。外部邮箱为网易 163/126 时，登录后按 RFC 2971 补发 ID 声明（否则所有 SELECT 被拒「Unsafe Login」），缺失文件夹错误措辞（「Folder not exist」）会被静默跳过。
+
+### 读缓存与连接复用（防封禁）
+
+外部收件邮箱（163 等）对短时间内的重复 TLS+LOGIN+扫箱敏感，是风控/封禁的典型触发信号；主流 IMAP 客户端同样会做本地缓存而非每次点击回源。本项目的两层防线：
+
+1. **连接复用**：`mail.Pool` 同时服务 iCloud 与外部收件邮箱。外部邮箱池键为 `ext:<host>:<port>:<email>`（`Manager.WithMailClient`），同一邮箱跨账号共享一条长连接，不同邮箱互不串用；空闲超时（10 分钟）或连接错误时重建。
+2. **只读响应 TTL 缓存**：`internal/server/cache.go` 的 `responseCache` 挂在 `managerBackend` 上，覆盖收件箱信封（键含账号/别名/分页/日期区间，TTL 30s）、邮件摘要（按账号+邮件 ID，TTL 5m）、别名列表（TTL 30s）。写操作即时失效：删除邮件失效该账号收件箱+摘要、别名增删改失效别名列表、接入收件邮箱与 `POST /api/reload` 失效对应/全部读缓存；`GET /api/inbox?refresh=1` 绕过缓存强制回源。
+
+改动读路径时：不要移除缓存/连接复用（恢复每次点击回源即回到封禁风险面）；新增写路径时按上述键前缀调用 `invalidate*`；TTL 值在 `backend.go` 顶部以 `var` 定义（测试覆盖过期行为）。
 
 ## 7. 构建、测试与发布
 

@@ -36,7 +36,9 @@ const INTERVALS = [20, 30, 45, 60, 90, 120, 180, 360, 720, 1440]
 
 function initialState(accounts: Account[], edit?: AliasTask): FormState {
   return {
-    account: edit?.account_id ?? accounts[0]?.id ?? '',
+    // 编辑时用任务所属账号; 新建时仅单账号自动选中——多账号下默认不选择,
+    // 由用户显式选择(顶部菜单打开就自动加载第一个账号会把它刷爆)。
+    account: edit?.account_id ?? (accounts.length === 1 ? accounts[0].id : ''),
     mode: edit?.mode ?? 'auto',
     dailyCount: String(edit?.mode === 'auto' ? edit?.daily_limit ?? DEFAULT_DAILY : DEFAULT_DAILY),
     interval: String(edit?.interval_minutes ?? 60),
@@ -114,6 +116,7 @@ export default function AliasTaskForm({ open, accounts, edit, onClose, onSaved }
         <label htmlFor="task-account">账号</label>
         <SelectMenu
           ariaLabel="选择账号"
+          placeholder="请选择账号"
           value={form.account}
           options={accounts.map((account) => ({ value: account.id, label: account.name }))}
           onChange={(value) => update('account', value)}

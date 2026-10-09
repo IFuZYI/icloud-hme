@@ -49,10 +49,20 @@ type Server struct {
 	Port    int
 	Backend *memory.Backend // 供测试直接投放邮件/建文件夹
 	idRecv  atomic.Bool
+	// connCount 统计接受过的连接数; selCount 统计收到的 SELECT/EXAMINE 命令数。
+	// 用于断言「连接复用」(不应反复 TLS+LOGIN) 与「读信缓存」(不应重复扫箱)。
+	connCount atomic.Int64
+	selCount  atomic.Int64
 }
 
 // ReceivedID 返回客户端是否发送过非空 ID 声明。
 func (s *Server) ReceivedID() bool { return s.idRecv.Load() }
+
+// ConnCount 返回服务器接受过的连接总数。
+func (s *Server) ConnCount() int64 { return s.connCount.Load() }
+
+// SelectCount 返回服务器收到的 SELECT/EXAMINE 命令总数(含被拒绝的)。
+func (s *Server) SelectCount() int64 { return s.selCount.Load() }
 
 // NewServer 启动一台进程内 IMAP 服务器, 测试结束自动关闭。
 func NewServer(t *testing.T, opts Options) *Server {
@@ -180,19 +190,22 @@ func (e *ext) Command(name string) server.HandlerFactory {
 	case "ID":
 		return func() server.Handler { return &idHandler{ext: e} }
 	case "SELECT", "EXAMINE":
-		if e.opts.RequireID {
-			readOnly := name == "EXAMINE"
-			return func() server.Handler {
-				h := &selectGate{}
-				h.ReadOnly = readOnly
-				return h
-			}
+		// 始终包装 SELECT/EXAMINE: 统计命令数(断言读信缓存), 并按需执行
+		// 网易式 ID 门禁(未声明 ID 时拒绝)。
+		readOnly := name == "EXAMINE"
+		return func() server.Handler {
+			h := &selectHandler{ext: e}
+			h.ReadOnly = readOnly
+			return h
 		}
 	}
 	return nil
 }
 
-func (e *ext) NewConn(c server.Conn) server.Conn { return &conn{Conn: c} }
+func (e *ext) NewConn(c server.Conn) server.Conn {
+	e.srv.connCount.Add(1)
+	return &conn{Conn: c}
+}
 
 // conn 是连接包装: 记录本连接是否已完成 ID 声明(网易门禁按连接生效)。
 type conn struct {
@@ -200,15 +213,18 @@ type conn struct {
 	idSent bool
 }
 
-// selectGate 在未收到 ID 声明时拒绝 SELECT/EXAMINE, 复刻网易 Coremail 行为。
-type selectGate struct {
+// selectHandler 统计收到的 SELECT/EXAMINE; RequireID 时在未收到 ID 声明前
+// 拒绝之, 复刻网易 Coremail 行为。
+type selectHandler struct {
+	ext *ext
 	server.Select
 }
 
-func (h *selectGate) Handle(c server.Conn) error {
-	if ic, ok := c.(*conn); ok && !ic.idSent {
+func (h *selectHandler) Handle(c server.Conn) error {
+	if ic, ok := c.(*conn); ok && h.ext.opts.RequireID && !ic.idSent {
 		return errors.New("Unsafe Login. Please contact kefu@188.com for help")
 	}
+	h.ext.srv.selCount.Add(1)
 	return h.Select.Handle(c)
 }
 

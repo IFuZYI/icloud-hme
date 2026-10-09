@@ -314,6 +314,7 @@ GET /api/inbox?account_id=acc_1&alias=xyz123@icloud.com&limit=20&start=2026-08-0
 - `limit` 1–100（默认 20）
 - `start`/`end` 可选，时间区间；支持 `YYYY-MM-DD`（整天，`end` 含当天到 23:59:59）、`YYYY-MM-DDTHH:mm[:ss]`（精确到分/秒，前端日期时间选择器格式，本地时区）或 RFC3339（带时区）；同时给出时 `end` 不得早于 `start`
 - `days` 0–3650（默认 7）仅在未提供 `start`/`end` 时生效；非法值直接 `400 VALIDATION_ERROR`
+- `refresh` 可选，`1` 表示绕过服务端 TTL 缓存强制回源（前端「查询/刷新」按钮显式触发时携带；首屏/自动加载不携带、可命中缓存）。服务端对收件箱信封（30s）、邮件摘要（5m）、别名列表（30s）做短 TTL 缓存，避免反复访问 IMAP 触发外部邮箱（163 等）风控；删除邮件/别名增删改等写操作会即时失效对应缓存
 
 **响应（IMAP 优先，Web API 回退）：**
 

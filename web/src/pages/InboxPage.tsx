@@ -97,6 +97,9 @@ export default function InboxPage() {
   const [deleting, setDeleting] = useState(false)
 
   const abortRef = useRef<AbortController | null>(null)
+  // refreshOnceRef: 用户显式触发(查询/刷新/删除后)时置 true, 让下一次
+  // loadPage 携带 refresh=1 绕过服务端 TTL 缓存; 首屏/自动加载不置位(可命中缓存)。
+  const refreshOnceRef = useRef(false)
   const { show } = useToast()
 
   /** 第二阶段: 对列表里 Preview 为空的邮件分批拉摘要(每批 10 封)。 */
@@ -134,6 +137,12 @@ export default function InboxPage() {
       if (rangeStart) params.set('start', rangeStart.format('YYYY-MM-DDTHH:mm:ss'))
       if (rangeEnd) params.set('end', rangeEnd.format('YYYY-MM-DDTHH:mm:ss'))
       if (alias) params.set('alias', alias)
+      // 用户显式触发时绕过服务端缓存(避免反复访问 IMAP 导致账号风控,
+      // 同时保证「刷新」按钮拿到的是最新邮件)。
+      if (refreshOnceRef.current) {
+        refreshOnceRef.current = false
+        params.set('refresh', '1')
+      }
       try {
         const data = await request<InboxResult>(`/api/inbox?${params.toString()}`, {
           signal: controller.signal,
@@ -188,6 +197,8 @@ export default function InboxPage() {
       setDeleteFor(null)
       setDetail(null)
       show('邮件已删除')
+      // 删除改变了服务端数据: 刷新绕过缓存, 避免已删除邮件在列表里残留
+      refreshOnceRef.current = true
       setRetryKey((key) => key + 1)
     } catch (err) {
       show(err instanceof ApiError ? err.message : '删除邮件失败')
@@ -210,7 +221,10 @@ export default function InboxPage() {
         }
         const queryId = searchParams.get('account_id')
         const valid = data.find((a) => a.id === queryId)
-        const target = valid ? valid.id : data[0]?.id ?? ''
+        // 多账号且 URL 未指定(或指定了非法)账号时不再自动落到第一个账号:
+        // 顶部菜单每次打开都加载第一个账号会把该账号刷爆(见 AGENTS.md 限流红线)。
+        // 只有单账号(没有选择余地)或 URL 指定了合法账号才自动选定。
+        const target = valid ? valid.id : (data.length === 1 ? data[0].id : '')
         setAccountId(target)
         if (target) {
           const next: Record<string, string> = { account_id: target }
@@ -226,6 +240,10 @@ export default function InboxPage() {
           if (qStart) next.start = qStart
           if (qEnd) next.end = qEnd
           setSearchParams(next, { replace: true })
+        } else {
+          // 未自动选定账号: 收件箱查询不会启动, 在这里关 loading,
+          // 让「请先选择账号查看邮件」引导显示出来。
+          setLoading(false)
         }
       })
       .catch((err) => {
@@ -271,6 +289,8 @@ export default function InboxPage() {
   }, [accountId, alias, pageSize, rangeStart, rangeEnd, retryKey])
 
   function runQuery() {
+    // 未选账号时无查询可发(多账号下初始不自动选择, 见上方账号加载逻辑)
+    if (!accountId) return
     const next: Record<string, string> = { account_id: accountId }
     if (alias) next.alias = alias
     next.limit = String(pageSize)
@@ -279,6 +299,7 @@ export default function InboxPage() {
     setSearchParams(next, { replace: true })
     setDetail(null)
     // 保留现有列表, 只让刷新按钮进入忙碌态(loading 会让整块变成骨架屏)
+    refreshOnceRef.current = true
     setRefreshing(true)
     setRetryKey((k) => k + 1)
   }
@@ -286,6 +307,9 @@ export default function InboxPage() {
   /** 加载更多: 追加下一页信封。 */
   function loadMore() {
     if (loadingMore || messages.length >= total) return
+    // 分页追加也强制回源: 若页 1 已刷新而后续页命中旧缓存, 新邮件到达时
+    // 页间边界错位, 合并视图会漏掉边界邮件。
+    refreshOnceRef.current = true
     setLoadingMore(true)
     void loadPage(messages.length, true)
   }
@@ -332,6 +356,7 @@ export default function InboxPage() {
             id="inbox-account"
             block
             ariaLabel="选择账号"
+            placeholder="请选择账号"
             value={accountId}
             options={accounts.map((a) => ({ value: a.id, label: a.name }))}
             onChange={handleAccountChange}
@@ -426,8 +451,8 @@ export default function InboxPage() {
         loading={loading}
         error={error}
         // 必须等拿到结果才判断"空": 否则 accounts 先返回时会短暂闪出"暂无邮件"
-        empty={!loading && messages.length === 0}
-        emptyText="暂无邮件"
+        empty={!loading && (!accountId || messages.length === 0)}
+        emptyText={!accountId ? '请先选择账号查看邮件' : '暂无邮件'}
         onRetry={() => {
           setLoading(true)
           setRetryKey((k) => k + 1)
