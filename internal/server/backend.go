@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"icloud-hme/internal/account"
@@ -34,6 +35,8 @@ type InboxQuery struct {
 	Offset    int
 	// DateRange 是日期区间; 零值表示不限。
 	DateRange mail.DateRange
+	// Refresh 为 true 时绕过服务端 TTL 缓存, 强制回源(前端「查询/刷新」显式触发)。
+	Refresh bool
 }
 
 // InboxResult 是收件箱查询结果。
@@ -80,6 +83,47 @@ type Backend interface {
 // managerBackend 是生产 Backend,包装 *account.Manager。
 type managerBackend struct {
 	mgr *account.Manager
+	// cache 是只读响应的 TTL 缓存(收件箱/别名列表/邮件摘要), 惰性初始化。
+	// 目的: 挡掉「切页/重复点击」对上游(尤其外部收件邮箱)的重复访问,
+	// 避免高频请求触发服务商风控/封禁。
+	cacheMu sync.Mutex
+	cache   *responseCache
+}
+
+// respCache 返回响应缓存(首次使用时惰性初始化; 测试可直接构造 managerBackend)。
+func (b *managerBackend) respCache() *responseCache {
+	b.cacheMu.Lock()
+	defer b.cacheMu.Unlock()
+	if b.cache == nil {
+		b.cache = newResponseCache()
+	}
+	return b.cache
+}
+
+// 缓存有效期: 短 TTL 挡掉「切页/重复点击」的重复回源, 又不至于让用户
+// 长时间看不到新邮件; 摘要(正文片段)基本不变, 可缓存更久。
+// 用 var 而非 const: 测试覆盖 TTL 验证过期行为。
+var (
+	inboxCacheTTL   = 30 * time.Second
+	aliasesCacheTTL = 30 * time.Second
+	previewCacheTTL = 5 * time.Minute
+)
+
+// inboxCacheKey 生成收件箱查询的缓存键(账号+别名+分页+日期区间)。
+//
+// 日期区间量化到分钟: days 回退路径由 handler 用 time.Now() 生成区间, 纳秒级
+// 漂移会让同一逻辑查询每次生成新键, 缓存永不命中(实测连续同参请求每次回源
+// 163 各 ~1.4s)。量化到分钟后, 30s TTL 内的重复查询稳定命中; 显式 start/end
+// 场景前端值本就稳定, 量化不影响正确性(TTL 上限内允许亚分钟边界的极小事后漂移)。
+func inboxCacheKey(q InboxQuery) string {
+	var start, end int64
+	if !q.DateRange.Start.IsZero() {
+		start = q.DateRange.Start.Truncate(time.Minute).Unix()
+	}
+	if !q.DateRange.End.IsZero() {
+		end = q.DateRange.End.Truncate(time.Minute).Unix()
+	}
+	return fmt.Sprintf("inbox:%s:%s:%d:%d:%d:%d", q.AccountID, q.Alias, q.Limit, q.Offset, start, end)
 }
 
 // TimezoneFor 返回账号调度时区（跟随代理出口 IP）。
@@ -163,6 +207,8 @@ func (b *managerBackend) SetMailbox(id string, config account.MailboxConfig) (ac
 		}
 		return account.Summary{}, &BackendError{Status: http.StatusBadGateway, Code: "UPSTREAM_FAILURE", Message: "收件邮箱验证失败,请检查邮箱、授权码和 IMAP 配置"}
 	}
+	// 换绑邮箱后旧邮箱的信封/摘要缓存不再代表真实内容, 立即失效。
+	b.invalidateAccountReads(id)
 	sum, ok := b.mgr.GetAccount(id)
 	if !ok {
 		return account.Summary{}, &BackendError{Status: http.StatusNotFound, Code: "ACCOUNT_NOT_FOUND", Message: "账号不存在"}
@@ -304,6 +350,8 @@ func (b *managerBackend) CreateAlias(accountID, label string) (*hme.CreateResult
 	if err != nil {
 		return nil, classifyUpstreamErr("创建邮箱失败", err)
 	}
+	// 新别名已产生: 别名列表缓存立即失效, 下一次读取拿最新列表。
+	b.invalidateAliases(accountID)
 	return result, nil
 }
 
@@ -311,7 +359,16 @@ func (b *managerBackend) CreateAlias(accountID, label string) (*hme.CreateResult
 //
 // 顺带按最新列表刷新账号的别名总数/活跃数:别名页在创建/删除/停用后都会重新
 // 拉取本接口,因此这里回写计数即可让账号管理页的显示持续与真实状态一致。
+//
+// 读路径带 TTL 缓存: 反复切页/切账号不再每次都打 iCloud API;
+// 别名写操作(创建/删除/停用/激活)后由对应方法失效缓存。
 func (b *managerBackend) ListAliases(accountID string) ([]hme.Alias, error) {
+	key := "aliases:" + accountID
+	if cached, ok := b.respCache().get(key); ok {
+		if aliases, ok := cached.([]hme.Alias); ok {
+			return aliases, nil
+		}
+	}
 	client, err := b.mgr.HMEClient(accountID, false)
 	if err != nil {
 		return nil, mapAccountErr(err)
@@ -322,7 +379,21 @@ func (b *managerBackend) ListAliases(accountID string) ([]hme.Alias, error) {
 		return nil, classifyUpstreamErr("获取别名列表失败", err)
 	}
 	_ = b.mgr.UpdateAliasCounts(accountID, aliases)
+	b.respCache().set(key, aliases, aliasesCacheTTL)
 	return aliases, nil
+}
+
+// invalidateAliases 让某账号的别名列表缓存失效(写操作后调用)。
+func (b *managerBackend) invalidateAliases(accountID string) {
+	b.respCache().invalidate("aliases:" + accountID)
+}
+
+// invalidateAccountReads 让某账号的收件箱与摘要缓存失效(凭据/邮箱等
+// 影响读取内容的配置变更后调用)。
+func (b *managerBackend) invalidateAccountReads(accountID string) {
+	cache := b.respCache()
+	cache.invalidate("inbox:" + accountID + ":")
+	cache.invalidate("preview:" + accountID + ":")
 }
 
 // SetAliasActive 停用或激活别名。
@@ -347,6 +418,8 @@ func (b *managerBackend) SetAliasActive(accountID, anonymousID string, active bo
 		}
 		return false, classifyUpstreamErr(msg, err)
 	}
+	// 别名状态已变化: 列表缓存失效, 下一次读取拿最新状态。
+	b.invalidateAliases(accountID)
 	return success, nil
 }
 
@@ -361,6 +434,8 @@ func (b *managerBackend) DeleteAlias(accountID, anonymousID string) error {
 	if err != nil {
 		return classifyUpstreamErr("删除失败", err)
 	}
+	// 别名已删除: 列表缓存失效, 下一次读取拿最新列表。
+	b.invalidateAliases(accountID)
 	return nil
 }
 
@@ -432,6 +507,25 @@ func imapEnvelopeBudget(limit int) time.Duration {
 // 渐进式加载: 只返回信封(Preview 空), 前端用 FetchPreviews 分批补摘要;
 // Total 为符合日期过滤的总数, 前端据 offset+count<Total 判断可加载更多。
 func (b *managerBackend) ListInbox(q InboxQuery) (InboxResult, error) {
+	// 读路径先查 TTL 缓存(除非显式 refresh): 重复切页/点击不再回源上游。
+	cacheKey := inboxCacheKey(q)
+	if !q.Refresh {
+		if cached, ok := b.respCache().get(cacheKey); ok {
+			if result, ok := cached.(InboxResult); ok {
+				return result, nil
+			}
+		}
+	}
+	result, err := b.listInboxUncached(q)
+	if err != nil {
+		return result, err
+	}
+	b.respCache().set(cacheKey, result, inboxCacheTTL)
+	return result, nil
+}
+
+// listInboxUncached 是 ListInbox 的无缓存实现(实际访问 IMAP/Web API)。
+func (b *managerBackend) listInboxUncached(q InboxQuery) (InboxResult, error) {
 	// 优先使用 IMAP 连接池 (App Password 认证,复用长连接);
 	// 整体加超时: 卡住的 IMAP 不该让请求无限等待。
 	// 信封阶段单封 ~500B, 预算按信封量级收紧(每封 0.3s, 仍保底 15s)。
@@ -515,9 +609,27 @@ func slicePage(list []mail.Message, offset, limit int) ([]mail.Message, int) {
 
 // FetchPreviews 批量补齐邮件摘要(渐进式加载第二阶段)。
 // ids 为列表接口返回的对外 ID(可能带文件夹前缀), 逐个解析后按文件夹批量拉取。
+// 摘要内容基本不变, 按 (账号, 邮件ID) 缓存, 重复请求(如刷新后重新渐进加载)不再回源。
 func (b *managerBackend) FetchPreviews(accountID string, ids []string) (map[string]string, error) {
-	refs := make([]mail.MessageRef, 0, len(ids))
+	cache := b.respCache()
+	out := map[string]string{}
+	missing := make([]string, 0, len(ids))
 	for _, id := range ids {
+		key := "preview:" + accountID + ":" + id
+		if cached, ok := cache.get(key); ok {
+			if preview, ok := cached.(string); ok {
+				out[id] = preview
+				continue
+			}
+		}
+		missing = append(missing, id)
+	}
+	if len(missing) == 0 {
+		return out, nil
+	}
+
+	refs := make([]mail.MessageRef, 0, len(missing))
+	for _, id := range missing {
 		folder, uid, err := mail.ParseMessageID(id)
 		if err != nil {
 			return nil, &BackendError{Status: http.StatusBadRequest, Code: "VALIDATION_ERROR", Message: "参数错误: 邮件 ID 无效"}
@@ -535,7 +647,11 @@ func (b *managerBackend) FetchPreviews(accountID string, ids []string) (map[stri
 	if err != nil {
 		return nil, &BackendError{Status: http.StatusBadGateway, Code: "UPSTREAM_FAILURE", Message: "读取摘要失败"}
 	}
-	return previews, nil
+	for id, preview := range previews {
+		out[id] = preview
+		cache.set("preview:"+accountID+":"+id, preview, previewCacheTTL)
+	}
+	return out, nil
 }
 
 // upstreamReasonLimit 与账号管理器记录上游错误时的长度约定一致(300)。
@@ -570,16 +686,18 @@ func (b *managerBackend) GetMessage(accountID, id string) (*mail.FullMessage, er
 	if perr != nil {
 		return nil, &BackendError{Status: http.StatusBadRequest, Code: "VALIDATION_ERROR", Message: "参数错误: 邮件 ID 无效"}
 	}
-	mc, err := b.mgr.MailClient(accountID)
+	// 走连接池(与列表/摘要同一长连接): 反复点开验证码邮件不该每次都
+	// TLS+LOGIN——对外部收件邮箱是高频异常访问信号。
+	var message *mail.FullMessage
+	err := b.mgr.WithMailClient(accountID, func(mc *mail.Client) error {
+		var e error
+		message, e = mc.GetFullFrom(folder, uid)
+		return e
+	})
 	if err != nil {
-		return nil, mapAccountErr(err)
-	}
-	if err := mc.Connect(); err != nil {
-		return nil, &BackendError{Status: http.StatusBadGateway, Code: "UPSTREAM_FAILURE", Message: "读取邮件失败"}
-	}
-	defer mc.Disconnect()
-	message, err := mc.GetFullFrom(folder, uid)
-	if err != nil {
+		if be := asAccountBackendError(err); be != nil {
+			return nil, be
+		}
 		return nil, &BackendError{Status: http.StatusBadGateway, Code: "UPSTREAM_FAILURE", Message: "读取邮件详情失败"}
 	}
 	return message, nil
@@ -590,17 +708,17 @@ func (b *managerBackend) DeleteMessage(accountID, id string) error {
 	if perr != nil {
 		return &BackendError{Status: http.StatusBadRequest, Code: "VALIDATION_ERROR", Message: "参数错误: 邮件 ID 无效"}
 	}
-	mc, err := b.mgr.MailClient(accountID)
+	err := b.mgr.WithMailClient(accountID, func(mc *mail.Client) error {
+		return mc.DeleteFrom(folder, uid)
+	})
 	if err != nil {
-		return mapAccountErr(err)
-	}
-	if err := mc.Connect(); err != nil {
+		if be := asAccountBackendError(err); be != nil {
+			return be
+		}
 		return &BackendError{Status: http.StatusBadGateway, Code: "UPSTREAM_FAILURE", Message: "删除邮件失败"}
 	}
-	defer mc.Disconnect()
-	if err := mc.DeleteFrom(folder, uid); err != nil {
-		return &BackendError{Status: http.StatusBadGateway, Code: "UPSTREAM_FAILURE", Message: "删除邮件失败"}
-	}
+	// 邮件已删除: 该账号的收件箱缓存立即失效, 下一次读取回源(不残留已删邮件)。
+	b.respCache().invalidate("inbox:" + accountID + ":")
 	return nil
 }
 
@@ -608,6 +726,23 @@ func (b *managerBackend) DeleteMessage(accountID, id string) error {
 func (b *managerBackend) Reload() error {
 	if err := b.mgr.Reload(); err != nil {
 		return &BackendError{Status: http.StatusInternalServerError, Code: "INTERNAL_ERROR", Message: "重新加载配置失败"}
+	}
+	// accounts.json 可能被手工修改(换绑邮箱/换凭据): 全部读缓存失效。
+	b.respCache().reset()
+	return nil
+}
+
+// asAccountBackendError 把账号管理器的「配置级」错误(账号不存在/缺凭据)
+// 映射为稳定 BackendError; 其余(连接/协议故障)返回 nil, 由调用方按上游故障处理。
+func asAccountBackendError(err error) *BackendError {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "账号不存在") ||
+		strings.Contains(msg, "未设置 iCloud 邮箱") ||
+		strings.Contains(msg, "未设置 App 专用密码") {
+		return mapAccountErr(err)
 	}
 	return nil
 }

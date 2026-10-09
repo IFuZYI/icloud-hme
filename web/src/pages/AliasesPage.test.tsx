@@ -59,7 +59,7 @@ const aliases: Alias[] = [
   },
 ]
 
-function renderPage(initialPath = '/aliases') {
+function renderPage(initialPath = '/aliases?account_id=acc_1') {
   return render(
     <MemoryRouter initialEntries={[initialPath]}>
       <Routes>
@@ -90,7 +90,7 @@ describe('AliasesPage', () => {
     expect(await screen.findByText(/暂无账号/)).toBeInTheDocument()
   })
 
-  it('账号切换:URL query 优先,回退到第一个账号', async () => {
+  it('账号切换:URL query 优先;非法 query 且多账号时不自动回退到第一个账号', async () => {
     server.use(
       http.get('/api/accounts', () => HttpResponse.json({ success: true, data: accounts })),
       http.get('/api/aliases', ({ request }) => {
@@ -111,8 +111,53 @@ describe('AliasesPage', () => {
     expect(screen.queryByText('beta@icloud.com')).toBeNull()
     unmount()
     renderPage('/aliases?account_id=bad_id')
-    // 回退到第一个账号 acc_1,显示 2 个别名
-    expect(await screen.findByText('beta@icloud.com')).toBeInTheDocument()
+    // 多账号下不自动回退到第一个账号(反复加载第一个账号), 等待用户显式选择
+    expect(await screen.findByText('请先选择账号查看别名')).toBeInTheDocument()
+  })
+
+  it('账号大于 1 且未指定 account_id 时不自动选择账号, 选择后才加载', async () => {
+    let aliasCalls = 0
+    let release: (() => void) | undefined
+    server.use(
+      http.get('/api/accounts', () => HttpResponse.json({ success: true, data: accounts })),
+      http.get('/api/aliases', () => {
+        aliasCalls += 1
+        if (aliasCalls === 1) {
+          // 首次请求挂起, 便于断言加载中的状态
+          return new Promise<Response>((resolve) => {
+            release = () => resolve(
+              HttpResponse.json({ success: true, data: { account_id: 'acc_1', count: 2, aliases } }),
+            )
+          })
+        }
+        return HttpResponse.json({ success: true, data: { account_id: 'acc_1', count: 2, aliases } })
+      }),
+    )
+    renderPage('/aliases')
+    expect(await screen.findByText('请先选择账号查看别名')).toBeInTheDocument()
+    expect(aliasCalls).toBe(0)
+    // 触发按钮显示占位符
+    expect(screen.getByRole('button', { name: /选择账号/ }).textContent).toContain('请选择账号')
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: /选择账号/ }))
+    await user.click(screen.getByRole('option', { name: '主号' }))
+    // 选择后请求挂起期间: 必须显示骨架屏(加载中), 而不是闪出「暂无别名」空态
+    expect(await screen.findByLabelText('加载中')).toBeInTheDocument()
+    expect(screen.queryByText('暂无别名')).toBeNull()
+    release?.()
+    expect(await screen.findByText('alpha@icloud.com')).toBeInTheDocument()
+    expect(aliasCalls).toBe(1)
+  })
+
+  it('仅有一个账号时仍自动选择该账号', async () => {
+    server.use(
+      http.get('/api/accounts', () => HttpResponse.json({ success: true, data: [accounts[0]] })),
+      http.get('/api/aliases', () =>
+        HttpResponse.json({ success: true, data: { account_id: 'acc_1', count: 2, aliases } }),
+      ),
+    )
+    renderPage('/aliases')
+    expect(await screen.findByText('alpha@icloud.com')).toBeInTheDocument()
   })
 
   it('loading/empty/error/retry 状态', async () => {

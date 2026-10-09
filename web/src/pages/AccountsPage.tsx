@@ -44,13 +44,15 @@ function StatusBadge({ status }: { status: string }) {
   )
 }
 
-function credText(acc: AccountSummary): string {
-  const parts: string[] = []
-  if (acc.has_cookies) parts.push('Cookie')
-  if (acc.has_app_password) parts.push('App密码')
-  if (acc.mailbox) parts.push(`收件箱:${acc.mailbox.email}`)
-  if (acc.has_proxy) parts.push('代理')
-  return parts.length > 0 ? `已配置（${parts.join('·')}）` : '未配置'
+/** 凭据列的紧凑标签: 每个凭据一个 chip, 长文本(收件邮箱)只留标签+title 提示,
+ *  避免「已配置（Cookie·App密码·收件箱:very-long@163.com）」这类长文本把列宽撑爆。 */
+function credChips(acc: AccountSummary): { key: string; label: string; title: string }[] {
+  const chips: { key: string; label: string; title: string }[] = []
+  if (acc.has_cookies) chips.push({ key: 'cookie', label: 'Cookie', title: '已配置 Cookie' })
+  if (acc.has_app_password) chips.push({ key: 'apppwd', label: 'App密码', title: '已配置 App 专用密码' })
+  if (acc.mailbox) chips.push({ key: 'mailbox', label: '收件箱', title: acc.mailbox.email })
+  if (acc.has_proxy) chips.push({ key: 'proxy', label: '代理', title: '已配置网络代理' })
+  return chips
 }
 
 /** 最近验证时间: 空值显示占位符, 其余格式化为本地可读时间(服务端返回 RFC3339)。 */
@@ -235,7 +237,20 @@ export default function AccountsPage() {
                       {acc.alias_active} / {acc.alias_total}
                     </span>
                   </td>
-                  <td><span className="cell-nowrap">{credText(acc)}</span></td>
+                  <td>
+                    <span className="cred-chips">
+                      {(() => {
+                        const chips = credChips(acc)
+                        return chips.length > 0
+                          ? chips.map((chip) => (
+                              <span key={chip.key} className="cred-chip" title={chip.title}>
+                                {chip.label}
+                              </span>
+                            ))
+                          : <span className="cell-nowrap">未配置</span>
+                      })()}
+                    </span>
+                  </td>
                   <td><span className="cell-nowrap">{formatValidated(acc.last_validated)}</span></td>
                   <td>
                     <div className="account-row-actions">

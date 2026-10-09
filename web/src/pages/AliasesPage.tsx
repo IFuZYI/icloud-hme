@@ -91,10 +91,18 @@ export default function AliasesPage() {
         }
         const queryId = searchParams.get('account_id')
         const valid = data.find((a) => a.id === queryId)
-        const target = valid ? valid.id : data[0]?.id ?? ''
+        // 多账号且 URL 未指定(或指定了非法)账号时不再自动落到第一个账号:
+        // 顶部菜单每次打开都加载第一个账号会把该账号刷爆(见 AGENTS.md 限流红线)。
+        // 只有单账号(没有选择余地)或 URL 指定了合法账号才自动选定。
+        const target = valid ? valid.id : (data.length === 1 ? data[0].id : '')
         setAccountId(target)
         if (target && (!queryId || !valid)) {
           setSearchParams({ account_id: target }, { replace: true })
+        }
+        if (!target) {
+          // 无自动选定的账号: 别名列表 effect 不会启动, 在这里关 loading,
+          // 让「请先选择账号查看别名」引导显示出来。
+          setLoading(false)
         }
       })
       .catch((err) => { if (!cancelled) setError(err instanceof ApiError ? err.message : '网络连接失败，请检查服务状态') })
@@ -249,9 +257,14 @@ export default function AliasesPage() {
           <SelectMenu
             className="aliases-account-select"
             ariaLabel="选择账号"
+            placeholder="请选择账号"
             value={accountId}
             options={accounts.map((a) => ({ value: a.id, label: a.name }))}
             onChange={(next) => {
+              if (next === accountId) return
+              // 手动选择账号后立即进入加载态: loading 在「未自动选择」时已置 false,
+              // 不置 true 会先闪一下「暂无别名」再切到列表。
+              setLoading(true)
               setAccountId(next)
               setSelectedIds(new Set())
               setSearchParams({ account_id: next }, { replace: true })
@@ -303,8 +316,8 @@ export default function AliasesPage() {
       <AsyncState
         loading={loading}
         error={error}
-        empty={filtered.length === 0}
-        emptyText={aliases.length === 0 ? '暂无别名' : '没有匹配的别名'}
+        empty={!accountId || filtered.length === 0}
+        emptyText={!accountId ? '请先选择账号查看别名' : aliases.length === 0 ? '暂无别名' : '没有匹配的别名'}
         onRetry={handleRetry}
       >
         <div className="aliases-table-card">

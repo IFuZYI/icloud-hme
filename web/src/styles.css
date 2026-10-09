@@ -1096,6 +1096,31 @@ td .cell-secondary {
   white-space: nowrap;
 }
 
+/* 凭据列的紧凑标签组: 每个凭据一枚小 chip, 横向排列且可换行,
+   长值(如收件邮箱)只进 title, 不再以可见长文本撑破列宽。 */
+.cred-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+
+.cred-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-pill);
+  background: var(--color-bg-subtle);
+  color: var(--color-text-secondary);
+  font-size: var(--text-xs);
+  line-height: 1.6;
+  white-space: nowrap;
+  max-width: 96px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .link-button {
   padding: 0;
   border: 0;

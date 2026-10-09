@@ -74,12 +74,37 @@ describe('AccountsPage 表格渲染', () => {
     expect(email).toHaveAttribute('title', 'very-long-email-address-for-testing@icloud.com')
   })
 
-  it('短标签列(凭据/最近验证)禁止逐字换行, 避免窄列把整行撑高', async () => {
+  it('凭据列渲染为紧凑标签(不再用长文本), 最近验证保持单行', async () => {
     renderPage()
-    // 凭据列的短文本曾被窄列逐字折成 3 行("未"/"配"/"置"), 行高被撑到 92px
-    const cred = await screen.findByText('已配置（Cookie·App密码）')
-    expect(cred.className).toContain('cell-nowrap')
+    const cookie = await screen.findByText('Cookie')
+    expect(cookie.className).toContain('cred-chip')
+    expect(screen.getByText('App密码').className).toContain('cred-chip')
+    // 旧的「已配置（…）」长文本不再出现, 避免把列宽撑爆
+    expect(screen.queryByText(/已配置（/)).toBeNull()
     const time = screen.getByText(/2026\/10\/05/)
     expect(time.className).toContain('cell-nowrap')
+  })
+
+  it('长收件邮箱收入标签 title, 不把凭据列撑破', async () => {
+    const withMailbox: AccountSummary[] = [
+      {
+        ...accounts[0],
+        mailbox: {
+          provider: '163',
+          email: 'very-long-mailbox-address-for-testing@163.com',
+          imap_host: 'imap.163.com',
+          imap_port: 993,
+        },
+      },
+    ]
+    server.use(
+      http.get('/api/accounts', () => HttpResponse.json({ success: true, data: withMailbox })),
+    )
+    renderPage()
+    const box = await screen.findByText('收件箱')
+    expect(box.className).toContain('cred-chip')
+    expect(box).toHaveAttribute('title', 'very-long-mailbox-address-for-testing@163.com')
+    // 原始长邮箱只作为提示, 不以可见文本渲染
+    expect(screen.queryByText(/very-long-mailbox-address/)).toBeNull()
   })
 })

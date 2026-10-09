@@ -68,6 +68,12 @@ type Server struct {
 	AuthStateHits int
 	// SMSSendHits 是 /verify/phone 的命中次数。
 	SMSSendHits int
+	// HMEListHits 是 /v2/hme/list 的命中次数(断言别名列表缓存)。
+	HMEListHits int
+	// HMEDeleteHits 是 /v1/hme/delete 的命中次数。
+	HMEDeleteHits int
+	// HMEListBody 覆盖 /v2/hme/list 的响应体(默认空列表)。
+	HMEListBody string
 }
 
 // New 启动 mock 服务,测试结束自动关闭。
@@ -322,8 +328,24 @@ func New(t testing.TB) *Server {
 	})
 
 	mux.HandleFunc("/v2/hme/list", func(w http.ResponseWriter, r *http.Request) {
+		m.mu.Lock()
+		m.HMEListHits++
+		body := m.HMEListBody
+		m.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"success":true,"result":{"hmeEmails":[]}}`))
+		if body == "" {
+			body = `{"success":true,"result":{"hmeEmails":[]}}`
+		}
+		_, _ = w.Write([]byte(body))
+	})
+
+	// 删除别名: 返回成功(别名列表缓存失效测试用)。
+	mux.HandleFunc("/v1/hme/delete", func(w http.ResponseWriter, r *http.Request) {
+		m.mu.Lock()
+		m.HMEDeleteHits++
+		m.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true}`))
 	})
 
 	srv := httptest.NewServer(mux)
@@ -337,4 +359,11 @@ func (m *Server) Snapshot() (trustHits, accountLoginHits, validateHits int, veri
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.TrustHits, m.AccountLoginHit, m.ValidateHits, m.VerifyCode
+}
+
+// HMEListCalls 返回 /v2/hme/list 的命中次数(锁保护)。
+func (m *Server) HMEListCalls() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.HMEListHits
 }

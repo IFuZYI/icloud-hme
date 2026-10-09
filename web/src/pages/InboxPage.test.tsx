@@ -105,6 +105,84 @@ describe('InboxPage', () => {
     })
   })
 
+  it('账号大于 1 且未指定 account_id 时不自动加载收件箱', async () => {
+    let inboxCalls = 0
+    const twoAccounts = [accounts[0], { ...accounts[0], id: 'acc_2', name: '备用号' }]
+    server.use(
+      http.get('/api/accounts', () => HttpResponse.json({ success: true, data: twoAccounts })),
+      http.get('/api/inbox', () => {
+        inboxCalls += 1
+        return HttpResponse.json({ success: true, data: inboxResult })
+      }),
+    )
+    renderPage()
+    expect(await screen.findByText('请先选择账号查看邮件')).toBeInTheDocument()
+    expect(inboxCalls).toBe(0)
+  })
+
+  it('点击查询/刷新时携带 refresh=1 绕过服务端缓存', async () => {
+    const urls: string[] = []
+    server.use(
+      http.get('/api/accounts', () => HttpResponse.json({ success: true, data: accounts })),
+      http.get('/api/inbox', ({ request }) => {
+        urls.push(request.url)
+        return HttpResponse.json({ success: true, data: inboxResult })
+      }),
+    )
+    renderPage()
+    await screen.findByText('主题一')
+    // 首屏加载不强制刷新(允许命中服务端缓存)
+    expect(new URL(urls[0]).searchParams.get('refresh')).toBeNull()
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: /查询/ }))
+    await waitFor(() => {
+      expect(urls.some((u) => new URL(u).searchParams.get('refresh') === '1')).toBe(true)
+    })
+  })
+
+  it('加载更多同样携带 refresh=1, 保证分页边界与最新数据一致', async () => {
+    // 若「加载更多」命中旧缓存而页 1 已刷新, 新邮件到达时页间边界会错位
+    // (某封邮件在合并视图里整体缺失); 因此分页追加也强制回源。
+    const urls: string[] = []
+    server.use(
+      http.get('/api/accounts', () => HttpResponse.json({ success: true, data: accounts })),
+      http.get('/api/inbox', ({ request }) => {
+        const url = new URL(request.url)
+        urls.push(request.url)
+        const offset = url.searchParams.get('offset')
+        return HttpResponse.json({
+          success: true,
+          data: {
+            ...inboxResult,
+            total: 2,
+            offset: Number(offset),
+            messages: [
+              {
+                ...inboxResult.messages[0],
+                id: offset === '0' ? '1' : '2',
+                subject: offset === '0' ? '第一封' : '第二封',
+              },
+            ],
+          },
+        })
+      }),
+    )
+    renderPage()
+    await screen.findByText('第一封')
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: /加载更多/ }))
+    await waitFor(() => {
+      expect(
+        urls.some(
+          (u) =>
+            new URL(u).searchParams.get('offset') === '1' &&
+            new URL(u).searchParams.get('refresh') === '1',
+        ),
+      ).toBe(true)
+    })
+    expect(await screen.findByText('第二封')).toBeInTheDocument()
+  })
+
   it('从 URL 的 alias 参数初始化筛选,支持别名页直达收件箱', async () => {
     const inboxUrls: string[] = []
     server.use(

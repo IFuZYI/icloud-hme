@@ -760,38 +760,12 @@ func (m *Manager) HMEClientWithPassword(id, password string, otpProvider hme.OTP
 	return client, nil
 }
 
-// MailClient 为指定账号创建 IMAP 邮件客户端(每次新建, 不走连接池)。
-// 需要事先设置 iCloud 邮箱和 App 专用密码。
-// 高频读信请用 WithMailClient 复用长连接。
-func (m *Manager) MailClient(id string) (*mail.Client, error) {
-	m.mu.RLock()
-	acc, ok := m.accounts[id]
-	var snap *Account
-	if ok {
-		snap = copyAccount(acc)
-	}
-	m.mu.RUnlock()
-	if !ok {
-		return nil, fmt.Errorf("账号不存在: %s", id)
-	}
-	if snap.Mailbox != nil && snap.Mailbox.Email != "" && snap.Mailbox.Password != "" {
-		return mail.NewClientWithServer(snap.Mailbox.Email, snap.Mailbox.Password, snap.Mailbox.IMAPHost, snap.Mailbox.IMAPPort), nil
-	}
-	imapEmail := snap.ICloudEmail
-	if imapEmail == "" {
-		imapEmail = snap.RealEmail
-	}
-	if !isICloudDomain(imapEmail) {
-		return nil, fmt.Errorf("账号未设置 iCloud 邮箱 (当前: %s)", imapEmail)
-	}
-	if snap.AppPassword == "" {
-		return nil, fmt.Errorf("账号未设置 App 专用密码")
-	}
-	return mail.NewClient(imapEmail, snap.AppPassword), nil
-}
-
 // WithMailClient 使用连接池中的长连接执行 fn(串行/账号级)。
 // fn 返回后连接保留在池中, 不会 Logout。
+//
+// 外部收件邮箱(如 163)同样走连接池: 池键为「服务器+端口+邮箱」,
+// 同一邮箱跨账号共享一条长连接。修复前每次读信都新建连接(TLS+LOGIN),
+// 高频访问会被服务商视为异常, 是触发风控/封禁的典型信号。
 func (m *Manager) WithMailClient(id string, fn func(*mail.Client) error) error {
 	m.mu.RLock()
 	acc, ok := m.accounts[id]
@@ -802,12 +776,12 @@ func (m *Manager) WithMailClient(id string, fn func(*mail.Client) error) error {
 	}
 	m.mu.RUnlock()
 	if mailbox != nil && mailbox.Email != "" && mailbox.Password != "" {
-		mc := mail.NewClientWithServer(mailbox.Email, mailbox.Password, mailbox.IMAPHost, mailbox.IMAPPort)
-		if err := mc.Connect(); err != nil {
-			return err
+		if m.imapPool == nil {
+			m.imapPool = mail.NewPool()
 		}
-		defer mc.Disconnect()
-		return fn(mc)
+		// 池键含服务器/端口/邮箱: 同一邮箱跨账号共享长连接, 不同邮箱互不串用。
+		key := fmt.Sprintf("ext:%s:%d:%s", mailbox.IMAPHost, mailbox.IMAPPort, mailbox.Email)
+		return m.imapPool.DoWithServer(key, mailbox.Email, mailbox.Password, mailbox.IMAPHost, mailbox.IMAPPort, fn)
 	}
 	imapEmail, appPassword, err := m.imapCreds(id)
 	if err != nil {

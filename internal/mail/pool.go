@@ -1,4 +1,4 @@
-// IMAP 连接池: 按 Apple ID 复用长连接, 避免每次读信都 TLS+Login。
+// IMAP 连接池: 按账号复用长连接, 避免每次读信都 TLS+Login。
 package mail
 
 import (
@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// Pool 管理按账号复用的 IMAP 长连接。同一账号串行使用(go-imap 非并发安全)。
+// Pool 管理按 key 复用的 IMAP 长连接。同一 key 串行使用(go-imap 非并发安全)。
 type Pool struct {
 	mu    sync.Mutex
 	items map[string]*pooledConn
@@ -16,11 +16,13 @@ type Pool struct {
 }
 
 type pooledConn struct {
-	mu          sync.Mutex
-	appleID     string
-	appPassword string
-	client      *Client
-	lastUsed    time.Time
+	mu       sync.Mutex
+	key      string
+	password string
+	// newClient 惰性建连时使用的工厂(区分 iCloud 默认服务器与外部收件邮箱)。
+	newClient func() *Client
+	client    *Client
+	lastUsed  time.Time
 }
 
 // NewPool 创建连接池。
@@ -32,11 +34,25 @@ func NewPool() *Pool {
 }
 
 // Do 借出已连接的 Client 执行 fn; 用完不 Logout, 连接留在池中。
+// key 为 iCloud 邮箱(默认服务器 imap.mail.me.com)。
 func (p *Pool) Do(appleID, appPassword string, fn func(*Client) error) error {
 	if appleID == "" || appPassword == "" {
 		return fmt.Errorf("IMAP 凭据为空")
 	}
-	pc := p.getOrCreate(appleID, appPassword)
+	return p.do(appleID, appPassword, func() *Client { return NewClient(appleID, appPassword) }, fn)
+}
+
+// DoWithServer 与 Do 相同, 但连接指向自定义 IMAP 服务器(外部收件邮箱, 如 163)。
+// key 应包含服务器/端口/邮箱, 保证不同邮箱不共享连接(避免串用凭据)。
+func (p *Pool) DoWithServer(key, username, password, server string, port int, fn func(*Client) error) error {
+	if key == "" || username == "" || password == "" {
+		return fmt.Errorf("IMAP 凭据为空")
+	}
+	return p.do(key, password, func() *Client { return NewClientWithServer(username, password, server, port) }, fn)
+}
+
+func (p *Pool) do(key, password string, newClient func() *Client, fn func(*Client) error) error {
+	pc := p.getOrCreate(key, password, newClient)
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
 
@@ -68,24 +84,24 @@ func (p *Pool) Close() {
 	}
 }
 
-func (p *Pool) getOrCreate(appleID, appPassword string) *pooledConn {
+func (p *Pool) getOrCreate(key, password string, newClient func() *Client) *pooledConn {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	key := appleID
 	if pc, ok := p.items[key]; ok {
-		// 密码变更则换新
-		if pc.appPassword != appPassword {
-			pc.mu.Lock()
+		pc.mu.Lock()
+		// 密码变更则丢弃旧连接(凭据不再匹配); 工厂始终刷新为最新配置。
+		if pc.password != password {
 			if pc.client != nil {
 				pc.client.forceClose()
 				pc.client = nil
 			}
-			pc.appPassword = appPassword
-			pc.mu.Unlock()
+			pc.password = password
 		}
+		pc.newClient = newClient
+		pc.mu.Unlock()
 		return pc
 	}
-	pc := &pooledConn{appleID: appleID, appPassword: appPassword}
+	pc := &pooledConn{key: key, password: password, newClient: newClient}
 	p.items[key] = pc
 	return pc
 }
@@ -105,7 +121,7 @@ func (pc *pooledConn) ensure(idleClose time.Duration) error {
 		pc.client.forceClose()
 		pc.client = nil
 	}
-	c := NewClient(pc.appleID, pc.appPassword)
+	c := pc.newClient()
 	if err := c.Connect(); err != nil {
 		return err
 	}

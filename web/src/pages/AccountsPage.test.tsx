@@ -83,8 +83,9 @@ describe('AccountsPage', () => {
     expect(screen.getByText('错误号')).toBeInTheDocument()
     expect(screen.getByText('active@icloud.com')).toBeInTheDocument()
     expect(screen.getByText('12 / 15')).toBeInTheDocument()
-    expect(screen.getAllByText(/已配置/).length).toBeGreaterThan(0)
-    expect(screen.getAllByText(/未配置/).length).toBeGreaterThan(0)
+    // 凭据列以紧凑标签展示(不再用长文本), 未配置账号显示占位
+    expect(screen.getAllByText('Cookie').length).toBeGreaterThan(0)
+    expect(screen.getByText('未配置')).toBeInTheDocument()
     // 秘密字段不可见
     expect(screen.queryByText(/cookie-secret|app-secret|proxy-secret/)).toBeNull()
   })
