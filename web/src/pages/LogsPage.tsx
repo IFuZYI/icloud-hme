@@ -60,7 +60,8 @@ export default function LogsPage() {
         { method: 'POST', body: { older_than_days: cleanupDays } },
       )
       setCleanupOpen(false)
-      show(`已清理 ${result.deleted} 条日志`)
+      // 0 条时给更贴切的提示(「已清理 0 条」读起来像失败)
+      show(result.deleted > 0 ? `已清理 ${result.deleted} 条日志` : '没有符合条件的日志，未删除任何条目')
       load()
     } catch (cause) {
       // 失败保留对话框, 便于用户重试或换档位

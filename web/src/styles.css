@@ -1112,7 +1112,9 @@ td .cell-secondary {
   border: 1px solid var(--color-border-strong);
   border-radius: var(--radius-pill);
   background: var(--color-bg-subtle);
-  color: var(--color-text-secondary);
+  /* 对比度: secondary(#6e6e73) 在 bg-subtle(#f0f0f2) 上仅 4.456:1, 差 0.05
+     不到 WCAG AA; tertiary(#6a6a6f) 为 4.73:1 (dogfood 实测)。 */
+  color: var(--color-text-tertiary);
   font-size: var(--text-xs);
   line-height: 1.6;
   white-space: nowrap;

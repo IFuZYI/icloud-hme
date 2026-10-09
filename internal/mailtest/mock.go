@@ -41,6 +41,10 @@ type Options struct {
 	NetEaseFolderErr bool
 	// JunkFolder 非空时创建该名字的文件夹(如「垃圾邮件」)。
 	JunkFolder string
+	// EmptyHeaderSearch 复刻网易 Coremail 的 SEARCH 缺陷: 对 header 类条件
+	// (TO/FROM/SUBJECT/HEADER/TEXT/BODY)静默返回空结果且不报错(163 实测,
+	// 原始协议确认)。ALL/SINCE/BEFORE/UID 等非 header 条件不受影响。
+	EmptyHeaderSearch bool
 }
 
 // Server 是进程内自签证书 IMAP 服务器。
@@ -88,7 +92,7 @@ func NewServer(t *testing.T, opts Options) *Server {
 	// 统一用包装后端: memory 后端只认内置凭据(username/password),
 	// 而测试客户端用真实风格凭据登录; 测试聚焦 ID 门禁与文件夹行为,
 	// 凭据校验由真实 163 的 env 门控 e2e 测试覆盖。
-	srv := server.New(wrapperBackend{inner: be, neteaseErr: opts.NetEaseFolderErr})
+	srv := server.New(wrapperBackend{inner: be, neteaseErr: opts.NetEaseFolderErr, emptyHeaderSearch: opts.EmptyHeaderSearch})
 	srv.AllowInsecureAuth = true
 	srv.Enable(&ext{opts: opts, srv: s})
 
@@ -270,8 +274,9 @@ func (h *idHandler) Handle(c server.Conn) error {
 // (ID 门禁、文件夹措辞), 凭据校验由真实 163 的 env 门控 e2e 测试覆盖,
 // 因此这里放行任意非空凭据。
 type wrapperBackend struct {
-	inner      *memory.Backend
-	neteaseErr bool
+	inner             *memory.Backend
+	neteaseErr        bool
+	emptyHeaderSearch bool
 }
 
 func (b wrapperBackend) Login(connInfo *imap.ConnInfo, username, password string) (backend.User, error) {
@@ -282,12 +287,13 @@ func (b wrapperBackend) Login(connInfo *imap.ConnInfo, username, password string
 	if err != nil {
 		return nil, err
 	}
-	return wrapperUser{User: user, neteaseErr: b.neteaseErr}, nil
+	return wrapperUser{User: user, neteaseErr: b.neteaseErr, emptyHeaderSearch: b.emptyHeaderSearch}, nil
 }
 
 type wrapperUser struct {
 	backend.User
-	neteaseErr bool
+	neteaseErr        bool
+	emptyHeaderSearch bool
 }
 
 func (u wrapperUser) GetMailbox(name string) (backend.Mailbox, error) {
@@ -298,5 +304,20 @@ func (u wrapperUser) GetMailbox(name string) (backend.Mailbox, error) {
 		}
 		return nil, err
 	}
+	if u.emptyHeaderSearch {
+		return wrapperMailbox{Mailbox: mb}, nil
+	}
 	return mb, nil
+}
+
+// wrapperMailbox 复刻网易 Coremail 的 SEARCH 缺陷: header 类条件静默返回空。
+type wrapperMailbox struct {
+	backend.Mailbox
+}
+
+func (m wrapperMailbox) SearchMessages(uid bool, criteria *imap.SearchCriteria) ([]uint32, error) {
+	if len(criteria.Header) > 0 || len(criteria.Text) > 0 || len(criteria.Body) > 0 {
+		return []uint32{}, nil
+	}
+	return m.Mailbox.SearchMessages(uid, criteria)
 }
