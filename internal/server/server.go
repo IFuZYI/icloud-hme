@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -26,6 +27,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"icloud-hme/internal/account"
+	"icloud-hme/internal/apikey"
 	"icloud-hme/internal/auth"
 	"icloud-hme/internal/mail"
 	"icloud-hme/internal/webui"
@@ -38,6 +40,9 @@ type Config struct {
 	SessionTTL    time.Duration
 	SecureCookie  bool
 	AutoTaskFile  string
+	// APIKeyFile 是秘钥持久化路径; 空则用 AutoTaskFile 同目录的
+	// api_keys.json(测试显式传空串时用纯内存模式)。
+	APIKeyFile string
 }
 
 // Server 封装 Gin 引擎、账号后端与认证。
@@ -49,6 +54,8 @@ type Server struct {
 	r       *gin.Engine
 	task    *autoTaskManager
 	logins  *loginStore
+	// keys 是 API 秘钥管理器(脚本调用凭证; 文件为 <数据目录>/api_keys.json)。
+	keys *apikey.Manager
 	// newLoginSession 创建登录会话;生产实现绑定 account.Manager,测试可注入 fake。
 	newLoginSession func(accountID string) (LoginSession, error)
 }
@@ -79,6 +86,13 @@ func newWithBackend(be Backend, cfg Config) *Server {
 		cfg:     cfg,
 		logins:  newLoginStore(),
 	}
+	// 秘钥存储: 显式配置优先; 未配置时与任务文件同目录(测试经 AutoTaskFile
+	// 指向各自的临时目录, 互不污染); 两者皆空 = 纯内存模式。
+	keyFile := cfg.APIKeyFile
+	if keyFile == "" && cfg.AutoTaskFile != "" {
+		keyFile = filepath.Join(filepath.Dir(cfg.AutoTaskFile), "api_keys.json")
+	}
+	s.keys, _ = apikey.NewManager(keyFile)
 	s.task = newAutoTaskManager(cfg.AutoTaskFile, be)
 	s.auth, _ = auth.NewManager(auth.Options{
 		Password: cfg.AdminPassword,
@@ -137,11 +151,20 @@ func (s *Server) register() {
 		api.POST("/auth/login", s.handleLogin)
 		api.GET("/auth/session", s.handleSession)
 
-		// ===== 受保护路由:统一 requireSession =====
+		// ===== 受保护路由: 双模认证(会话 Cookie 或 API 秘钥) =====
+		// requireAuth 识别两种凭证; requirePermission 对秘钥做按接口授权
+		// (会话直接放行, 即管理员拥有全部权限)。
 		authed := api.Group("")
-		authed.Use(requireSession(s.auth))
+		authed.Use(s.requireAuth(), s.requirePermission())
 		{
 			authed.POST("/auth/logout", csrfCheck(s.auth), s.handleLogout)
+
+			// ===== API 秘钥管理(仅限管理员会话) =====
+			authed.GET("/keys", s.listKeysHandler)
+			authed.POST("/keys", csrfCheck(s.auth), s.createKeyHandler)
+			authed.PATCH("/keys/:id", csrfCheck(s.auth), s.updateKeyHandler)
+			authed.DELETE("/keys/:id", csrfCheck(s.auth), s.deleteKeyHandler)
+			authed.GET("/permissions", s.listPermissionsHandler)
 
 			// ===== 账号管理 =====
 			authed.GET("/accounts", s.listAccountsHandler)

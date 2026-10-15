@@ -28,6 +28,9 @@ func sessionIDFromCookie(c *gin.Context) string {
 }
 
 // requireSession 校验会话,失败返回 401/AUTH_REQUIRED。
+//
+// 保留为独立函数: 仅会话路径仍可能在特殊场景单独使用(当前注册表统一走
+// requireAuth 双模认证)。
 func requireSession(mgr *authManager) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		sessionID := sessionIDFromCookie(c)

@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react'
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { useAuth } from '../auth/AuthProvider'
-import { IconAccounts, IconAliases, IconInbox, IconLogout, IconShield, IconClock } from './icons'
+import { IconAccounts, IconAliases, IconInbox, IconLogout, IconShield, IconClock, IconKey } from './icons'
 
 export default function AppShell() {
   const { logout } = useAuth()
@@ -57,6 +57,10 @@ export default function AppShell() {
           <NavLink to="/inbox">
             <IconInbox />
             收件箱
+          </NavLink>
+          <NavLink to="/keys">
+            <IconKey />
+            秘钥
           </NavLink>
         </nav>
         <span className="spacer" />

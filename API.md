@@ -21,12 +21,13 @@ HTTP JSON API，所有接口返回统一格式：
 }
 ```
 
-**稳定错误码：** `AUTH_REQUIRED`、`INVALID_CREDENTIALS`、`RATE_LIMITED`、`CREATION_COOLDOWN`、`CREATION_LIMIT_REACHED`、`CSRF_INVALID`、`VALIDATION_ERROR`、`ACCOUNT_NOT_FOUND`、`OTP_REQUIRED`、`OTP_INVALID`、`UPSTREAM_UNAUTHORIZED`、`UPSTREAM_FAILURE`、`INTERNAL_ERROR`
+**稳定错误码：** `AUTH_REQUIRED`、`INVALID_CREDENTIALS`、`RATE_LIMITED`、`CREATION_COOLDOWN`、`CREATION_LIMIT_REACHED`、`CSRF_INVALID`、`INVALID_API_KEY`、`PERMISSION_DENIED`、`KEY_EXISTS`、`KEY_LIMIT_REACHED`、`KEY_NOT_FOUND`、`VALIDATION_ERROR`、`ACCOUNT_NOT_FOUND`、`OTP_REQUIRED`、`OTP_INVALID`、`UPSTREAM_UNAUTHORIZED`、`UPSTREAM_FAILURE`、`INTERNAL_ERROR`
 
 **安全约定：**
 
-- 除 `POST /api/auth/login` 与 `GET /api/auth/session` 外，所有 `/api` 接口都需要管理员会话
-- 非 GET/HEAD/OPTIONS 请求必须携带 `X-CSRF-Token` 请求头
+- 除 `POST /api/auth/login` 与 `GET /api/auth/session` 外，所有 `/api` 接口都需要管理员会话 Cookie（`hme_session`）**或** API 秘钥（`X-API-Key` / `Authorization: Bearer`）
+- 会话请求：非 GET/HEAD/OPTIONS 必须携带 `X-CSRF-Token` 请求头；秘钥请求豁免 CSRF
+- 秘钥按接口粒度独立授权；秘钥管理接口（`/api/keys`、`/api/permissions`）仅限管理员会话
 - 会话 Cookie：`hme_session`，`Path=/`、`HttpOnly`、`SameSite=Strict`；TLS 部署时设置 `ICLOUD_HME_SECURE_COOKIE=true` 启用 `Secure`
 - 任何账号响应**绝不包含** `cookies`、`app_password`、`proxy` 字段（代理只暴露 `has_proxy` 布尔值）
 - 用户可见错误消息不拼接上游响应体或秘密
@@ -509,6 +510,96 @@ X-CSRF-Token: <token>
 
 ---
 
+## API 秘钥（脚本调用）
+
+秘钥用于脚本代替会话 Cookie 调用接口，**仅限管理员会话管理**（秘钥不能管理秘钥或给自己提权）。
+
+**认证方式：** 请求头 `X-API-Key: sk-…` 或标准形式 `Authorization: Bearer sk-…`；两者同时出现时以 `X-API-Key` 为准。秘钥请求**豁免 CSRF**（不依赖 Cookie，无浏览器自动携带凭证的 CSRF 面）。
+
+**权限模型：** 每个秘钥独立授权，按接口粒度勾选（权限 ID 见 `GET /api/permissions`）。权限不足返回 `403 PERMISSION_DENIED`；秘钥无效/已停用返回 `401 INVALID_API_KEY`（与未知秘钥同文案，不泄露秘钥存在性）。
+
+### 20. 列出秘钥
+
+```http
+GET /api/keys
+```
+
+响应（含明文秘钥，面板可查看/复制）：
+
+```json
+{
+  "success": true,
+  "data": {
+    "count": 1,
+    "keys": [
+      {
+        "id": "key_ba6fcc58b77b586a",
+        "name": "签到脚本",
+        "key": "sk-eAWxxxxxxxxxxxxxxxxxxxxHBwr",
+        "enabled": true,
+        "permissions": ["inbox.list"],
+        "created_at": "2026-10-15T19:56:29+08:00",
+        "last_used_at": "2026-10-15T20:01:00+08:00",
+        "last_used_ip": "192.168.1.5"
+      }
+    ]
+  }
+}
+```
+
+### 21. 创建秘钥
+
+```http
+POST /api/keys
+X-CSRF-Token: <token>
+
+{"name":"签到脚本","key":"","permissions":["inbox.list","inbox.get"]}
+```
+
+- `name` 必填；`key` 留空自动生成 `sk-` + 24 位随机字符（大小写字母+数字），手动指定时要求 8–128 位可打印 ASCII（不含空格）且全局唯一
+- `permissions` 为权限 ID 列表（可空 = 无任何权限）；未知权限 ID 直接 `400 VALIDATION_ERROR`
+- 重复秘钥 `409 KEY_EXISTS`；数量达上限（100）`409 KEY_LIMIT_REACHED`
+
+### 22. 更新秘钥
+
+```http
+PATCH /api/keys/:id
+X-CSRF-Token: <token>
+
+{"name":"新名字","permissions":["inbox.list"],"enabled":false}
+```
+
+字段均可选（缺省不变）；**秘钥值不可修改**（需要换值请删除重建）。不存在 `404 KEY_NOT_FOUND`。
+
+### 23. 删除秘钥
+
+```http
+DELETE /api/keys/:id
+X-CSRF-Token: <token>
+```
+
+删除后使用该秘钥的脚本立即失效。不存在 `404 KEY_NOT_FOUND`。
+
+### 24. 权限目录
+
+```http
+GET /api/permissions
+```
+
+```json
+{
+  "success": true,
+  "data": {
+    "groups": [{"id":"inbox","label":"收件箱"}],
+    "permissions": [{"id":"inbox.list","label":"读取收件箱列表","group":"inbox"}]
+  }
+}
+```
+
+**权限 ID 一览：** `accounts.list`、`accounts.write`、`aliases.list`、`aliases.create`、`aliases.write`、`tasks.list`、`tasks.write`、`inbox.list`、`inbox.get`、`inbox.previews`、`inbox.delete`、`system.reload`。
+
+---
+
 ## curl 使用示例（Cookie Jar + CSRF）
 
 ```bash
@@ -539,6 +630,27 @@ curl -b cookies.txt -X POST "$BASE/api/create" \
 
 # 6. 读取邮件
 curl -b cookies.txt "$BASE/api/inbox?account_id=acc_1&limit=10"
+```
+
+## curl 使用示例（API 秘钥, 推荐给脚本）
+
+```bash
+BASE="http://localhost:8081"
+
+# 1. 在管理台「秘钥」页创建, 或经会话 API 创建:
+#    curl -b cookies.txt -X POST "$BASE/api/keys" -H "Content-Type: application/json" \
+#      -H "X-CSRF-Token: $CSRF" \
+#      -d '{"name":"签到脚本","permissions":["inbox.list","inbox.get"]}'
+#    从响应 data.key 取秘钥, 保存到脚本环境变量:
+KEY="sk-..."
+
+# 2. 直接用秘钥调用(无需 Cookie、无需 CSRF; 只受权限表约束)
+curl -H "X-API-Key: $KEY" "$BASE/api/inbox?account_id=acc_1&limit=10"
+curl -H "Authorization: Bearer $KEY" "$BASE/api/accounts"
+
+# 3. 权限不足/秘钥无效的区分:
+#    403 PERMISSION_DENIED = 秘钥有效但未勾选该接口
+#    401 INVALID_API_KEY   = 秘钥错误或已停用(删除/停用后立即失效)
 ```
 
 ---

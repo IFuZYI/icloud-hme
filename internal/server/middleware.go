@@ -92,8 +92,15 @@ func apiCacheControlMiddleware() gin.HandlerFunc {
 }
 
 // csrfCheck 校验状态变更请求的 CSRF token。
+//
+// 秘钥请求(authKindAPIKey)豁免: 秘钥不经 Cookie 传递, 不存在浏览器自动
+// 携带凭证的 CSRF 面; 脚本调用也不便维护 CSRF 头。会话请求行为不变。
 func csrfCheck(mgr *authManager) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if c.GetString(ctxAuthKind) == authKindAPIKey {
+			c.Next()
+			return
+		}
 		sessionID := sessionIDFromCookie(c)
 		if sessionID == "" {
 			slog.Debug("CSRF 校验失败: 缺少会话",

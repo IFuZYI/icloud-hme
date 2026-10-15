@@ -11,6 +11,7 @@ import AliasesPage from './pages/AliasesPage'
 import InboxPage from './pages/InboxPage'
 import AliasTasksPage from './pages/AliasTasksPage'
 import LogsPage from './pages/LogsPage'
+import KeysPage from './pages/KeysPage'
 import { buildAntdTheme } from './antdTheme'
 import { usePrefersDark } from './usePrefersDark'
 
@@ -44,6 +45,7 @@ export default function App() {
                 <Route path="/alias-tasks" element={<AliasTasksPage />} />
                 <Route path="/logs" element={<LogsPage />} />
                 <Route path="/inbox" element={<InboxPage />} />
+                <Route path="/keys" element={<KeysPage />} />
                 <Route path="*" element={<Navigate to="/accounts" replace />} />
               </Route>
             </Routes>

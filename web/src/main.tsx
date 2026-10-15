@@ -5,6 +5,7 @@ import './accounts-ui.css'
 import './task-ui.css'
 import './aliases-ui.css'
 import './inbox-ui.css'
+import './keys-ui.css'
 import App from './App.tsx'
 
 createRoot(document.getElementById('root')!).render(

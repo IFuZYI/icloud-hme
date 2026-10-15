@@ -1,0 +1,70 @@
+/* 秘钥页面样式 */
+
+.keys-create-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* 秘钥列: 脱敏/明文 + 显示/复制按钮 */
+.key-cell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.key-value {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.85em;
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: var(--surface-2, rgba(127, 127, 127, 0.12));
+  word-break: break-all;
+}
+
+.key-value.masked {
+  letter-spacing: 0.06em;
+}
+
+/* 权限勾选分组 */
+.permission-group {
+  border: 1px solid var(--border, rgba(127, 127, 127, 0.3));
+  border-radius: 10px;
+  padding: 10px 12px 12px;
+  margin: 0 0 10px;
+  min-inline-size: 0;
+}
+
+.permission-group legend {
+  padding: 0 6px;
+  font-size: 0.85em;
+  font-weight: 600;
+}
+
+.permission-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  cursor: pointer;
+  user-select: none;
+}
+
+.permission-item input[type='checkbox'] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent, #0a84ff);
+  cursor: pointer;
+}
+
+/* 行内操作按钮组 */
+.row-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.danger-link {
+  color: var(--danger, #ff453a);
+}

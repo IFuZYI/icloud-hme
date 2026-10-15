@@ -20,7 +20,7 @@ Gin Server /api ─────────────────────�
   │           └─ mail.WebClient ───── iCloud Web Mail API
   └─ autoTaskManager ─────────────────────────────────┘ 自动创建与审计日志
 
-持久化：data/accounts.json、data/alias_task.json、data/alias_task_logs.json
+持久化：data/accounts.json、data/alias_task.json、data/alias_task_logs.json、data/api_keys.json
 ```
 
 ## 2. 目录与职责
@@ -30,6 +30,7 @@ Gin Server /api ─────────────────────�
 ├── main.go                         启动参数、环境安全配置、依赖装配
 ├── internal/
 │   ├── account/                    账号聚合、持久化、公开 DTO、客户端工厂
+│   ├── apikey/                     API 秘钥生成、校验、权限与持久化
 │   ├── auth/                       管理员密码派生、内存会话、CSRF、登录限流
 │   ├── hme/                        iCloud HME Cookie/SRP 客户端
 │   ├── mail/                       IMAP、Web Mail、MIME 解析与连接池
@@ -40,7 +41,7 @@ Gin Server /api ─────────────────────�
 │   ├── src/api/                    唯一 fetch 封装和 API DTO
 │   ├── src/auth/                   会话探测、登录状态和 CSRF token 内存管理
 │   ├── src/components/             可复用弹窗、菜单、通知和表单组件
-│   ├── src/pages/                  账号、别名、任务、日志、收件箱页面
+│   ├── src/pages/                  账号、别名、任务、日志、收件箱、秘钥页面
 │   └── src/test/                   MSW、Vitest 共享测试设施
 ├── data/                           运行期数据，包含敏感凭据；不应提交
 ├── API.md                          对外 API 文档（部分内容落后于当前实现，见第 5 节）
@@ -60,6 +61,7 @@ Gin Server /api ─────────────────────�
 | 修改邮件 HTML/MIME 解析 | `internal/mail/preview.go`、`internal/mail/client.go` | `attachment_test.go`、`mime_edge_test.go`、preview 系列测试 |
 | 修改自动创建任务 | `internal/server/auto_task.go`、`auto_task_logs.go`、`alias_task_handlers.go` | 原子持久化、停止通道、任务/日志测试、任务页 |
 | 修改登录/会话安全 | `internal/auth/`、`internal/server/auth.go`、`middleware.go` | CSRF、Cookie 属性、限流、前端 `AuthProvider` |
+| 新增/修改受保护接口 | 对应 handler + `permission_catalog.go` 的 `protectedRouteList` | 权限表完整性测试（`TestRoutePermissionTableComplete`）；仅会话接口须列入 `sessionOnlyRoutes`；秘钥管理面见 `apikey/`、`apikey_auth.go`、`keys_handlers.go` |
 | 修改前端 API 行为 | `web/src/api/client.ts`、`web/src/api/types.ts` | MSW handlers、相应页面测试；不要绕过 `request()` 直接 `fetch()` |
 | 修改账号管理体验 | `web/src/pages/AccountsPage.tsx`、`web/src/components/` | 保持账号摘要脱敏；菜单操作通过 `MoreActionsDropdown` 分组，Cookie 输入复用 `SmartCookieInput` |
 
@@ -74,13 +76,17 @@ Gin Server /api ─────────────────────�
 
 ## 4. 认证与响应约定
 
-### 管理员会话
+### 管理员会话与 API 秘钥（双模认证）
 
 | 项目 | 约定 |
 |---|---|
 | 登录 | `POST /api/auth/login`，唯一无需已有会话的写接口 |
 | 会话 Cookie | `hme_session`；`HttpOnly`、`SameSite=Strict`、`Path=/`；TLS 反代时通过 `ICLOUD_HME_SECURE_COOKIE=true` 启用 `Secure` |
-| CSRF | 除 GET/HEAD/OPTIONS 外，已认证 API 必须携带 `X-CSRF-Token` |
+| CSRF | 会话请求：除 GET/HEAD/OPTIONS 外，已认证 API 必须携带 `X-CSRF-Token`；秘钥请求豁免（不经 Cookie，无 CSRF 面） |
+| API 秘钥 | `X-API-Key: sk-…` 或 `Authorization: Bearer sk-…`（前者优先）；`apikey.Manager` 管理，存 `data/api_keys.json`（0600） |
+| 秘钥权限 | 按接口粒度（`permission_catalog.go` 的 `permissionCatalog` + `protectedRouteList`）；不足 → 403 `PERMISSION_DENIED`；无效/停用 → 401 `INVALID_API_KEY` |
+| 秘钥管理接口 | `/api/keys`、`/api/permissions`、`/api/auth/logout` 仅限会话（`sessionOnlyRoutes`），秘钥访问一律 403 |
+| 路由表完整性 | `TestRoutePermissionTableComplete` 双向钉住 gin 路由与权限表；新增路由必须声明权限或列入 `sessionOnlyRoutes` |
 | 前端状态 | CSRF token 只保存在 `AuthProvider`/`api/client.ts` 的内存中 |
 | 登录限流 | 按真实连接 IP，15 分钟内最多 5 次失败 |
 
@@ -98,15 +104,20 @@ Gin Server /api ─────────────────────�
 
 ## 5. 当前 HTTP 路由清单
 
-除登录和会话查询外，以下所有 `/api` 路由均需要管理员会话；标记 **写** 的路由还需要 CSRF 头。
+除登录和会话查询外，以下所有 `/api` 路由均需要管理员会话（或带对应权限的 API 秘钥）；标记 **写** 的路由在会话路径下还需要 CSRF 头。
 
-### 认证
+### 认证与秘钥
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | POST | `/api/auth/login` | 管理员登录；设置 Cookie，返回 csrf token（公开） |
 | GET | `/api/auth/session` | 查询当前会话（公开路由，但需要有效 Cookie） |
-| POST | `/api/auth/logout` | 退出登录（写） |
+| POST | `/api/auth/logout` | 退出登录（写；仅会话） |
+| GET | `/api/keys` | 列出 API 秘钥（仅会话） |
+| POST | `/api/keys` | 创建秘钥（写；仅会话） |
+| PATCH | `/api/keys/:id` | 更新名称/权限/启用状态（写；仅会话） |
+| DELETE | `/api/keys/:id` | 删除秘钥（写；仅会话） |
+| GET | `/api/permissions` | 权限目录（仅会话） |
 
 ### 账号
 
@@ -219,7 +230,7 @@ CI 分为 web 与 go 两个 job：web job 上传构建产物，go job 下载该�
 
 ## 8. 数据与安全边界
 
-- `data/accounts.json`、`alias_task.json`、`alias_task_logs.json` 是运行数据；账号配置中可能包含 Cookie、代理、App Password 与外部邮箱授权码。
+- `data/accounts.json`、`alias_task.json`、`alias_task_logs.json`、`api_keys.json` 是运行数据；账号配置中可能包含 Cookie、代理、App Password 与外部邮箱授权码，`api_keys.json` 含 API 秘钥明文（面板需可查看/复制）。
 - 账号配置文件权限为 `0600`；容器以只读根文件系统运行，仅 `/app/data` 可写。
 - 日志、API 响应和前端状态不得输出/保存 Cookie、代理原文、App Password 或邮箱授权码。
 - `internal/webui` 只服务 GET/HEAD；未知非 API 路径走 SPA fallback，未知 `/api/*` 返回 JSON 404。

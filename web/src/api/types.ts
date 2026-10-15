@@ -121,3 +121,34 @@ export interface AliasTaskLog {
   level: string
   message: string
 }
+
+/** API 秘钥(与 internal/apikey.Key 契约一致) */
+export interface ApiKey {
+  id: string
+  name: string
+  key: string
+  enabled: boolean
+  permissions: string[]
+  created_at: string
+  last_used_at?: string
+  last_used_ip?: string
+}
+
+/** 权限目录条目 */
+export interface Permission {
+  id: string
+  label: string
+  group: string
+}
+
+/** 权限分组 */
+export interface PermissionGroup {
+  id: string
+  label: string
+}
+
+/** 权限目录(分组 + 条目) */
+export interface PermissionCatalog {
+  groups: PermissionGroup[]
+  permissions: Permission[]
+}

@@ -15,6 +15,7 @@
 - ✅ **收取邮件** — 通过 IMAP 或 Web API 读取发到 HME 别名的邮件
 - ✅ **双路径读信** — 邮件读取优先走 IMAP (App Password),无 App Password 时回退 Web API (Cookie)
 - ✅ **多账号管理** — 支持多个 iCloud 账号并行管理
+- ✅ **API 秘钥** — 为脚本创建独立秘钥（`sk-` 开头，可手动指定），按接口粒度勾选权限，免 Cookie/CSRF 调用
 - ✅ **双认证模式** — Cookie (创建别名 + 读邮件回退) 和 App Password (IMAP 优先)
 - ✅ **安全模型** — 单管理员会话、CSRF 校验、登录限流、响应脱敏
 - ✅ **Apple 风格响应式 UI** — 深色模式、减少动态效果、移动端布局与键盘无障碍操作
@@ -208,10 +209,11 @@ export ICLOUD_HME_ADMIN_PASSWORD='your-strong-password'
 - **自动任务**：两种任务类型可选——自主任务手动输入每天创建数量（1–50，默认 20），系统按当天剩余时间把创建时刻分摊到活跃时段（中午开始只排半天目标）；定时任务设定间隔分钟与每批数量。标签可选名称库自动轮换、前缀顺序序号或前缀随机哈希。展示进度、下次执行时间和失败原因，达到目标总数后自动停止。
 - **日志**：查看自动任务及批量操作的逐项成功/失败记录和详细原因。
 - **收件箱**：按账号、别名、数量和时间范围筛选邮件。
+- **秘钥**：为脚本创建 API 秘钥，每个秘钥独立勾选可访问的接口（按接口粒度授权）；支持查看/复制、启用停用、编辑权限与删除，显示最近使用时间与来源 IP。
 
 ## API 接口
 
-> **认证**：除 `POST /api/auth/login` 与 `GET /api/auth/session` 外，所有 `/api` 接口都需要管理员会话 Cookie（`hme_session`）；非 GET/HEAD/OPTIONS 请求还需携带 `X-CSRF-Token` 请求头。完整契约与 curl 示例见 [API.md](API.md)。
+> **认证**：除 `POST /api/auth/login` 与 `GET /api/auth/session` 外，所有 `/api` 接口都需要管理员会话 Cookie（`hme_session`）或 API 秘钥（`X-API-Key: sk-…` / `Authorization: Bearer sk-…`）；会话请求的非 GET/HEAD/OPTIONS 还需携带 `X-CSRF-Token` 请求头（秘钥请求豁免）。完整契约与 curl 示例见 [API.md](API.md)。
 
 ### 核心接口
 

@@ -99,6 +99,7 @@ func main() {
 		SessionTTL:    sessionTTL,
 		SecureCookie:  secureCookie,
 		AutoTaskFile:  filepath.Join(abs, "alias_task.json"),
+		APIKeyFile:    filepath.Join(abs, "api_keys.json"),
 	})
 	if err != nil {
 		log.Fatalf("初始化服务失败: %v", err)
