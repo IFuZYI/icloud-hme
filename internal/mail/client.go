@@ -350,12 +350,31 @@ func isNoSuchFolder(err error) bool {
 	return strings.Contains(msg, "no such mailbox") || strings.Contains(msg, "not exist")
 }
 
+// sortUIDsAsc 就地对 UID 列表做升序排序。
+//
+// 必要性(iCloud 实测): UID SEARCH 的返回顺序**不保证升序**——实测返回
+// 「分段乱序」(新段在前、旧段在后, 如 [2048..2189]+[1108..2047], 一次逆序)。
+// 所有「取尾部 = 最新」的分页逻辑都依赖升序前提, 因此搜索结果的消费方
+// 必须先排序; 否则最新邮件会被隐藏(收件箱显示滞后到分段点, 用户实测:
+// IMAP 只显示到几天前, 而 Web API 能取到最新)。
+func sortUIDsAsc(uids []uint32) {
+	sort.Slice(uids, func(i, j int) bool { return uids[i] < uids[j] })
+}
+
 // folderUIDsRange 返回指定文件夹中符合日期区间的 UID(升序)。
+//
+// SEARCH 返回顺序不保证升序(iCloud 实测分段乱序), 这里显式排序, 使
+// 调用方「从尾部取最新」的分页假设成立。
 func (c *Client) folderUIDsRange(folder string, r DateRange) ([]uint32, error) {
 	if _, err := c.cli.Select(folder, true); err != nil {
 		return nil, err
 	}
-	return c.cli.UidSearch(dateRangeSearchCriteria(r))
+	uids, err := c.cli.UidSearch(dateRangeSearchCriteria(r))
+	if err != nil {
+		return nil, err
+	}
+	sortUIDsAsc(uids)
+	return uids, nil
 }
 
 // folderUID 是「文件夹 + UID」对: IMAP UID 按文件夹生效, 定位邮件必须成对。
@@ -394,11 +413,6 @@ func stampFolder(m *Message, folder string) {
 	if uid, err := strconv.ParseUint(m.ID, 10, 32); err == nil {
 		m.ID = messageID(folder, uint32(uid))
 	}
-}
-
-// recentUIDsRange 返回收件箱在日期区间内的全部 UID, 升序。
-func (c *Client) recentUIDsRange(r DateRange) ([]uint32, error) {
-	return c.cli.UidSearch(dateRangeSearchCriteria(r))
 }
 
 // fetchEnvelopesByUID 按 UID 列表拉取信封(无正文), 返回按 UID 升序。
@@ -563,6 +577,9 @@ func (c *Client) forEachByRecipientRange(recipient string, limit, offset int, r 
 			// SEARCH 不可用: 退化为扫最近信封本地过滤
 			return c.forEachRecentMatchingRange(recipient, limit, offset, r, onMsg, totalOut)
 		}
+		// SEARCH 顺序不保证升序(iCloud 实测分段乱序): 后续「各文件夹取尾部
+		// need 封 = 全局最新」的分页假设依赖升序, 必须先排序。
+		sortUIDsAsc(uids)
 		for _, uid := range uids {
 			all = append(all, folderUID{folder: folder, uid: uid})
 		}
