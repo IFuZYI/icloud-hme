@@ -147,6 +147,10 @@ export default function InboxPage() {
         const data = await request<InboxResult>(`/api/inbox?${params.toString()}`, {
           signal: controller.signal,
         })
+        // 被让位(abort)后结果作废: 不得覆盖新请求的列表/状态。
+        // 用 signal.aborted 而非请求序号: abort() 同步置位该标记, 无论旧请求
+        // 的收尾在何时执行都成立(新请求尚未启动的窗口内也能正确判定)。
+        if (controller.signal.aborted) return
         setMethod(data.method)
         setWarning(data.warning ?? '')
         setTotal(data.total)
@@ -163,13 +167,21 @@ export default function InboxPage() {
         // 信封到手后渐进补摘要(不阻塞首屏)
         void fillPreviews(incoming, accountId)
       } catch (err) {
+        // 主动中止(abort): 由新请求接管, 不改任何状态。
         if (err instanceof ApiError && err.status === 0) return
+        if (controller.signal.aborted) return
         setError(err instanceof ApiError ? err.message : '网络连接失败，请检查服务状态')
         if (!append) setMessages([])
       } finally {
-        setLoading(false)
-        setLoadingMore(false)
-        setRefreshing(false)
+        // 被让位(abort)的旧请求不得清掉忙碌态: 它收尾时新请求可能刚发出,
+        // 若在此清掉, 按钮会提前恢复可点 → 用户重复点击 → 反复中止在飞请求
+        // (服务端不感知客户端断连, 每次中止仍会跑完一次完整 IMAP 读取,
+        // 白白浪费并可能触发风控)。
+        if (!controller.signal.aborted) {
+          setLoading(false)
+          setLoadingMore(false)
+          setRefreshing(false)
+        }
       }
     },
     [accountId, alias, pageSize, rangeStart, rangeEnd, fillPreviews],
@@ -329,7 +341,10 @@ export default function InboxPage() {
   const isImap = method === 'imap'
   const methodText = isImap ? 'IMAP' : 'Web API'
   const accountName = accounts.find((a) => a.id === accountId)?.name ?? ''
-  const busy = loading || refreshing
+  // busy: 刷新/首屏/加载更多任一在飞请求期间, 三个动作按钮(刷新/查询/加载更多)
+  // 统一禁用——避免用户叠加新请求去中止在飞请求(「点一次杀一个」循环的入口;
+  // 服务端不感知客户端断连, 每次中止仍会跑完一次完整 IMAP 读取)。
+  const busy = loading || refreshing || loadingMore
   const hasMore = messages.length < total
 
   return (
@@ -416,7 +431,7 @@ export default function InboxPage() {
           />
         </div>
         <div className="inbox-field inbox-field-submit">
-          <button className="inbox-action primary" onClick={() => runQuery()} disabled={!accountId}>
+          <button className="inbox-action primary" onClick={() => runQuery()} disabled={!accountId || busy}>
             查询
           </button>
         </div>
@@ -507,7 +522,7 @@ export default function InboxPage() {
             <button
               className="inbox-action"
               onClick={loadMore}
-              disabled={loadingMore}
+              disabled={loadingMore || busy}
               aria-label="加载更多邮件"
             >
               {loadingMore ? '加载中…' : `加载更多（还剩 ${total - messages.length} 封）`}
