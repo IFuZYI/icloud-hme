@@ -88,6 +88,12 @@ type managerBackend struct {
 	// 避免高频请求触发服务商风控/封禁。
 	cacheMu sync.Mutex
 	cache   *responseCache
+	// flight 合并同一查询键的并发回源(见 singleflight.go)。
+	flight flightGroup
+	// refreshMu 保护 lastRefresh(刷新节流地板的状态)。
+	refreshMu sync.Mutex
+	// lastRefresh 记录各查询键最近一次真实刷新的时间(refresh 节流地板)。
+	lastRefresh map[string]time.Time
 }
 
 // respCache 返回响应缓存(首次使用时惰性初始化; 测试可直接构造 managerBackend)。
@@ -107,6 +113,10 @@ var (
 	inboxCacheTTL   = 30 * time.Second
 	aliasesCacheTTL = 30 * time.Second
 	previewCacheTTL = 5 * time.Minute
+	// inboxRefreshFloor 是 refresh=1 的最小回源间隔(节流地板): 地板内的重复
+	// 刷新直接复用刚拉到的快照。用户连点「刷新」不再每次都打上游——对 163 等
+	// 外部收件邮箱, 高频访问是风控的典型触发信号。0 表示不节流(测试用)。
+	inboxRefreshFloor = 5 * time.Second
 )
 
 // inboxCacheKey 生成收件箱查询的缓存键(账号+别名+分页+日期区间)。
@@ -507,28 +517,90 @@ func imapEnvelopeBudget(limit int) time.Duration {
 //
 // 渐进式加载: 只返回信封(Preview 空), 前端用 FetchPreviews 分批补摘要;
 // Total 为符合日期过滤的总数, 前端据 offset+count<Total 判断可加载更多。
+//
+// 三层防重复回源(对外部收件邮箱的风控防线, 见 cache.go 顶部说明):
+//  1. TTL 缓存: 未过期直接返回(refresh=1 除外);
+//  2. 刷新节流地板: 地板内的重复 refresh 复用刚拉到的结果;
+//  3. 并发合并: 同键并发请求只回源一次(singleflight)。
 func (b *managerBackend) ListInbox(q InboxQuery) (InboxResult, error) {
-	// 读路径先查 TTL 缓存(除非显式 refresh): 重复切页/点击不再回源上游。
 	cacheKey := inboxCacheKey(q)
 	if !q.Refresh {
-		if cached, ok := b.respCache().get(cacheKey); ok {
-			if result, ok := cached.(InboxResult); ok {
+		if result, ok := b.cachedInbox(cacheKey); ok {
+			return result, nil
+		}
+	} else if result, ok := b.throttledRefreshResult(cacheKey); ok {
+		// 地板内的重复刷新: 直接复用最近一次结果。
+		return result, nil
+	}
+	// 并发合并: 同键并发请求共享一次回源; 回源结果由 fn 内部写缓存,
+	// 等待者从缓存或返回值拿到同一结果。
+	result, err := b.flight.do(cacheKey, func() (InboxResult, error) {
+		// 二次检查: 等待期间可能已有别的调用把结果写入缓存。
+		if !q.Refresh {
+			if result, ok := b.cachedInbox(cacheKey); ok {
 				return result, nil
 			}
 		}
-	}
-	result, err := b.listInboxUncached(q)
+		result, err := b.listInboxUncached(q)
+		if err != nil {
+			return result, err
+		}
+		// JSON 契约: messages 永远是数组([]), 不能是 null。
+		// 空结果时上游返回 nil 切片, 直接序列化成 "messages":null 会让前端
+		// data.messages.filter(...) 抛 TypeError → 整页白屏(dogfood 实测)。
+		if result.Messages == nil {
+			result.Messages = []mail.Message{}
+		}
+		b.respCache().set(cacheKey, result, inboxCacheTTL)
+		if q.Refresh {
+			b.noteRefresh(cacheKey)
+		}
+		return result, nil
+	})
 	if err != nil {
 		return result, err
 	}
-	// JSON 契约: messages 永远是数组([]), 不能是 null。
-	// 空结果时上游返回 nil 切片, 直接序列化成 "messages":null 会让前端
-	// data.messages.filter(...) 抛 TypeError → 整页白屏(dogfood 实测)。
-	if result.Messages == nil {
-		result.Messages = []mail.Message{}
-	}
-	b.respCache().set(cacheKey, result, inboxCacheTTL)
 	return result, nil
+}
+
+// cachedInbox 读收件箱缓存(未命中/类型不符返回 false)。
+func (b *managerBackend) cachedInbox(key string) (InboxResult, bool) {
+	cached, ok := b.respCache().get(key)
+	if !ok {
+		return InboxResult{}, false
+	}
+	result, ok := cached.(InboxResult)
+	return result, ok
+}
+
+// noteRefresh 记录某查询键最近一次真实刷新的时间。
+func (b *managerBackend) noteRefresh(key string) {
+	b.refreshMu.Lock()
+	defer b.refreshMu.Unlock()
+	if b.lastRefresh == nil {
+		b.lastRefresh = make(map[string]time.Time)
+	}
+	b.lastRefresh[key] = time.Now()
+}
+
+// throttledRefreshResult 实现刷新节流地板: 距离上次真实刷新不足
+// inboxRefreshFloor 时, 返回缓存里的结果(即使是 refresh 请求)。
+//
+// 目的: 用户连点「刷新」不再每次都打上游——对外部收件邮箱, 高频访问是
+// 风控的典型触发信号。地板内的结果与刚拉到的完全一致(用户无感知)。
+func (b *managerBackend) throttledRefreshResult(key string) (InboxResult, bool) {
+	if inboxRefreshFloor <= 0 {
+		return InboxResult{}, false
+	}
+	b.refreshMu.Lock()
+	last, ok := b.lastRefresh[key]
+	b.refreshMu.Unlock()
+	if !ok || time.Since(last) >= inboxRefreshFloor {
+		return InboxResult{}, false
+	}
+	// 地板内: 复用缓存结果。缓存可能恰好过期(30s TTL 远大于 5s 地板,
+	// 正常路径不会发生); 真过期时回退为真实回源, 不影响正确性。
+	return b.cachedInbox(key)
 }
 
 // listInboxUncached 是 ListInbox 的无缓存实现(实际访问 IMAP/Web API)。
@@ -538,6 +610,7 @@ func (b *managerBackend) listInboxUncached(q InboxQuery) (InboxResult, error) {
 	// 信封阶段单封 ~500B, 预算按信封量级收紧(每封 0.3s, 仍保底 15s)。
 	var imapMessages []mail.Message
 	imapTotal := 0
+	validityChanged := false
 	poolErr := withIMAPTimeout(imapEnvelopeBudget(q.Limit), func() error {
 		return b.mgr.WithMailClient(q.AccountID, func(mc *mail.Client) error {
 			var e error
@@ -546,9 +619,17 @@ func (b *managerBackend) listInboxUncached(q InboxQuery) (InboxResult, error) {
 			} else {
 				imapMessages, imapTotal, e = mc.ListInboxPageRange(q.Limit, q.Offset, q.DateRange)
 			}
+			// UIDVALIDITY 变化(邮箱被服务端重建): 旧 UID 不再指向同一邮件,
+			// 该账号的读缓存(preview 以 folder:uid 为键)必须整体失效。
+			if mc.TakeUidValidityChange() {
+				validityChanged = true
+			}
 			return e
 		})
 	})
+	if validityChanged {
+		b.invalidateAccountReads(q.AccountID)
+	}
 	if poolErr == nil {
 		return InboxResult{
 			AccountID: q.AccountID,
@@ -585,6 +666,9 @@ func (b *managerBackend) listInboxUncached(q InboxQuery) (InboxResult, error) {
 			"account", q.AccountID, "imap_err", poolErr.Error(), "webapi_err", err.Error())
 		return InboxResult{}, &BackendError{Status: http.StatusBadGateway, Code: "UPSTREAM_FAILURE", Message: "读取邮件失败"}
 	}
+	// Web API 无服务端日期搜索: 本地按区间过滤, 与 IMAP 路径语义一致
+	// (用户选「最近 1 天」不应看到 60 天前的邮件; 审查发现)。
+	fetched = mail.FilterByDateRange(fetched, q.DateRange)
 	messages, total := slicePage(fetched, q.Offset, q.Limit)
 	return InboxResult{
 		AccountID: q.AccountID,

@@ -191,12 +191,16 @@ IMAP 路径同时扫描 INBOX 与垃圾邮件夹（Junk / 网易「垃圾邮件�
 
 ### 读缓存与连接复用（防封禁）
 
-外部收件邮箱（163 等）对短时间内的重复 TLS+LOGIN+扫箱敏感，是风控/封禁的典型触发信号；主流 IMAP 客户端同样会做本地缓存而非每次点击回源。本项目的两层防线：
+外部收件邮箱（163 等）对短时间内的重复 TLS+LOGIN+扫箱敏感，是风控/封禁的典型触发信号；主流 IMAP 客户端同样会做本地缓存而非每次点击回源。本项目的四层防线：
 
-1. **连接复用**：`mail.Pool` 同时服务 iCloud 与外部收件邮箱。外部邮箱池键为 `ext:<host>:<port>:<email>`（`Manager.WithMailClient`），同一邮箱跨账号共享一条长连接，不同邮箱互不串用；空闲超时（10 分钟）或连接错误时重建。
+1. **连接复用 + 保活**：`mail.Pool` 同时服务 iCloud 与外部收件邮箱。外部邮箱池键为 `ext:<host>:<port>:<email>`（`Manager.WithMailClient`），同一邮箱跨账号共享一条长连接，不同邮箱互不串用；空闲连接每 `PoolKeepaliveInterval`（默认 5 分钟）发一次 NOOP 续命（保活的连接不会被 `PoolIdleClose`（默认 30 分钟）空闲重建——重建=TLS+LOGIN 是风控第一触发信号）；连接错误或 NOOP 失败时丢弃重建。
 2. **只读响应 TTL 缓存**：`internal/server/cache.go` 的 `responseCache` 挂在 `managerBackend` 上，覆盖收件箱信封（键含账号/别名/分页/日期区间，TTL 30s）、邮件摘要（按账号+邮件 ID，TTL 5m）、别名列表（TTL 30s）。写操作即时失效：删除邮件失效该账号收件箱+摘要、别名增删改失效别名列表、接入收件邮箱与 `POST /api/reload` 失效对应/全部读缓存；`GET /api/inbox?refresh=1` 绕过缓存强制回源。
+3. **并发回源合并 + 刷新节流地板**（`internal/server/singleflight.go`、`backend.go`）：同一缓存键的并发请求经 singleflight 只回源一次（TTL 过期瞬间的多标签页/重试不再形成 N 倍扫箱）；`refresh=1` 受 `inboxRefreshFloor`（默认 5s）节流，地板内连点刷新复用刚拉到的结果。普通读取不受地板影响。
+4. **IMAP 层列表快照**（`internal/mail/snapshot.go`）：翻页/切筛选再切回不重复「全量 UID SEARCH」；网易 Coremail 的别名筛选走「扫最近信封」兜底路径，其结果同样按 (收件人, 区间, 扫描预算) 快照（`ListSnapshotTTL` 默认 30s）。删除邮件、显式失效、UIDVALIDITY 变化时清空。
 
-改动读路径时：不要移除缓存/连接复用（恢复每次点击回源即回到封禁风险面）；新增写路径时按上述键前缀调用 `invalidate*`；TTL 值在 `backend.go` 顶部以 `var` 定义（测试覆盖过期行为）。
+**UIDVALIDITY 联动**：邮箱被服务端重建（163 后台修复文件夹等）后旧 UID 不再指向同一邮件。`mail.Client` 跟踪各文件夹 UIDVALIDITY，变化时清空快照并置一次性标记；`managerBackend` 在 IMAP 读取后取标记并失效该账号收件箱+摘要缓存，防止 preview 缓存（以 folder:uid 为键）展示错误内容。
+
+改动读路径时：不要移除缓存/连接复用（恢复每次点击回源即回到封禁风险面）；新增写路径时按上述键前缀调用 `invalidate*`；TTL/地板/保活参数在 `backend.go`、`pool.go`、`snapshot.go` 顶部以 `var` 定义（测试覆盖过期与节流行为）。
 
 ## 7. 构建、测试与发布
 

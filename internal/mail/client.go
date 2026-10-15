@@ -6,6 +6,7 @@ package mail
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -13,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/emersion/go-imap"
@@ -62,6 +64,18 @@ type Client struct {
 	server   string
 	port     int
 	cli      *client.Client
+
+	// snapMu 保护以下快照/UIDVALIDITY 状态(连接池会跨请求复用本实例)。
+	snapMu sync.Mutex
+	// listSnapshots 是 (文件夹, 收件人, 区间) → SEARCH 结果 的短 TTL 快照,
+	// 让翻页/重复查询不重复全量 SEARCH(见 snapshot.go)。
+	listSnapshots map[string]listSnapshot
+	// recentScans 是回退扫描(扫最近信封)结果的短 TTL 快照。
+	recentScans map[string]recentScanSnapshot
+	// uidValidity 是各文件夹最近观测到的 UIDVALIDITY(邮箱重建检测)。
+	uidValidity map[string]uint32
+	// validityChanged 是一次性的「UIDVALIDITY 已变化」标记。
+	validityChanged bool
 }
 
 // NewClient 创建 IMAP 客户端。需在调用其它方法前先 Connect。
@@ -219,11 +233,17 @@ func (c *Client) ListInboxPageRange(limit, offset int, r DateRange) ([]Message, 
 	var perFolder []folderUIDs
 	total := 0
 	for _, folder := range MailFolders {
-		uids, err := c.folderUIDsRange(folder, r)
+		uids, err := c.folderUIDsRange(folder, "", r, nil)
 		if err != nil {
-			// 文件夹不存在(如无 Junk 的账号)不算错误, 跳过继续。
-			if isNoSuchFolder(err) {
-				continue
+			// 文件夹不存在(如无 Junk 的账号)不算错误, 跳过继续;
+			// 并记为空快照, TTL 内不再重复 SELECT。
+			var se *folderSelectError
+			if errors.As(err, &se) {
+				if isNoSuchFolder(se.err) {
+					c.noteMissingFolder(folder, "", r)
+					continue
+				}
+				return nil, 0, se.err
 			}
 			return nil, 0, err
 		}
@@ -335,19 +355,23 @@ func ParseMessageID(id string) (string, uint32, error) {
 // isNoSuchFolder 判断错误是否为「文件夹不存在」。
 //
 // 各服务商措辞不一: 标准实现为 "No such mailbox"(iCloud), 网易 163/126
-// 为 "Folder not exist"——必须都识别, 否则一个缺失的垃圾邮件夹会让整个
-// 列表读取报错, 而不是静默跳过。
+// 为 "Folder not exist", Dovecot(自建/企业邮箱最常见实现)为
+// "Mailbox doesn't exist: <名>"——必须都识别, 否则一个缺失的垃圾邮件夹
+// 会让整个列表读取报错, 而不是静默跳过。
 //
 // 已知局限(审查记录): go-imap v1 的 status.Err() 只保留响应文本、丢弃
-// 响应码, 因此 [NONEXISTENT] 类响应码拿不到; Dovecot 的
-// "Mailbox doesn't exist" 也匹配不上。两者都比「把门禁错误静默吞掉」
-// 更安全——宁可在这些服务商上直接报错, 也不扩大谓词误吞其它 SELECT 错误。
+// 响应码, 因此 [NONEXISTENT] 类响应码拿不到, 只能按措辞匹配。谓词宁可
+// 保守——不接受未列出的措辞, 也不扩大范围误吞其它 SELECT 错误(如 ID 门禁
+// 的 "Unsafe Login" 必须抛出)。
 func isNoSuchFolder(err error) bool {
 	if err == nil {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "no such mailbox") || strings.Contains(msg, "not exist")
+	return strings.Contains(msg, "no such mailbox") ||
+		strings.Contains(msg, "not exist") ||
+		strings.Contains(msg, "doesn't exist") ||
+		strings.Contains(msg, "does not exist")
 }
 
 // sortUIDsAsc 就地对 UID 列表做升序排序。
@@ -361,20 +385,55 @@ func sortUIDsAsc(uids []uint32) {
 	sort.Slice(uids, func(i, j int) bool { return uids[i] < uids[j] })
 }
 
+// folderSelectError 标记「SELECT 阶段失败」(区别于 SEARCH 失败):
+// 调用方对两类错误的处置不同——SELECT 的非缺失错误直接上抛, SEARCH 失败
+// 走本地扫描兜底(网易 Coremail 的 SEARCH 不可靠)。
+type folderSelectError struct{ err error }
+
+func (e *folderSelectError) Error() string { return e.err.Error() }
+func (e *folderSelectError) Unwrap() error { return e.err }
+
 // folderUIDsRange 返回指定文件夹中符合日期区间的 UID(升序)。
 //
 // SEARCH 返回顺序不保证升序(iCloud 实测分段乱序), 这里显式排序, 使
 // 调用方「从尾部取最新」的分页假设成立。
-func (c *Client) folderUIDsRange(folder string, r DateRange) ([]uint32, error) {
-	if _, err := c.cli.Select(folder, true); err != nil {
-		return nil, err
+//
+// 带 UID 快照(短 TTL): 翻页/切筛选再切回不再逐页重复全量 SEARCH——
+// 对 163 等外部收件邮箱, 高频扫箱是风控的典型触发信号。
+// boxNonEmptyOut 非 nil 时写回「采集时文件夹是否有邮件」(快照命中同样写回),
+// 供别名路径的 SEARCH 静默失效兜底判定。
+func (c *Client) folderUIDsRange(folder, recipient string, r DateRange, boxNonEmptyOut *bool) ([]uint32, error) {
+	key := listScope(folder, recipient, r)
+	if snap, ok := c.snapshotGet(key); ok {
+		if boxNonEmptyOut != nil {
+			*boxNonEmptyOut = snap.boxHasMessages
+		}
+		return snap.uids, nil
 	}
-	uids, err := c.cli.UidSearch(dateRangeSearchCriteria(r))
+	mbox, err := c.selectFolder(folder, true)
+	if err != nil {
+		return nil, &folderSelectError{err: err}
+	}
+	if boxNonEmptyOut != nil {
+		*boxNonEmptyOut = mbox.Messages > 0
+	}
+	criteria := dateRangeSearchCriteria(r)
+	if recipient != "" {
+		criteria.Header.Add("To", recipient)
+	}
+	uids, err := c.cli.UidSearch(criteria)
 	if err != nil {
 		return nil, err
 	}
 	sortUIDsAsc(uids)
+	c.snapshotPut(key, listSnapshot{uids: uids, boxHasMessages: mbox.Messages > 0})
 	return uids, nil
+}
+
+// noteMissingFolder 把「文件夹不存在」记为空快照: 短 TTL 内不再对该夹
+// 重复 SELECT(iCloud 无「垃圾邮件」、163 无 Junk, 每次查询都会白打一两次)。
+func (c *Client) noteMissingFolder(folder, recipient string, r DateRange) {
+	c.snapshotPut(listScope(folder, recipient, r), listSnapshot{})
 }
 
 // folderUID 是「文件夹 + UID」对: IMAP UID 按文件夹生效, 定位邮件必须成对。
@@ -392,7 +451,7 @@ func (c *Client) fetchEnvelopesForCandidates(cands []folderUID) ([]Message, erro
 	}
 	var out []Message
 	for folder, uids := range byFolder {
-		if _, err := c.cli.Select(folder, true); err != nil {
+		if _, err := c.selectFolder(folder, true); err != nil {
 			return nil, err
 		}
 		msgs, err := c.fetchEnvelopesByUID(uids)
@@ -444,7 +503,7 @@ func (c *Client) InboxCount() (int, error) {
 	if c.cli == nil {
 		return 0, fmt.Errorf("未连接")
 	}
-	mbox, err := c.cli.Select("INBOX", false)
+	mbox, err := c.selectFolder("INBOX", false)
 	if err != nil {
 		return 0, err
 	}
@@ -485,7 +544,7 @@ func (c *Client) FetchPreviewsRefs(refs []MessageRef) (map[string]string, error)
 	}
 	out := make(map[string]string, len(refs))
 	for folder, uids := range byFolder {
-		if _, err := c.cli.Select(folder, true); err != nil {
+		if _, err := c.selectFolder(folder, true); err != nil {
 			return nil, err
 		}
 		seqset := new(imap.SeqSet)
@@ -556,30 +615,28 @@ func (c *Client) forEachByRecipientRange(recipient string, limit, offset int, r 
 		offset = 0
 	}
 
-	// 各文件夹按 To + 日期搜索(服务端 SEARCH)
-	criteria := dateRangeSearchCriteria(r)
-	criteria.Header.Add("To", recipient)
+	// 各文件夹按 To + 日期搜索(服务端 SEARCH; 带短 TTL 快照, 翻页不重复)
 	var all []folderUID
 	boxHasMessages := false
 	for _, folder := range MailFolders {
-		mbox, err := c.cli.Select(folder, true)
+		var boxNonEmpty bool
+		uids, err := c.folderUIDsRange(folder, recipient, r, &boxNonEmpty)
 		if err != nil {
-			if isNoSuchFolder(err) {
-				continue
+			var se *folderSelectError
+			if errors.As(err, &se) {
+				if isNoSuchFolder(se.err) {
+					// 缺失文件夹: 记空快照, TTL 内不再重复 SELECT。
+					c.noteMissingFolder(folder, recipient, r)
+					continue
+				}
+				return se.err
 			}
-			return err
-		}
-		if mbox.Messages > 0 {
-			boxHasMessages = true
-		}
-		uids, err := c.cli.UidSearch(criteria)
-		if err != nil {
 			// SEARCH 不可用: 退化为扫最近信封本地过滤
 			return c.forEachRecentMatchingRange(recipient, limit, offset, r, onMsg, totalOut)
 		}
-		// SEARCH 顺序不保证升序(iCloud 实测分段乱序): 后续「各文件夹取尾部
-		// need 封 = 全局最新」的分页假设依赖升序, 必须先排序。
-		sortUIDsAsc(uids)
+		if boxNonEmpty {
+			boxHasMessages = true
+		}
 		for _, uid := range uids {
 			all = append(all, folderUID{folder: folder, uid: uid})
 		}
@@ -649,14 +706,11 @@ func (c *Client) forEachByRecipientRange(recipient string, limit, offset int, r 
 // forEachRecentMatchingRange 是 forEachRecentMatching 的日期区间版本。
 // 扫描 MailFolders 各文件夹的最近信封, 合并排序后分页。
 // totalOut 非 nil 时写回本地过滤命中的总数(仅统计扫描窗口内的, 这是回退路径的固有限制)。
+//
+// 带短 TTL 快照: 扫描结果按 (收件人, 区间, 扫描预算) 缓存——翻页/重复查询
+// 不再重复扫箱(网易 Coremail 的别名筛选走本路径, 每次扫箱都是风控面)。
+// 扫描预算与 offset+limit 相关: 不同预算的请求不复用, 保证结果覆盖完整。
 func (c *Client) forEachRecentMatchingRange(recipient string, limit, offset int, r DateRange, onMsg func(Message) bool, totalOut *int) error {
-	type cand struct {
-		folder string
-		uid    uint32
-		date   time.Time
-		to     string
-	}
-	var cands []cand
 	recipient = strings.ToLower(recipient)
 
 	// 只扫各文件夹最近 scan 封, 避免全箱
@@ -668,13 +722,56 @@ func (c *Client) forEachRecentMatchingRange(recipient string, limit, offset int,
 		scanBudget = 120
 	}
 
+	cands, err := c.scanRecentMatching(recipient, scanBudget, r)
+	if err != nil {
+		return err
+	}
+	if totalOut != nil {
+		*totalOut = len(cands)
+	}
+	for idx, cd := range cands {
+		if idx < offset {
+			continue
+		}
+		if idx >= offset+limit {
+			break
+		}
+		m, ferr := c.fetchOneUID(cd.folder, cd.uid)
+		if ferr != nil {
+			return ferr
+		}
+		if !onMsg(m) {
+			return nil
+		}
+	}
+	return nil
+}
+
+// scanRecentMatching 扫各文件夹最近信封并返回本地过滤命中(新→旧排好序),
+// 带短 TTL 快照。
+//
+// 快照按 (收件人, 区间) 键, 复用规则:
+//   - 快照采集时已覆盖全部邮件(coveredAll): 任意请求复用;
+//   - 否则请求预算 ≤ 快照预算: 复用(快照是超集, 覆盖完整);
+//   - 预算更大且未全覆盖: 重扫(更大窗口), 覆盖快照。
+//
+// 小邮箱(总量 ≤ 扫描预算)的翻页因此完全不再重扫; 大邮箱至多在新预算档
+// 重扫一次, 而不是每页一扫。
+func (c *Client) scanRecentMatching(recipient string, scanBudget int, r DateRange) ([]recentCandidate, error) {
+	key := listScope("recent", recipient, r)
+	if snap, ok := c.recentSnapshotGet(key); ok && (snap.coveredAll || snap.scanBudget >= scanBudget) {
+		return snap.cands, nil
+	}
+
+	var cands []recentCandidate
+	coveredAll := true
 	for _, folder := range MailFolders {
-		mbox, err := c.cli.Select(folder, true)
+		mbox, err := c.selectFolder(folder, true)
 		if err != nil {
 			if isNoSuchFolder(err) {
 				continue
 			}
-			return err
+			return nil, err
 		}
 		if mbox.Messages == 0 {
 			continue
@@ -682,6 +779,8 @@ func (c *Client) forEachRecentMatchingRange(recipient string, limit, offset int,
 		scan := scanBudget
 		if scan > int(mbox.Messages) {
 			scan = int(mbox.Messages)
+		} else if scan < int(mbox.Messages) {
+			coveredAll = false
 		}
 		from := mbox.Messages - uint32(scan) + 1
 		seqset := new(imap.SeqSet)
@@ -714,14 +813,11 @@ func (c *Client) forEachRecentMatchingRange(recipient string, limit, offset int,
 			if !r.within(when) {
 				continue
 			}
-			cands = append(cands, cand{folder: folder, uid: msg.Uid, date: when, to: to})
+			cands = append(cands, recentCandidate{folder: folder, uid: msg.Uid, date: when, to: to})
 		}
 		if err := <-done; err != nil {
-			return err
+			return nil, err
 		}
-	}
-	if totalOut != nil {
-		*totalOut = len(cands)
 	}
 	// 新→旧; 同刻按文件夹/UID 稳定排序, 保证翻页一致。
 	sort.SliceStable(cands, func(i, j int) bool {
@@ -733,22 +829,8 @@ func (c *Client) forEachRecentMatchingRange(recipient string, limit, offset int,
 		}
 		return cands[i].uid > cands[j].uid
 	})
-	for idx, cd := range cands {
-		if idx < offset {
-			continue
-		}
-		if idx >= offset+limit {
-			break
-		}
-		m, ferr := c.fetchOneUID(cd.folder, cd.uid)
-		if ferr != nil {
-			return ferr
-		}
-		if !onMsg(m) {
-			return nil
-		}
-	}
-	return nil
+	c.recentSnapshotPut(key, cands, scanBudget, coveredAll)
+	return cands, nil
 }
 
 // peekBodySection 用 BODY.PEEK[] 取正文, 不会把邮件标记为已读。
@@ -828,7 +910,7 @@ func (c *Client) fetchUIDItems(uid uint32, items []imap.FetchItem) (*imap.Messag
 // fetchOneUID 拉取指定文件夹内单封邮件(含 body preview), 使用 BODY.PEEK 不标已读。
 // UID 按文件夹生效, 拉取前必须先 SELECT 对应文件夹。
 func (c *Client) fetchOneUID(folder string, uid uint32) (Message, error) {
-	if _, err := c.cli.Select(folder, true); err != nil {
+	if _, err := c.selectFolder(folder, true); err != nil {
 		return Message{}, err
 	}
 	msg, err := c.fetchUIDPreview(uid)
@@ -855,7 +937,7 @@ func (c *Client) GetFullFrom(folder string, uid uint32) (*FullMessage, error) {
 	if folder == "" {
 		folder = "INBOX"
 	}
-	if _, err := c.cli.Select(folder, true); err != nil {
+	if _, err := c.selectFolder(folder, true); err != nil {
 		return nil, err
 	}
 
@@ -882,7 +964,7 @@ func (c *Client) DeleteFrom(folder string, uid uint32) error {
 	if folder == "" {
 		folder = "INBOX"
 	}
-	if _, err := c.cli.Select(folder, false); err != nil {
+	if _, err := c.selectFolder(folder, false); err != nil {
 		return err
 	}
 
@@ -892,7 +974,12 @@ func (c *Client) DeleteFrom(folder string, uid uint32) error {
 	if err := c.cli.UidStore(seqset, item, []interface{}{imap.DeletedFlag}, nil); err != nil {
 		return err
 	}
-	return c.cli.Expunge(nil)
+	if err := c.cli.Expunge(nil); err != nil {
+		return err
+	}
+	// 已删 UID 不得因快照残留继续出现在后续列表里(EXISTS 已变, UID 集合已变)。
+	c.InvalidateListSnapshots()
+	return nil
 }
 
 // toFullMessage 从已 fetch 的 IMAP 消息构造完整邮件(含正文)。

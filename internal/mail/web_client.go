@@ -113,9 +113,28 @@ func (c *WebClient) withParams(rawURL string) string {
 		rawURL, sep, WebClientBuildNumber, WebClientBuildNumber, c.clientID, c.dsid)
 }
 
+// webGatewayBaseOverride 覆盖 mccgateway 基址(仅测试使用)。
+var webGatewayBaseOverride string
+
+// OverrideWebGatewayForTest 覆盖 mccgateway 基址(仅测试使用), 返回恢复函数。
+// httptest 服务器的随机端口经 validate 解析会被去端口(见 resolveMccGateway
+// 注释), 无法回连; 测试用本覆盖直连网关, 生产路径不受影响。
+func OverrideWebGatewayForTest(base string) func() {
+	prev := webGatewayBaseOverride
+	webGatewayBaseOverride = base
+	return func() { webGatewayBaseOverride = prev }
+}
+
 // resolveMccGateway 从 validate 响应中获取 mccgateway URL。
 func (c *WebClient) resolveMccGateway() error {
 	if c.mccGatewayURL != "" {
+		return nil
+	}
+
+	// 测试注入: 直接使用覆盖的网关基址(httptest 随机端口经 validate 解析
+	// 会被去端口, 无法回连)。
+	if webGatewayBaseOverride != "" {
+		c.mccGatewayURL = strings.TrimRight(webGatewayBaseOverride, "/")
 		return nil
 	}
 

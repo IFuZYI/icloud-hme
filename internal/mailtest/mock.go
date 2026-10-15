@@ -45,6 +45,16 @@ type Options struct {
 	// (TO/FROM/SUBJECT/HEADER/TEXT/BODY)静默返回空结果且不报错(163 实测,
 	// 原始协议确认)。ALL/SINCE/BEFORE/UID 等非 header 条件不受影响。
 	EmptyHeaderSearch bool
+	// SelectDelay 人为放慢每个 SELECT/EXAMINE 响应, 用于并发回源合并测试:
+	// 保证多个并发请求在第一个回源完成前真正重叠(否则时序上无法区分
+	// 「合并回源」与「恰好串行」)。
+	SelectDelay time.Duration
+	// DovecotFolderErr 缺失文件夹返回 "Mailbox doesn't exist: <名>"
+	// (Dovecot 实测措辞; iCloud/网易之外第三种常见形态)。
+	DovecotFolderErr bool
+	// UidValidity 非零时覆盖各文件夹 STATUS/SELECT 报告的 UIDVALIDITY
+	// (测试「邮箱被服务端重建」的检测: 变化后旧 UID 不再指向同一邮件)。
+	UidValidity uint32
 }
 
 // Server 是进程内自签证书 IMAP 服务器。
@@ -53,20 +63,47 @@ type Server struct {
 	Port    int
 	Backend *memory.Backend // 供测试直接投放邮件/建文件夹
 	idRecv  atomic.Bool
-	// connCount 统计接受过的连接数; selCount 统计收到的 SELECT/EXAMINE 命令数。
+	// validity 覆盖 UIDVALIDITY(见 Options.UidValidity); 测试运行中可变。
+	validity atomic.Uint32
+	// connCount 统计接受过的连接数; selCount 统计收到的 SELECT/EXAMINE 命令数;
+	// searchCount 统计 SEARCH(含 UID SEARCH) 命令数; fetchCount 统计 UID FETCH
+	// 命令数; fetchSeqCount 统计非 UID 的 FETCH(回退扫描路径); noopCount 统计
+	// NOOP 数。
 	// 用于断言「连接复用」(不应反复 TLS+LOGIN) 与「读信缓存」(不应重复扫箱)。
-	connCount atomic.Int64
-	selCount  atomic.Int64
+	connCount     atomic.Int64
+	selCount      atomic.Int64
+	searchCount   atomic.Int64
+	fetchCount    atomic.Int64
+	fetchSeqCount atomic.Int64
+	noopCount     atomic.Int64
 }
 
 // ReceivedID 返回客户端是否发送过非空 ID 声明。
 func (s *Server) ReceivedID() bool { return s.idRecv.Load() }
+
+// SetUidValidity 运行中修改服务器报告的 UIDVALIDITY(测试邮箱重建场景)。
+func (s *Server) SetUidValidity(v uint32) { s.validity.Store(v) }
 
 // ConnCount 返回服务器接受过的连接总数。
 func (s *Server) ConnCount() int64 { return s.connCount.Load() }
 
 // SelectCount 返回服务器收到的 SELECT/EXAMINE 命令总数(含被拒绝的)。
 func (s *Server) SelectCount() int64 { return s.selCount.Load() }
+
+// NoopCount 返回服务器收到的 NOOP 命令总数(连接保活断言用)。
+func (s *Server) NoopCount() int64 { return s.noopCount.Load() }
+
+// SearchCount 返回服务器收到的 SEARCH/UID SEARCH 命令总数
+// (UID 快照断言用: 翻页/增量校验不应重复全量 SEARCH)。
+func (s *Server) SearchCount() int64 { return s.searchCount.Load() }
+
+// FetchCount 返回服务器收到的 UID FETCH 命令总数
+// (回退扫描缓存断言用: 重复查询不应重复扫箱)。
+func (s *Server) FetchCount() int64 { return s.fetchCount.Load() }
+
+// FetchSeqCount 返回服务器收到的非 UID FETCH(序列号)命令总数,
+// 即回退扫描路径的扫箱次数(UID 快照断言用)。
+func (s *Server) FetchSeqCount() int64 { return s.fetchSeqCount.Load() }
 
 // NewServer 启动一台进程内 IMAP 服务器, 测试结束自动关闭。
 func NewServer(t *testing.T, opts Options) *Server {
@@ -89,10 +126,17 @@ func NewServer(t *testing.T, opts Options) *Server {
 	}
 
 	s := &Server{Host: "127.0.0.1", Backend: be}
+	s.validity.Store(opts.UidValidity)
 	// 统一用包装后端: memory 后端只认内置凭据(username/password),
 	// 而测试客户端用真实风格凭据登录; 测试聚焦 ID 门禁与文件夹行为,
 	// 凭据校验由真实 163 的 env 门控 e2e 测试覆盖。
-	srv := server.New(wrapperBackend{inner: be, neteaseErr: opts.NetEaseFolderErr, emptyHeaderSearch: opts.EmptyHeaderSearch})
+	srv := server.New(wrapperBackend{
+		inner:             be,
+		neteaseErr:        opts.NetEaseFolderErr,
+		dovecotErr:        opts.DovecotFolderErr,
+		emptyHeaderSearch: opts.EmptyHeaderSearch,
+		validity:          &s.validity,
+	})
 	srv.AllowInsecureAuth = true
 	srv.Enable(&ext{opts: opts, srv: s})
 
@@ -193,6 +237,16 @@ func (e *ext) Command(name string) server.HandlerFactory {
 	switch name {
 	case "ID":
 		return func() server.Handler { return &idHandler{ext: e} }
+	case "NOOP":
+		// 统计 NOOP(连接保活测试), 其余行为委托内置实现。
+		return func() server.Handler { return &noopHandler{ext: e} }
+	case "SEARCH":
+		// 统计 SEARCH / UID SEARCH(UID 分发会经 extensions 查内层命令),
+		// 其余行为委托内置实现。
+		return func() server.Handler { return &searchHandler{ext: e} }
+	case "FETCH":
+		// 统计 FETCH / UID FETCH(回退扫描缓存断言), 其余行为委托内置实现。
+		return func() server.Handler { return &fetchHandler{ext: e} }
 	case "SELECT", "EXAMINE":
 		// 始终包装 SELECT/EXAMINE: 统计命令数(断言读信缓存), 并按需执行
 		// 网易式 ID 门禁(未声明 ID 时拒绝)。
@@ -229,7 +283,56 @@ func (h *selectHandler) Handle(c server.Conn) error {
 		return errors.New("Unsafe Login. Please contact kefu@188.com for help")
 	}
 	h.ext.srv.selCount.Add(1)
+	// SelectDelay 人为放慢响应, 让并发回源合并测试的请求窗口真实重叠。
+	if d := h.ext.opts.SelectDelay; d > 0 {
+		time.Sleep(d)
+	}
 	return h.Select.Handle(c)
+}
+
+// noopHandler 统计 NOOP 命令数(连接保活测试), 其余行为委托内置实现。
+type noopHandler struct {
+	ext *ext
+	server.Noop
+}
+
+func (h *noopHandler) Handle(c server.Conn) error {
+	h.ext.srv.noopCount.Add(1)
+	return h.Noop.Handle(c)
+}
+
+// searchHandler 统计 SEARCH / UID SEARCH 命令数(UID 快照测试),
+// 其余行为委托内置实现。UID SEARCH 经 UID 分发到本 handler 的 UidHandle。
+type searchHandler struct {
+	ext *ext
+	server.Search
+}
+
+func (h *searchHandler) Handle(c server.Conn) error {
+	h.ext.srv.searchCount.Add(1)
+	return h.Search.Handle(c)
+}
+
+func (h *searchHandler) UidHandle(c server.Conn) error {
+	h.ext.srv.searchCount.Add(1)
+	return h.Search.UidHandle(c)
+}
+
+// fetchHandler 统计 FETCH(非 UID, 回退扫描)与 UID FETCH 命令数,
+// 其余行为委托内置实现。
+type fetchHandler struct {
+	ext *ext
+	server.Fetch
+}
+
+func (h *fetchHandler) Handle(c server.Conn) error {
+	h.ext.srv.fetchSeqCount.Add(1)
+	return h.Fetch.Handle(c)
+}
+
+func (h *fetchHandler) UidHandle(c server.Conn) error {
+	h.ext.srv.fetchCount.Add(1)
+	return h.Fetch.UidHandle(c)
 }
 
 // idHandler 记录并(可选)接受 ID 命令。
@@ -276,7 +379,10 @@ func (h *idHandler) Handle(c server.Conn) error {
 type wrapperBackend struct {
 	inner             *memory.Backend
 	neteaseErr        bool
+	dovecotErr        bool
 	emptyHeaderSearch bool
+	// validity 非 nil 时覆盖各邮箱报告的 UIDVALIDITY(测试邮箱重建)。
+	validity *atomic.Uint32
 }
 
 func (b wrapperBackend) Login(connInfo *imap.ConnInfo, username, password string) (backend.User, error) {
@@ -287,13 +393,15 @@ func (b wrapperBackend) Login(connInfo *imap.ConnInfo, username, password string
 	if err != nil {
 		return nil, err
 	}
-	return wrapperUser{User: user, neteaseErr: b.neteaseErr, emptyHeaderSearch: b.emptyHeaderSearch}, nil
+	return wrapperUser{User: user, neteaseErr: b.neteaseErr, dovecotErr: b.dovecotErr, emptyHeaderSearch: b.emptyHeaderSearch, validity: b.validity}, nil
 }
 
 type wrapperUser struct {
 	backend.User
 	neteaseErr        bool
+	dovecotErr        bool
 	emptyHeaderSearch bool
+	validity          *atomic.Uint32
 }
 
 func (u wrapperUser) GetMailbox(name string) (backend.Mailbox, error) {
@@ -302,12 +410,35 @@ func (u wrapperUser) GetMailbox(name string) (backend.Mailbox, error) {
 		if u.neteaseErr {
 			return nil, errors.New("Folder not exist")
 		}
+		if u.dovecotErr {
+			return nil, errors.New("Mailbox doesn't exist: " + name)
+		}
 		return nil, err
+	}
+	if u.validity != nil && u.validity.Load() != 0 {
+		mb = validityMailbox{Mailbox: mb, validity: u.validity}
 	}
 	if u.emptyHeaderSearch {
 		return wrapperMailbox{Mailbox: mb}, nil
 	}
 	return mb, nil
+}
+
+// validityMailbox 覆盖 STATUS 的 UIDVALIDITY(测试邮箱重建场景)。
+type validityMailbox struct {
+	backend.Mailbox
+	validity *atomic.Uint32
+}
+
+func (m validityMailbox) Status(items []imap.StatusItem) (*imap.MailboxStatus, error) {
+	status, err := m.Mailbox.Status(items)
+	if err != nil {
+		return nil, err
+	}
+	if v := m.validity.Load(); v != 0 {
+		status.UidValidity = v
+	}
+	return status, nil
 }
 
 // wrapperMailbox 复刻网易 Coremail 的 SEARCH 缺陷: header 类条件静默返回空。

@@ -34,6 +34,29 @@ func (r DateRange) within(when time.Time) bool {
 	return true
 }
 
+// FilterByDateRange 对消息列表按区间过滤(保持原顺序)。
+//
+// Web API 回退路径没有服务端日期搜索, 拉回后在本地按区间过滤, 使回退与
+// IMAP 路径的语义一致(用户选「最近 1 天」不应看到 60 天前的邮件)。
+// 时间无法解析(零值)的消息一律保留, 与 within 的保守原则一致。
+// 返回值保证非 nil(JSON 契约: messages 不能为 null)。
+func FilterByDateRange(list []Message, r DateRange) []Message {
+	out := make([]Message, 0, len(list))
+	if r.isZero() {
+		return append(out, list...)
+	}
+	for _, m := range list {
+		when, err := time.Parse(time.RFC3339, m.Date)
+		if err != nil {
+			when = time.Time{} // 解析失败按缺失处理 → 保留
+		}
+		if r.within(when) {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
 // DateRangeFromDays 把旧的「近 N 天」参数转换为区间: [now-N天, 不设上界)。
 // days<=0 返回零值(不限)。
 func DateRangeFromDays(days int) DateRange {
