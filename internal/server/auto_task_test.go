@@ -154,7 +154,10 @@ func TestAutoTaskUsesLabelLibraryAndEnforcesDailyCap(t *testing.T) {
 	}
 }
 
-func TestAutoTaskPausesImmediatelyAfterCreationFailure(t *testing.T) {
+// 单次上游失败不再暂停任务(失败容错): 避免把上游偶发误报(如「操作过于频繁」)
+// 当作确定性失败而误停。任务保持启用、记录失败原因, 由调度器按间隔自动重试;
+// 连续 2 次失败才暂停见 TestTwoConsecutiveFailuresPauseTask。
+func TestAutoTaskToleratesSingleCreationFailure(t *testing.T) {
 	be := &taskBackend{createErr: errors.New("iCloud 提示操作过于频繁")}
 	m := newAutoTaskManager(t.TempDir()+"/task.json", be)
 	// 固定时钟到白天(画像清醒时段), 隔离睡眠推迟逻辑对断言的干扰。
@@ -171,8 +174,8 @@ func TestAutoTaskPausesImmediatelyAfterCreationFailure(t *testing.T) {
 	m.mu.Unlock()
 
 	out := m.runOnce(task.ID)
-	if out.Enabled || out.NextRun != "" || !strings.Contains(out.LastError, "操作过于频繁") {
-		t.Fatalf("creation warning should pause immediately: %+v", out)
+	if !out.Enabled || out.NextRun == "" || !strings.Contains(out.LastError, "操作过于频繁") {
+		t.Fatalf("单次失败应容错(保持启用并排定重试): %+v", out)
 	}
 	if len(be.labels) != 1 {
 		t.Fatalf("unexpected create calls: %v", be.labels)

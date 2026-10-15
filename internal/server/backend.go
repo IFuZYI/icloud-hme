@@ -343,8 +343,9 @@ func (b *managerBackend) CreateAlias(accountID, label string) (*hme.CreateResult
 	if err != nil {
 		return nil, mapAccountErr(err)
 	}
-	// 自动任务在任何上游提示后都必须立即暂停，因此单次创建不在
-	// 客户端内部重试；下一次尝试只能由用户显式恢复任务后发起。
+	// 自动任务单次上游提示不再立即暂停(失败容错): 由 runOnce 按「连续 2 次
+	// 或最近 5 次中 3 次失败」的预算决定是否暂停, 因此单次创建不在客户端内部
+	// 重试, 重试由调度器的下一次尝试承担。
 	result, err := client.CreateAlias(label, 1)
 	_ = b.mgr.SaveCookies(accountID, client.Cookies)
 	if err != nil {

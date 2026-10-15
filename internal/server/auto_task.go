@@ -110,6 +110,57 @@ type AliasTask struct {
 	LastSuccess int    `json:"last_success"`
 	LastError   string `json:"last_error,omitempty"`
 	NextRun     string `json:"next_run,omitempty"`
+	// RecentOutcomes 记录最近若干次上游创建结果（"ok" / "fail"，按时间升序），
+	// 用于失败容错判定：单次失败不再暂停任务（避免把上游偶发误报当确定性失败），
+	// 只有「连续 2 次失败」或「最近 5 次中失败 ≥3 次」才暂停。上限
+	// taskOutcomeWindow 条，超出丢弃最早的。用户手动启用/编辑时清空。
+	RecentOutcomes []string `json:"recent_outcomes,omitempty"`
+}
+
+const (
+	// taskOutcomeWindow 为失败容错判定所看的最近结果窗口大小。
+	taskOutcomeWindow = 5
+	// taskOutcomeConsecutiveFailLimit 为允许的最大连续失败次数（达到即暂停）。
+	taskOutcomeConsecutiveFailLimit = 2
+	// taskOutcomeWindowFailLimit 为窗口内允许的最大失败次数（超过即暂停，
+	// 即「最近 5 次中失败 >2 次(≥3)」）。
+	taskOutcomeWindowFailLimit = 2
+)
+
+// recordTaskOutcome 把一次创建结果追加到容错历史并裁剪到窗口大小。
+func (t AliasTask) recordTaskOutcome(ok bool) []string {
+	outcome := "fail"
+	if ok {
+		outcome = "ok"
+	}
+	next := append(append([]string(nil), t.RecentOutcomes...), outcome)
+	if len(next) > taskOutcomeWindow {
+		next = next[len(next)-taskOutcomeWindow:]
+	}
+	return next
+}
+
+// shouldPauseAfterFailure 判定在刚刚记录完一次失败后是否应暂停任务。
+//   - 连续失败达到 taskOutcomeConsecutiveFailLimit（默认 2）→ 暂停；
+//   - 最近 taskOutcomeWindow（默认 5）次中失败超过 taskOutcomeWindowFailLimit
+//     （默认 2，即 ≥3）→ 暂停。
+//
+// outcomes 为已含本次失败的完整结果序列（升序）。
+func shouldPauseAfterFailure(outcomes []string) bool {
+	consecutive := 0
+	fails := 0
+	for _, o := range outcomes {
+		if o == "fail" {
+			fails++
+			consecutive++
+		} else {
+			consecutive = 0
+		}
+	}
+	if consecutive >= taskOutcomeConsecutiveFailLimit {
+		return true
+	}
+	return fails > taskOutcomeWindowFailLimit
 }
 
 // taskCreatedAtFormat 固定 9 位小数秒的 UTC 时间格式。
@@ -520,7 +571,7 @@ func (m *autoTaskManager) list() []AliasTask {
 	now := m.nowFunc()
 	changed := false
 	for id, t := range m.tasks {
-		if updated := resetDailyCount(t, now); updated != t {
+		if updated := resetDailyCount(t, now); dailyResetChanged(t, updated) {
 			m.tasks[id] = updated
 			changed = true
 		}
@@ -612,6 +663,9 @@ func (m *autoTaskManager) update(id string, in aliasTaskInput) (AliasTask, error
 	}
 	n.ID = id
 	n.Enabled = true
+	// 编辑保存会重新启用任务: 清空失败历史, 给用户显式干预后的任务干净预算
+	// (与 toggle 启用同口径)。normalize 新建的 n 本就不带历史, 此处显式声明契约。
+	n.RecentOutcomes = nil
 	n.NextNumber = old.NextNumber
 	// 保留创建时刻: 编辑不得改变展示位置(禁止闪现换位)。
 	n.CreatedAt = old.CreatedAt
@@ -707,7 +761,11 @@ func (m *autoTaskManager) toggle(id string) (AliasTask, error) {
 	}
 	t := old
 	t.Enabled = !t.Enabled
-	if !t.Enabled {
+	if t.Enabled {
+		// 手动启用: 清空失败历史, 让用户显式恢复后的任务从干净的容错预算开始
+		// (否则上次触发暂停的失败记录会立刻再次把它停掉)。
+		t.RecentOutcomes = nil
+	} else {
 		// 暂停:清空下次执行时刻,避免界面残留暂停前的旧时刻。
 		t.NextRun = ""
 	}
@@ -1008,6 +1066,9 @@ func (m *autoTaskManager) runOnce(id string) AliasTask {
 
 	success := 0
 	lastErr := ""
+	// pauseReason 非空表示本轮必须暂停任务(本地持久化/预留失败、账号状态异常,
+	// 或上游失败达到容错预算)。上游偶发失败不设置它, 任务保持启用并自动重试。
+	pauseReason := ""
 	for i := 0; i < count; i++ {
 		// 同一周期内连续创建时留出间隔，避免瞬时高频触发上游风控。
 		if i > 0 {
@@ -1032,6 +1093,7 @@ func (m *autoTaskManager) runOnce(id string) AliasTask {
 		}
 		if err := m.reserveAutoCreationAttemptLocked(current.AccountID, m.nowFunc()); err != nil {
 			lastErr = "创建冷却状态保存失败：" + err.Error()
+			pauseReason = "创建冷却状态保存失败"
 			current.Enabled = false
 			current.NextRun = ""
 			current.LastRun = m.nowFunc().Format(time.RFC3339)
@@ -1050,6 +1112,7 @@ func (m *autoTaskManager) runOnce(id string) AliasTask {
 		if reserveErr := m.saveLocked(); reserveErr != nil {
 			m.tasks[id] = current
 			lastErr = "任务序号预留失败：" + reserveErr.Error()
+			pauseReason = "任务序号预留失败"
 			current.Enabled = false
 			current.NextRun = ""
 			current.LastRun = m.nowFunc().Format(time.RFC3339)
@@ -1071,8 +1134,16 @@ func (m *autoTaskManager) runOnce(id string) AliasTask {
 		current = m.tasks[id]
 		if createErr != nil {
 			lastErr = createErr.Error()
-			current.Enabled = false
-			current.NextRun = ""
+			current.RecentOutcomes = current.recordTaskOutcome(false)
+			// 失败容错: 单次上游失败不再立即暂停(避免把偶发误报当确定性失败);
+			// 只有「连续 2 次失败」或「最近 5 次中失败 ≥3 次」才暂停。
+			pause := shouldPauseAfterFailure(current.RecentOutcomes)
+			if pause {
+				lastErr += "（已连续/累计失败过多，任务已暂停）"
+				pauseReason = "上游创建连续/累计失败过多"
+				current.Enabled = false
+				current.NextRun = ""
+			}
 			current.LastRun = m.nowFunc().Format(time.RFC3339)
 			current.LastSuccess = success
 			current.LastError = lastErr
@@ -1080,6 +1151,20 @@ func (m *autoTaskManager) runOnce(id string) AliasTask {
 			_ = m.saveLocked()
 			if logErr := m.logLocked(id, "error", "%s 创建失败：%v", label, createErr); logErr != nil {
 				lastErr += "；日志保存失败：" + logErr.Error()
+				// 审计日志写盘失败属本地持久化问题(非上游误报)，必须暂停:
+				// 与状态/预留保存失败同口径, 即使本次上游失败本身在容错预算内。
+				pauseReason = "日志保存失败"
+				current.Enabled = false
+				current.NextRun = ""
+				current.LastError = lastErr
+				m.tasks[id] = current
+			}
+			if pause {
+				// 日志文案取 pauseReason, 保证与实际触发原因一致: 窗口规则
+				// (近 5 次中 ≥3 次失败)触发时不得误写为「连续 N 次失败」。
+				if logErr := m.logLocked(id, "error", "%s，任务已暂停", pauseReason); logErr != nil {
+					lastErr += "；日志保存失败：" + logErr.Error()
+				}
 			}
 			m.mu.Unlock()
 			break
@@ -1087,9 +1172,11 @@ func (m *autoTaskManager) runOnce(id string) AliasTask {
 
 		success++
 		current.CreatedCount++
+		current.RecentOutcomes = current.recordTaskOutcome(true)
 		m.tasks[id] = current
 		if saveErr := m.saveLocked(); saveErr != nil {
 			lastErr = "任务状态保存失败：" + saveErr.Error()
+			pauseReason = "任务状态保存失败"
 			current.Enabled = false
 			current.NextRun = ""
 			current.LastRun = m.nowFunc().Format(time.RFC3339)
@@ -1106,6 +1193,7 @@ func (m *autoTaskManager) runOnce(id string) AliasTask {
 		}
 		if logErr := m.logLocked(id, "info", "%s 创建成功（进度 %d/%d）", label, current.CreatedCount, current.MaxTotal); logErr != nil {
 			lastErr = "日志保存失败：" + logErr.Error()
+			pauseReason = "日志保存失败"
 			m.mu.Unlock()
 			break
 		}
@@ -1126,7 +1214,11 @@ func (m *autoTaskManager) runOnce(id string) AliasTask {
 			}
 		}
 	}
-	if lastErr != "" {
+	// 失败容错: 仅当本轮判定「必须暂停」时才停任务。上游偶发创建失败
+	// (lastErr 非空但容错预算未耗尽)不再暂停, 由下面按间隔排定重试。
+	// pauseReason 由需要强制暂停的分支设置: 本地持久化/预留失败、账号状态异常,
+	// 以及上游失败达到容错预算(见循环内的 shouldPauseAfterFailure)。
+	if pauseReason != "" {
 		t.Enabled = false
 	}
 	// 仅当任务仍启用且未达上限时,按「本轮结束 + 间隔」推算下次执行;否则清空。
@@ -1200,6 +1292,19 @@ func taskHasQuotaKey(probes []map[string]json.RawMessage, i int) bool {
 	}
 	_, ok := probes[i]["today_quota"]
 	return ok
+}
+
+// dailyResetChanged 判断 resetDailyCount 是否重置了任务（跨日/跨周期）。
+//
+// resetDailyCount 只改 DailyDate / DailyCount / TodayQuota，因此只比较这三个
+// 字段即可——AliasTask 现含切片字段(RecentOutcomes)，不可整结构体比较。
+// 注: TodayQuota 的比较当前是冗余的（auto 模式下它只在 DailyDate 变化的分支内
+// 被改，scheduled 模式永不改它），去掉后行为不变；保留它作为防御——若将来
+// resetDailyCount 改为单独调整配额，该比较仍然正确。
+func dailyResetChanged(before, after AliasTask) bool {
+	return before.DailyDate != after.DailyDate ||
+		before.DailyCount != after.DailyCount ||
+		before.TodayQuota != after.TodayQuota
 }
 
 // resetDailyCount 在跨「日」时清零当日计数,并重算自主任务的今日配额。
@@ -1314,7 +1419,7 @@ func (m *autoTaskManager) reserveManualCreation(accountID string) error {
 	now := time.Now()
 	for id, task := range m.tasks {
 		updated := resetDailyCount(task, now)
-		if updated != task {
+		if dailyResetChanged(task, updated) {
 			m.tasks[id] = updated
 		}
 	}
