@@ -58,6 +58,82 @@ function renderPage() {
   )
 }
 
+/** 读取当前渲染的任务卡标题序列(卡片顺序 = DOM 顺序)。 */
+function cardTitles(): string[] {
+  return Array.from(document.querySelectorAll('.task-card h3')).map((el) => el.textContent ?? '')
+}
+
+/** 构造定时任务的完整响应 DTO。 */
+function scheduledTask(id: string, labelPrefix: string, intervalMinutes = 60): AliasTask {
+  return {
+    id,
+    enabled: true,
+    account_id: 'acc_1',
+    mode: 'scheduled',
+    interval_minutes: intervalMinutes,
+    batch_count: 1,
+    daily_limit: 50,
+    label_mode: 'sequential',
+    label_prefix: labelPrefix,
+    max_total: 50,
+    created_count: 0,
+    daily_count: 0,
+    last_success: 0,
+  }
+}
+
+describe('AliasTasksPage 禁止闪现换位', () => {
+  it('轮询返回乱序时, 已展示的卡片保持位置不变', async () => {
+    const first = [scheduledTask('task_a', '甲'), scheduledTask('task_b', '乙'), scheduledTask('task_c', '丙')]
+    // 第二次轮询: 服务端乱序(模拟 map 迭代顺序波动) + 状态字段变化。
+    const second = [
+      { ...scheduledTask('task_c', '丙'), created_count: 3, daily_count: 3 },
+      { ...scheduledTask('task_a', '甲'), created_count: 5, daily_count: 5 },
+      { ...scheduledTask('task_b', '乙'), created_count: 1, daily_count: 1 },
+    ]
+    let call = 0
+    server.use(
+      http.get('/api/accounts', () => HttpResponse.json({ success: true, data: accounts })),
+      http.get('/api/alias-tasks', () => {
+        call += 1
+        return HttpResponse.json({ success: true, data: call === 1 ? first : second })
+      }),
+    )
+    renderPage()
+    // 首次加载: 按服务端顺序展示。
+    expect(await screen.findByText('甲001 顺序')).toBeInTheDocument()
+    expect(cardTitles()).toEqual(['甲001 顺序', '乙001 顺序', '丙001 顺序'])
+
+    // 等待轮询(2 秒)应用第二批乱序数据。
+    await screen.findByText('3 / 50（6%）', undefined, { timeout: 6000 })
+    // 乱序数据到达后, 卡片位置必须保持首次顺序。
+    expect(cardTitles()).toEqual(['甲001 顺序', '乙001 顺序', '丙001 顺序'])
+  }, 10000)
+
+  it('轮询出现新任务时追加到末尾, 已有卡片不动', async () => {
+    const first = [scheduledTask('task_a', '甲'), scheduledTask('task_b', '乙')]
+    const second = [
+      scheduledTask('task_new', '新'),
+      scheduledTask('task_b', '乙'),
+      scheduledTask('task_a', '甲'),
+    ]
+    let call = 0
+    server.use(
+      http.get('/api/accounts', () => HttpResponse.json({ success: true, data: accounts })),
+      http.get('/api/alias-tasks', () => {
+        call += 1
+        return HttpResponse.json({ success: true, data: call === 1 ? first : second })
+      }),
+    )
+    renderPage()
+    expect(await screen.findByText('甲001 顺序')).toBeInTheDocument()
+    expect(cardTitles()).toEqual(['甲001 顺序', '乙001 顺序'])
+
+    await screen.findByText('新001 顺序', undefined, { timeout: 6000 })
+    expect(cardTitles()).toEqual(['甲001 顺序', '乙001 顺序', '新001 顺序'])
+  }, 10000)
+})
+
 describe('AliasTasksPage 表单挂载时机', () => {
   it('单账号时新建任务自动选中该账号', async () => {
     stub()

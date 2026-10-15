@@ -7,6 +7,7 @@ import (
 	mrand "math/rand/v2"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -97,13 +98,31 @@ type AliasTask struct {
 	QuotaTimezone string `json:"quota_timezone,omitempty"`
 	MaxTotal      int    `json:"max_total"`
 	CreatedCount  int    `json:"created_count"`
-	NextNumber    int    `json:"next_number"`
-	DailyCount    int    `json:"daily_count"`
-	DailyDate     string `json:"daily_date,omitempty"`
-	LastRun       string `json:"last_run,omitempty"`
-	LastSuccess   int    `json:"last_success"`
-	LastError     string `json:"last_error,omitempty"`
-	NextRun       string `json:"next_run,omitempty"`
+	// CreatedAt 为任务创建时刻(固定 9 位小数秒的 UTC 时间)。展示顺序按它排序,
+	// 保证「新任务追加末尾、已有任务位置不动」——这是「禁止闪现换位」的数据层
+	// 保证: 不随任务状态/进度/下次执行时刻漂移。旧数据(字段引入前保存)在
+	// 加载时按文件数组位置补写合成时间戳(见 load)。
+	CreatedAt   string `json:"created_at,omitempty"`
+	NextNumber  int    `json:"next_number"`
+	DailyCount  int    `json:"daily_count"`
+	DailyDate   string `json:"daily_date,omitempty"`
+	LastRun     string `json:"last_run,omitempty"`
+	LastSuccess int    `json:"last_success"`
+	LastError   string `json:"last_error,omitempty"`
+	NextRun     string `json:"next_run,omitempty"`
+}
+
+// taskCreatedAtFormat 固定 9 位小数秒的 UTC 时间格式。
+// 展示排序对 CreatedAt 做字符串比较, 而 RFC3339Nano 会省略尾零小数位——
+// 字典序在「有小数位 vs 无小数位」时误判先后(如 ".5Z" < "Z", 但 0.5s > 0s),
+// 固定宽度才能保证字符串序 = 时间序。
+const taskCreatedAtFormat = "2006-01-02T15:04:05.000000000Z07:00"
+
+// taskLegacyCreatedAt 为旧数据(created_at 字段引入前保存)按文件数组位置
+// 生成合成创建时刻: 固定基准 + 位置秒, 使展示顺序在字段引入后仍然稳定;
+// 新任务的实际时刻自然排在旧任务之后。
+func taskLegacyCreatedAt(index int) string {
+	return time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC).Add(time.Duration(index) * time.Second).Format(taskCreatedAtFormat)
 }
 
 type aliasTaskInput struct {
@@ -173,6 +192,9 @@ type autoTaskManager struct {
 	writeLogs  func(string, any) error
 	now        func() time.Time
 	rand       func() float64
+	// backfilledCreatedAt 标记加载时为旧任务补写了合成创建时刻;
+	// 首次 list() 惰性落盘, 使展示顺序不再依赖文件数组位置。
+	backfilledCreatedAt bool
 }
 
 // normalizeAliasTask 以当前时间归一化任务输入(测试与旧调用方入口)。
@@ -431,6 +453,14 @@ func (m *autoTaskManager) load() {
 			if t.LabelSeed == 0 {
 				t.LabelSeed = fnv64(t.ID)
 			}
+			// 兼容旧任务：created_at 字段引入前的记录没有创建时刻, 按文件
+			// 数组位置补写合成时间戳——展示顺序在字段引入后保持稳定, 且
+			// 新任务(真实时刻)自然排在旧任务之后。首次 list() 惰性落盘,
+			// 此后顺序不再依赖文件数组位置。
+			if t.CreatedAt == "" {
+				t.CreatedAt = taskLegacyCreatedAt(i)
+				m.backfilledCreatedAt = true
+			}
 			// 兼容旧任务：未写入画像时按种子回填，使旧任务也获得拟人作息。
 			if t.Persona == "" {
 				t.Persona = personaForSeed(t.LabelSeed).Name
@@ -469,6 +499,15 @@ func (m *autoTaskManager) taskListLocked() []AliasTask {
 	for _, t := range m.tasks {
 		out = append(out, t)
 	}
+	// 展示顺序必须跨调用稳定: Go map 的迭代顺序是随机的, 直接返回会让前端
+	// 每 2 秒轮询都拿到不同顺序、卡片「闪现换位」(用户实测反馈)。按创建
+	// 时间排序(新任务追加末尾、已有任务位置不动), ID 仅作同时刻的稳定兜底。
+	slices.SortFunc(out, func(a, b AliasTask) int {
+		if c := strings.Compare(a.CreatedAt, b.CreatedAt); c != 0 {
+			return c
+		}
+		return strings.Compare(a.ID, b.ID)
+	})
 	return out
 }
 func (m *autoTaskManager) list() []AliasTask {
@@ -490,8 +529,10 @@ func (m *autoTaskManager) list() []AliasTask {
 			changed = true
 		}
 	}
-	if changed {
-		_ = m.saveLocked()
+	if changed || m.backfilledCreatedAt {
+		if err := m.saveLocked(); err == nil {
+			m.backfilledCreatedAt = false
+		}
 	}
 	return m.taskListLocked()
 }
@@ -506,6 +547,8 @@ func (m *autoTaskManager) create(in aliasTaskInput) (AliasTask, error) {
 	if e != nil {
 		return t, e
 	}
+	// 创建时刻即展示顺序: 一旦写入不再变化, 任务状态/进度更新不影响排序。
+	t.CreatedAt = m.nowFunc().UTC().Format(taskCreatedAtFormat)
 	t.Enabled = true
 	t.NextRun = time.Now().Add(10 * time.Second).Format(time.RFC3339)
 	m.mu.Lock()
@@ -570,6 +613,8 @@ func (m *autoTaskManager) update(id string, in aliasTaskInput) (AliasTask, error
 	n.ID = id
 	n.Enabled = true
 	n.NextNumber = old.NextNumber
+	// 保留创建时刻: 编辑不得改变展示位置(禁止闪现换位)。
+	n.CreatedAt = old.CreatedAt
 	// 保留原有抽取种子，使更新任务不改变名称库抽取序列（避免与已创建标签重叠）。
 	n.LabelSeed = old.LabelSeed
 	// 画像必须与种子保持一致(注释承诺「同一任务在任意时刻、任意重启后都保持

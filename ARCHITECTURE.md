@@ -160,7 +160,7 @@ Gin Server /api ─────────────────────�
 | `hme.Alias` / `Alias` | `internal/hme/client.go`、`web/src/api/types.ts` | HME 别名，字段使用 iCloud camelCase |
 | `InboxResult` | `internal/server/backend.go`、`web/src/api/types.ts` | 邮件分页结果，包含 `total`、`offset`、`method` 和可选 `warning` |
 | `mail.Message` / `FullMessage` | `internal/mail/client.go`、`web/src/api/types.ts` | 邮件摘要和完整正文 |
-| `AliasTask` / `AliasTaskLog` | `internal/server/auto_task.go` | 自动创建状态（任务类型 mode、标签模式 label_mode、周期、目标、每日计数）与审计日志 |
+| `AliasTask` / `AliasTaskLog` | `internal/server/auto_task.go` | 自动创建状态（任务类型 mode、标签模式 label_mode、周期、目标、每日计数、创建时刻 `created_at`）与审计日志 |
 
 ### 现有文档差异
 

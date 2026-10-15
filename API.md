@@ -492,7 +492,9 @@ X-CSRF-Token: <token>                # 非 GET 请求需要
 | `label_prefix` | sequential/hash 必填 | 标签前缀（最长 32 字符） |
 | `hash_length` | ⭕ | hash 后缀长度（4–8，默认 4） |
 
-参数不合法返回 `400 VALIDATION_ERROR`，任务不存在返回 `404 TASK_NOT_FOUND`。任意创建失败会立即暂停任务并清空 `next_run`。旧版任务向后兼容：缺 `mode` 视为 `scheduled`，缺 `label_mode` 视为 `library`。
+参数不合法返回 `400 VALIDATION_ERROR`，任务不存在返回 `404 TASK_NOT_FOUND`。任意创建失败会立即暂停任务并清空 `next_run`。旧版任务向后兼容：缺 `mode` 视为 `scheduled`，缺 `label_mode` 视为 `library`；缺 `created_at`（本次新增字段）在加载时按文件数组位置补写合成时间戳并惰性落盘。
+
+**任务展示顺序（禁止闪现换位）：** `GET /api/alias-tasks` 返回的数组按任务 `created_at` 升序（新任务在末尾），同一时刻以 `id` 兜底，**跨请求稳定**。后端 `taskListLocked` 不再直接返回 Go map 迭代顺序（该顺序随机，会让前端每 2 秒轮询看到卡片换位）；`created_at` 为固定 9 位小数秒的 UTC 时间串（`2006-01-02T15:04:05.000000000Z07:00`），保证字符串序 = 时间序。`PATCH` 编辑保留原 `created_at`，任务位置与创建时刻均不变。
 
 ### 19. 重新加载配置
 

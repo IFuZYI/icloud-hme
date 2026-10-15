@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { request, ApiError } from '../api/client'
 import { fetchAccounts } from '../api/cache'
 import { formatDateTime, formatIntervalMinutes } from '../utils/datetime'
+import { freezeTaskOrder } from '../utils/taskOrder'
 import AliasTaskForm from '../components/AliasTaskForm'
 import TaskMoreMenu from '../components/TaskMoreMenu'
 import type { AccountSummary, AliasTask } from '../api/types'
@@ -25,13 +26,22 @@ export default function AliasTasksPage() {
   const [formSession, setFormSession] = useState(0)
   const [error, setError] = useState('')
   const { show } = useToast()
+  // 展示顺序(任务 ID 序列): 跨轮询冻结, 已有任务不因服务端顺序波动而换位。
+  // 用 ref 而非 state——顺序只作为下一次合并的输入, 不需要触发重渲染。
+  const orderRef = useRef<string[]>([])
 
   async function load() {
     try {
       const [taskList, accountList] = await Promise.all([
         request<AliasTask[]>('/api/alias-tasks'), fetchAccounts<AccountSummary[]>(),
       ])
-      setTasks(taskList); setAccounts(accountList); setError('')
+      // 冻结展示顺序: 已有任务保持上一次的相对位置, 新任务追加末尾,
+      // 已删除任务移除。服务端乱序(或用户操作后的重排)不得引起「闪现换位」。
+      const order = freezeTaskOrder(orderRef.current, taskList)
+      orderRef.current = order
+      const byId = new Map(taskList.map((t) => [t.id, t]))
+      setTasks(order.flatMap((id) => { const t = byId.get(id); return t ? [t] : [] }))
+      setAccounts(accountList); setError('')
     } catch (e) { setError(e instanceof ApiError ? e.message : '加载失败') }
   }
   useEffect(() => {
