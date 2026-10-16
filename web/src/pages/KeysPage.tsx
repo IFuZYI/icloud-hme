@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { ApiError, request } from '../api/client'
+import { fetchAccounts } from '../api/cache'
 import { formatDateTime } from '../utils/datetime'
 import { copyText } from '../utils/clipboard'
 import type { ApiKey, AccountSummary, PermissionCatalog } from '../api/types'
@@ -87,9 +88,10 @@ export default function KeysPage() {
         // 权限目录加载失败不阻塞列表; 对话框里会提示
       })
     // 账号列表供账号范围勾选; 失败不阻塞(选择区显示空)。
-    request<{ accounts: AccountSummary[] }>('/api/accounts')
+    // /api/accounts 的 data 直接是数组(与其它页面一致, 见 api/cache.ts)。
+    fetchAccounts<AccountSummary[]>()
       .then((data) => {
-        if (!cancelled) setAccounts(data.accounts ?? [])
+        if (!cancelled) setAccounts(Array.isArray(data) ? data : [])
       })
       .catch(() => {
         // 账号加载失败: 账号范围选择区为空, 秘钥仍可创建(默认全部账号)

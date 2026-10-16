@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import KeysPage from './KeysPage'
 import { server } from '../test/server'
 import { setCSRFToken } from '../api/client'
+import { __resetCache } from '../api/cache'
 import { ToastProvider } from '../components/ToastProvider'
 import type { ApiKey, PermissionCatalog } from '../api/types'
 
@@ -56,6 +57,8 @@ function renderPage() {
 describe('KeysPage', () => {
   beforeEach(() => {
     setCSRFToken('csrf-test')
+    // 账号列表走共享缓存(api/cache.ts): 清空避免跨测试泄漏。
+    __resetCache()
     server.resetHandlers()
     server.use(
       http.get('/api/keys', () => HttpResponse.json({ success: true, data: { count: keys.length, keys } })),
@@ -251,13 +254,10 @@ describe('KeysPage', () => {
       http.get('/api/accounts', () =>
         HttpResponse.json({
           success: true,
-          data: {
-            count: 2,
-            accounts: [
-              { id: 'acc_1', name: '主账号', real_email: 'a@x.com', status: 'active' },
-              { id: 'acc_2', name: '备用账号', real_email: 'b@x.com', status: 'active' },
-            ],
-          },
+          data: [
+            { id: 'acc_1', name: '主账号', real_email: 'a@x.com', status: 'active' },
+            { id: 'acc_2', name: '备用账号', real_email: 'b@x.com', status: 'active' },
+          ],
         }),
       ),
       http.post('/api/keys', async ({ request }) => {
@@ -285,7 +285,7 @@ describe('KeysPage', () => {
     let created: Record<string, unknown> | null = null
     server.use(
       http.get('/api/accounts', () =>
-        HttpResponse.json({ success: true, data: { count: 1, accounts: [{ id: 'acc_1', name: '主账号' }] } }),
+        HttpResponse.json({ success: true, data: [{ id: 'acc_1', name: '主账号' }] }),
       ),
       http.post('/api/keys', async ({ request }) => {
         created = (await request.json()) as Record<string, unknown>
