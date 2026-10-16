@@ -1497,7 +1497,6 @@ tbody tr:nth-child(n + 6) { animation-delay: 150ms; }
   margin-bottom: var(--space-2);
 }
 
-.purge-task-summary,
 .purge-task-detail {
   margin: 0;
   font-size: var(--text-sm);
