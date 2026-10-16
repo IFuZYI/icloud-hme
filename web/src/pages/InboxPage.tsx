@@ -153,8 +153,8 @@ export default function InboxPage() {
       if (rangeStart) params.set('start', rangeStart.format('YYYY-MM-DDTHH:mm:ss'))
       if (rangeEnd) params.set('end', rangeEnd.format('YYYY-MM-DDTHH:mm:ss'))
       if (alias) params.set('alias', alias)
-      // 用户显式触发时绕过服务端缓存(避免反复访问 IMAP 导致账号风控,
-      // 同时保证「刷新」按钮拿到的是最新邮件)。
+      // 用户显式触发(查询/加载更多)时强制回源: 「查询」的语义就是取新邮件,
+      // 服务端会绕过 TTL 缓存并作废 IMAP 列表快照(每次点击都真实访问上游)。
       if (refreshOnceRef.current) {
         refreshOnceRef.current = false
         params.set('refresh', '1')
