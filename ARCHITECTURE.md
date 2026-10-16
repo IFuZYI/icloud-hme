@@ -227,6 +227,8 @@ IMAP 路径同时扫描 INBOX 与垃圾邮件夹（Junk / 网易「垃圾邮件�
 
 前端构建产物固定输出到 `internal/webui/dist`，随后被 `go:embed` 编入二进制。修改前端后若要验证最终二进制，必须先运行前端构建再执行 Go build。
 
+**资源管线（性能）：** 路由级代码分割（`App.tsx` 的 `React.lazy`）让首屏只加载壳层与当前页的 chunk（入口约 15KB；收件箱的 antd DatePicker/dayjs 重依赖仅访问该页时加载）；`webui.Handler` 对文本资源（JS/CSS/HTML/SVG/JSON）做 gzip 协商传输（`Accept-Encoding` + `Vary`，含 `q=0` 拒绝语义），压缩结果按文件名缓存复用（嵌入资源不可变）。实测：JS 674KB→219KB、CSS 61KB→11KB（gzip）；首屏关键路径 230KB→147KB（gzip）。
+
 CI 分为 web 与 go 两个 job：web job 上传构建产物，go job 下载该产物后执行 race test、vet 与 build。
 
 ## 8. 数据与安全边界

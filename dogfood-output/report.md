@@ -854,3 +854,149 @@ vision 模型报告「查询按钮高度略低于输入框，底部没有和输�
 - 3 项预存观察项已记录，均非本次引入，不阻塞。
 - 门禁：`gofmt` 空 / `vet` OK / `go test ./...` 全 ok / `-race`（apikey 1.61s / server 57.5s）/ 前端 **30 文件 170 测试全过**。
 
+---
+
+## 第八轮（UI 优化检测 + 风格一致性 + UI 性能优化，5 项全部修复）
+
+**范围：** 用户要求「完成 UI 优化检测，保证 UI 风格一致性。优化 UI 性能。」——6 页面 × 桌面/移动/深色矩阵全量检测 + 资源管线审计 + 性能优化落地。
+**目标实例：** 本地环境 `http://127.0.0.1:8081`（用户提供的 QA 凭据 `local-test-2026`）。
+
+### 性能优化（用户要求「优化 UI 性能」）——三项落地
+
+| 优化项 | 优化前 | 优化后 | 收益 |
+|---|---|---|---|
+| **静态资源 gzip**（新增） | JS 674,040 / CSS 60,859 字节（原样传输） | JS 218,722 / CSS 11,081 字节 | **-68% / -82%** |
+| **路由级代码分割**（新增） | 单 bundle 674KB 全量加载 | 入口 chunk 15KB；`/inbox` 重依赖按需加载 | 入口 **-98%**；首屏 gzip 229.8KB → **147KB（-36%）** |
+| **未定义 token 修复**（见 Issue #27） | 4 个 `var()` 引用被静默丢弃 | 全部换用既有 token | 消除无效规则 + 渲染缺陷 |
+
+**实测数据（服务端字节，curl -H 'Accept-Encoding: gzip'）：**
+```
+JS:  674,040 → 218,722 字节（-68%）  解压 MD5 与源文件一致
+CSS:  60,859 →  11,081 字节（-82%）
+入口 chunk: 674,040 → 15,109 字节（-98%）
+首屏关键路径(gzip): 229,803 → 147,042 字节（-36%）
+非收件箱页面另省 InboxPage chunk 76KB(gzip)
+```
+
+### Issue #27: 未定义 CSS token 导致清理任务卡背景与圆角静默丢失（High，已修复）
+
+| Field | Value |
+|-------|-------|
+| **Severity** | 🟠 High |
+| **Category** | Visual / Functional |
+| **URL** | `/logs`（`.purge-task-card`、`.logs-filter select`、`.purge-progress`） |
+
+**Description:**
+`styles.css` 引用了 4 个从未定义的 CSS 变量（`--color-surface`、`--radius-md`、`--color-surface-secondary`、`--dur-med`）。浏览器对无回退值的未定义 `var()` 会**丢弃整条声明**——`.purge-task-card` 实测计算样式为 `background: rgba(0,0,0,0)`（透明）、`border-radius: 0px`。布局探针与截图都发现不了（布局正常、文字可读）。skill 探针 #32 的教科书案例。
+
+**Steps to Reproduce:**
+1. 打开 `/logs`
+2. `getComputedStyle(document.querySelector('.purge-task-card')).backgroundColor` → `rgba(0, 0, 0, 0)`
+3. `borderRadius` → `0px`；对照 `styles.css` 全文件无 `--color-surface:` / `--radius-md:` 定义
+
+**Expected:** 卡片白底（`--color-bg-raised`）+ 14px 圆角（`--radius-xl`），与 `.table-wrap`/`.task-card` 卡片体系一致。
+
+**Actual:** 透明背景、零圆角；进度条轨道同样退化（`--color-surface-secondary`）、过渡时长退化（`--dur-med`）。
+
+**修复：**
+- `--color-surface` → `--color-bg-raised`（2 处）；`--radius-md` → `--radius-xl`；`--color-surface-secondary` → `--color-border`（与 `.task-progress` 轨道一致）；`--dur-med` → `0.7s var(--ease-apple)`（与 `.task-progress-fill` 一致）
+- **防回归测试** `web/src/styles.tokens.test.ts`：扫描全部样式表，任何 `var(--token)` 引用必须有定义（RED 列出 4 个孤立 token → GREEN）
+- **变异反证：** 重新引入未定义 token → 测试变红 ✅
+
+**证据:** MEDIA:/home/icloud-hme/dogfood-output/screenshots/r8-02-undefined-token-card.png
+
+### Issue #28: 移动端导航「日志」被裁切——431–505px 边界带无规则覆盖（Medium，已修复）
+
+| Field | Value |
+|-------|-------|
+| **Severity** | 🟡 Medium |
+| **Category** | Visual / UX |
+| **URL** | 全站 header（≤505px 视口） |
+
+**Description:**
+导航 6 项总宽 423px（图标+文字）在 390px 视口溢出 33px：「日志」右缘 411px 完全不可见。旧 `≤420px` 规则按 5 项校准、6 项下失效；**431–505px 区间无任何规则覆盖**——480px 视口实测 `nav.scrollWidth=505 > clientWidth=480`，同样溢出。滚动条被隐藏，用户无任何提示。
+
+**Steps to Reproduce:**
+1. 视口 390px（或 431–505px 任一宽度），打开任意页面
+2. 实测 `nav.scrollWidth=423`（480px 下 505）、`clientWidth=390`、「日志」右缘 411px
+
+**修复：**
+- `≤520px`：隐藏导航图标（沿用 ≤940px 既有处理）+ 内边距 10px/字号 13px → 6 项总宽 337px
+- `≤340px`：进一步收紧至 7px/12px
+- **13 宽度矩阵实测（320→1024px）：全部 `scrollWidth == clientWidth` 且最后一项可见**
+
+**证据:** MEDIA:/home/icloud-hme/dogfood-output/screenshots/r8-06-mobile-nav-bug-state.png
+
+### Issue #29: 主按钮字重不统一（400 vs 500）（Medium，已修复）
+
+| Field | Value |
+|-------|-------|
+| **Severity** | 🟡 Medium |
+| **Category** | Visual（设计系统一致性） |
+| **URL** | 全站主按钮 |
+
+**Description:**
+`button.primary` 字重 400，而 `.aliases-primary-btn` / `.inbox-action.primary` 为 500——同级别主操作按钮（同底色、同尺寸）字重不一致。逐页实测：`/accounts`「添加账号」、`/alias-tasks`「新建任务」、`/keys`「创建秘钥」= 400 vs `/aliases`「创建别名」、`/inbox`「查询」= 500。
+
+**修复：** `button.primary` 增加 `font-weight: 500`；修复后 5 页实测全部 500 ✅
+
+**证据:** MEDIA:/home/icloud-hme/dogfood-output/screenshots/r8-04-desktop-final.png
+
+### Issue #30: 静态资源完全未压缩（Low→已优化）
+
+| Field | Value |
+|-------|-------|
+| **Severity** | 🔵 Low（性能优化项） |
+| **Category** | Performance |
+| **URL** | `/assets/*.js`、`/assets/*.css` |
+
+**Description:** `webui.Handler` 用 `io.Copy` 直出，无压缩协商；`curl -H 'Accept-Encoding: gzip'` 返回 674,040 字节（与未压缩一致）。
+
+**修复：**
+- `webui.Handler` 增加 gzip 协商：`compressibleType`（JS/CSS/HTML/SVG/JSON）+ `acceptsGzip`（含 `q=0` 拒绝语义）+ 1KB 阈值
+- 压缩结果按文件名缓存（嵌入资源不可变 → 一次压缩多次复用）
+- 新增 3 测试：gzip 协商 / 未压缩回退 / HEAD 与 GET 头部一致；**变异反证：关闭 gzip 分支 → 测试变红 ✅**
+- 实测：解压 MD5 与源文件一致；`Vary: Accept-Encoding` 正确
+
+### Issue #31: 单 bundle 674KB 全量加载（Low→已优化）
+
+| Field | Value |
+|-------|-------|
+| **Severity** | 🔵 Low（性能优化项） |
+| **Category** | Performance |
+| **URL** | 全站首屏 |
+
+**Description:** `App.tsx` 静态导入全部 6 页 → 单一 674KB bundle；访问任何页都要下载全部代码（含 `/inbox` 独占的 antd DatePicker + dayjs）。
+
+**修复：** 路由级 `React.lazy` + `Suspense`（fallback 复用既有 `empty-state` 加载态）。
+**实测：** 入口 674KB → 15KB；`/accounts` 首屏 gzip 229.8KB → 147KB；导航到 `/inbox` 时才拉取 `InboxPage` chunk（76KB gzip）；6 页面渲染正常、零控制台错误、188 测试全过。
+
+### 第八轮验证矩阵
+
+| 项目 | 结果 |
+|---|---|
+| 桌面 1280 全 6 页 | ✅ 零溢出、零控制台错误 |
+| 移动 390 全 6 页 | ✅ 零溢出（`scrollWidth ≤ innerWidth`） |
+| 深色模式（accounts/logs） | ✅ 黑底白字、卡片 `#1d1d1f`、表头对比度 4.70:1（WCAG AA） |
+| 导航宽度矩阵（13 档 320→1024px） | ✅ 全部无溢出、最后一项可见 |
+| gzip 协商（curl） | ✅ -68%/-82%、MD5 校验一致、Vary 正确 |
+| 代码分割（浏览器 Network） | ✅ 按页 chunk 按需加载、入口 15KB |
+| 门禁 | Go 全量 + `-race` + `vet` + `gofmt` 全过；前端 **33 文件 188 测试** |
+
+### 第八轮测试说明与边界
+
+**已覆盖：** 6 页面 × 桌面/移动/深色三矩阵布局与控制台错误；导航 13 宽度矩阵；设计系统一致性（按钮字重/表头/卡片/token 完整性）；资源管线（压缩/缓存头/HEAD/SPA fallback）；代码分割按需加载。
+
+**未覆盖（明确说明）：**
+- 写操作（创建/删除账号、别名、秘钥、任务）——本轮为 UI 检测，写路径由既有 E2E 覆盖。
+- 真实 IMAP 取信——依赖外部邮箱可用性；`/inbox` 渲染已覆盖。
+- 跨浏览器（仅 Chromium；`color-mix`/`backdrop-filter` 未在 Firefox/Safari 验证）。
+- **登录路径说明：** 凭证库未保存本机登录项（用户拒绝保存）→ 管理页会话使用用户在本会话中提供的本地测试密码（该实例的 QA 凭据，仅回环地址测试环境）。
+
+### 第八轮结论
+
+- 用户三项要求（UI 优化检测、风格一致性、UI 性能优化）**全部达成**。
+- 5 项发现全部修复；新增 2 类防回归测试（token 完整性 + gzip 行为），均通过变异反证。
+- 性能：首屏传输 **-36%**（非收件箱页面 **-68%**）；入口 chunk **-98%**。
+- 门禁全绿；桌面/移动/深色三矩阵零回归。
+

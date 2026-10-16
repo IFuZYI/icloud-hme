@@ -386,6 +386,9 @@ button.primary {
   border-color: transparent;
   color: #fff;
   box-shadow: var(--shadow-xs);
+  /* 主按钮统一中等字重(与 .aliases-primary-btn / .inbox-action.primary 一致;
+     此前全局主按钮 400、别名/收件箱自定义主按钮 500, dogfood 实测不一致)。 */
+  font-weight: 500;
 }
 
 button.primary:hover:not(:disabled) {
@@ -1421,13 +1424,19 @@ tbody tr:nth-child(n + 6) { animation-delay: 150ms; }
   }
 }
 
-/* 极窄屏(≤420px): 收紧导航项内边距, 让 5 个菜单项完整放进一行;
-   否则「收件箱」等尾部项会被挤出视野(仅靠横向滚动才能看到)。 */
-@media (max-width: 420px) {
+/* 窄屏(≤520px): 6 个菜单项 + 图标在 13px 内边距下总宽 505px, 超出
+   ≤505px 的视口——「日志」被挤出视野, 而滚动条被 scrollbar-width: none
+   隐藏, 用户没有任何提示。旧 ≤420px 规则是按 5 项校准的(新增秘钥/日志
+   后失效), 且 431~505px 区间无任何规则覆盖(边界带缺陷)。
+   这里隐藏图标(沿用 ≤940px 的既定处理)并收紧内边距, 6 项完整放进一行。 */
+@media (max-width: 520px) {
+  .app-shell nav a svg {
+    display: none;
+  }
+
   .app-shell nav a {
-    padding-inline: 8px;
-    gap: 5px;
-    font-size: 12.5px;
+    padding-inline: 10px;
+    font-size: 13px;
   }
 
   .app-shell .brand-name {
@@ -1436,6 +1445,14 @@ tbody tr:nth-child(n + 6) { animation-delay: 150ms; }
 
   .app-shell header > button {
     padding-inline: 10px;
+  }
+}
+
+/* 极窄屏(≤340px): 进一步收紧, 保证 6 项仍可容纳。 */
+@media (max-width: 340px) {
+  .app-shell nav a {
+    padding-inline: 7px;
+    font-size: 12px;
   }
 }
 
@@ -1476,9 +1493,10 @@ tbody tr:nth-child(n + 6) { animation-delay: 150ms; }
 
 .purge-task-card {
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-xl);
   padding: var(--space-3) var(--space-4);
-  background: var(--color-surface);
+  background: var(--color-bg-raised);
+  box-shadow: var(--shadow-xs);
 }
 
 .purge-task-card.is-active {
@@ -1514,7 +1532,7 @@ tbody tr:nth-child(n + 6) { animation-delay: 150ms; }
 .purge-progress {
   height: 8px;
   border-radius: var(--radius-pill);
-  background: var(--color-surface-secondary, rgba(0, 0, 0, 0.06));
+  background: var(--color-border);
   overflow: hidden;
 }
 
@@ -1522,7 +1540,7 @@ tbody tr:nth-child(n + 6) { animation-delay: 150ms; }
   height: 100%;
   background: var(--color-primary);
   border-radius: var(--radius-pill);
-  transition: width var(--dur-med, 300ms) var(--ease-out, ease);
+  transition: width 0.7s var(--ease-apple);
 }
 
 .purge-task-actions {
@@ -1595,6 +1613,6 @@ tbody tr:nth-child(n + 6) { animation-delay: 150ms; }
   padding: 0 var(--space-2);
   border-radius: var(--radius-sm);
   border: 1px solid var(--color-border);
-  background: var(--color-surface);
+  background: var(--color-bg-raised);
   color: var(--color-text);
 }
