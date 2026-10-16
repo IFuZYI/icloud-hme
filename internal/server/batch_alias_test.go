@@ -34,14 +34,16 @@ func TestBatchDeleteAliasesWaitsAndWritesLogs(t *testing.T) {
 		t.Fatalf("两次删除间隔 %v,小于要求 %v", elapsed, s.task.batchDelay)
 	}
 	logs := s.task.listLogs()
-	if len(logs) != 4 {
-		t.Fatalf("期望开始、两条结果、完成共 4 条日志,得到 %d: %#v", len(logs), logs)
+	// 日志策略(优化后): 开始 1 条 + 失败逐条 + 结束 1 条。
+	// 2 项全成功 → 开始 + 完成 = 2 条(成功项在完成条聚合计数)。
+	if len(logs) != 2 {
+		t.Fatalf("期望开始、完成共 2 条日志(成功项聚合),得到 %d: %#v", len(logs), logs)
 	}
 	joined := ""
 	for _, entry := range logs {
 		joined += entry.Message + "\n"
 	}
-	for _, expected := range []string{"批量删除开始", "a@icloud.com 删除成功", "b@icloud.com 删除成功", "批量删除完成"} {
+	for _, expected := range []string{"批量删除开始", "批量删除完成：成功 2"} {
 		if !strings.Contains(joined, expected) {
 			t.Fatalf("日志缺少 %q: %s", expected, joined)
 		}

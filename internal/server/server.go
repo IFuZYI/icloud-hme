@@ -56,6 +56,8 @@ type Server struct {
 	logins  *loginStore
 	// keys 是 API 秘钥管理器(脚本调用凭证; 文件为 <数据目录>/api_keys.json)。
 	keys *apikey.Manager
+	// purge 是邮件清理任务管理器(批量删除; 文件为 <数据目录>/purge_tasks.json)。
+	purge *purgeManager
 	// newLoginSession 创建登录会话;生产实现绑定 account.Manager,测试可注入 fake。
 	newLoginSession func(accountID string) (LoginSession, error)
 }
@@ -117,6 +119,23 @@ func newWithBackendE(be Backend, cfg Config) (*Server, error) {
 	}
 	s.keys = keys
 	s.task = newAutoTaskManager(cfg.AutoTaskFile, be)
+	// 清理任务存储: 与任务文件同目录(测试各自临时目录); 两者皆空 = 纯内存。
+	purgeFile := ""
+	if cfg.AutoTaskFile != "" {
+		purgeFile = filepath.Join(filepath.Dir(cfg.AutoTaskFile), "purge_tasks.json")
+	}
+	purgeMgr, err := newPurgeManager(purgeFile, nil)
+	if err != nil {
+		return nil, fmt.Errorf("加载清理任务文件失败: %w", err)
+	}
+	if mb, ok := be.(*managerBackend); ok {
+		purgeMgr.withClient = mb.mgr.WithMailClient
+	}
+	s.purge = purgeMgr
+	// 清理任务的审计日志接入任务日志(来源标注 purge)。
+	s.purge.logFn = func(taskID, level, format string, args ...any) {
+		_ = s.task.logWithCategory("purge", taskID, level, format, args...)
+	}
 	s.auth, _ = auth.NewManager(auth.Options{
 		Password: cfg.AdminPassword,
 		TTL:      cfg.SessionTTL,
@@ -221,6 +240,12 @@ func (s *Server) register() {
 
 			// ===== 核心接口 2: 读取邮件 =====
 			authed.GET("/inbox", s.listInboxHandler)
+			authed.POST("/inbox/purge/preview", csrfCheck(s.auth), s.purgePreviewHandler)
+			authed.POST("/inbox/purge", csrfCheck(s.auth), s.purgeCreateHandler)
+			authed.GET("/purge-tasks", s.listPurgeTasksHandler)
+			authed.POST("/purge-tasks/:id/pause", csrfCheck(s.auth), s.purgeTaskActionHandler("pause"))
+			authed.POST("/purge-tasks/:id/resume", csrfCheck(s.auth), s.purgeTaskActionHandler("resume"))
+			authed.POST("/purge-tasks/:id/cancel", csrfCheck(s.auth), s.purgeTaskActionHandler("cancel"))
 			authed.POST("/inbox/previews", csrfCheck(s.auth), s.fetchPreviewsHandler)
 			authed.GET("/inbox/:message_id", s.getMessageHandler)
 			authed.DELETE("/inbox/:message_id", csrfCheck(s.auth), s.deleteMessageHandler)
@@ -596,7 +621,9 @@ func (s *Server) batchAliasHandler(c *gin.Context) {
 	}
 
 	logID := "batch_alias_" + req.Action
-	if err := s.task.log(logID, "info", "批量%s开始：共 %d 个别名", actionName, len(req.Aliases)); err != nil {
+	// 日志策略: 开始 1 条 + 失败逐条 + 结束 1 条(成功项在结束条聚合计数)。
+	// 逐项写日志会让 200 项批量产生 202 次全文件重写; 聚合后通常 2-3 次。
+	if err := s.task.logWithCategory("batch_alias", logID, "info", "批量%s开始：共 %d 个别名", actionName, len(req.Aliases)); err != nil {
 		failCode(c, http.StatusInternalServerError, "INTERNAL_ERROR", "批量操作日志保存失败")
 		return
 	}
@@ -620,18 +647,14 @@ func (s *Server) batchAliasHandler(c *gin.Context) {
 		result := batchAliasResult{AnonymousID: item.AnonymousID, Email: item.Email, Success: err == nil}
 		if err != nil {
 			result.Error = err.Error()
-			if logErr := s.task.log(logID, "error", "%s %s失败：%v", item.Email, actionName, err); logErr != nil {
+			// 失败项逐条记录(排查需要明细)。
+			if logErr := s.task.logWithCategory("batch_alias", logID, "error", "%s %s失败：%v", item.Email, actionName, err); logErr != nil {
 				if loggingError == "" {
 					loggingError = logErr.Error()
 				}
 			}
 		} else {
 			succeeded++
-			if logErr := s.task.log(logID, "info", "%s %s成功", item.Email, actionName); logErr != nil {
-				if loggingError == "" {
-					loggingError = logErr.Error()
-				}
-			}
 		}
 		results = append(results, result)
 	}
@@ -640,7 +663,7 @@ func (s *Server) batchAliasHandler(c *gin.Context) {
 	if failed > 0 {
 		level = "error"
 	}
-	if err := s.task.log(logID, level, "批量%s完成：成功 %d，失败 %d", actionName, succeeded, failed); err != nil {
+	if err := s.task.logWithCategory("batch_alias", logID, level, "批量%s完成：成功 %d，失败 %d", actionName, succeeded, failed); err != nil {
 		if loggingError == "" {
 			loggingError = err.Error()
 		}

@@ -113,15 +113,6 @@ export interface AliasTask {
   last_error?: string
 }
 
-/** 自动任务运行日志(与 internal/server AliasTaskLog 契约一致) */
-export interface AliasTaskLog {
-  id: string
-  task_id: string
-  time: string
-  level: string
-  message: string
-}
-
 /** API 秘钥(与 internal/apikey.Key 契约一致) */
 export interface ApiKey {
   id: string
@@ -153,4 +144,43 @@ export interface PermissionGroup {
 export interface PermissionCatalog {
   groups: PermissionGroup[]
   permissions: Permission[]
+}
+
+/** 清理任务(与 internal/server PurgeTask 契约一致) */
+export interface PurgeTask {
+  id: string
+  account_id: string
+  account_name?: string
+  range_start: string
+  range_end: string
+  /** running|throttled|paused|done|failed|cancelled|interrupted */
+  status: string
+  total: number
+  processed: number
+  deleted: number
+  failed: number
+  current_message?: string
+  started_at: string
+  finished_at?: string
+  error?: string
+}
+
+/** 清理预览结果 */
+export interface PurgePreview {
+  total: number
+  folders: { folder: string; count: number }[]
+  estimated_seconds: number
+  range_start: string
+  range_end: string
+}
+
+/** 任务日志(与 internal/server AliasTaskLog 契约一致) */
+export interface AliasTaskLog {
+  id: string
+  task_id: string
+  time: string
+  level: string
+  message: string
+  /** auto_task|batch_alias|purge; 空 = 旧数据(auto_task) */
+  category?: string
 }

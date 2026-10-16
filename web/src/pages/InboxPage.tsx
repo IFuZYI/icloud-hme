@@ -6,7 +6,7 @@ import dayjs from 'dayjs'
 import 'dayjs/locale/zh-cn'
 import { request, ApiError } from '../api/client'
 import { fetchAccounts } from '../api/cache'
-import type { AccountSummary, Alias, FullMessage, InboxResult, InboxMessage } from '../api/types'
+import type { AccountSummary, Alias, FullMessage, InboxResult, InboxMessage, PurgePreview } from '../api/types'
 import AsyncState from '../components/AsyncState'
 import Dialog from '../components/Dialog'
 import ConfirmDialog from '../components/ConfirmDialog'
@@ -17,6 +17,14 @@ import { formatDateTime } from '../utils/datetime'
 import { IconAlert, IconCopy, IconKey, IconMail, IconRefresh, IconTrash } from '../components/icons'
 
 dayjs.locale('zh-cn')
+
+/** 清理预设: 标签 → 天数(从今天往前推)。 */
+const PURGE_PRESETS: { label: string; days: number }[] = [
+  { label: '3 天前', days: 3 },
+  { label: '7 天前', days: 7 },
+  { label: '1 个月前', days: 30 },
+  { label: '半年前', days: 180 },
+]
 
 /** 默认时间范围: 近 7 天(与后端 days 默认值一致)。 */
 function defaultDateRange(): [Dayjs, Dayjs] {
@@ -95,6 +103,14 @@ export default function InboxPage() {
   const [detailLoading, setDetailLoading] = useState(false)
   const [deleteFor, setDeleteFor] = useState<InboxMessage | null>(null)
   const [deleting, setDeleting] = useState(false)
+  // 批量清理: 对话框状态。
+  const [purgeOpen, setPurgeOpen] = useState(false)
+  const [purgeDays, setPurgeDays] = useState(7)
+  const [purgePreview, setPurgePreview] = useState<PurgePreview | null>(null)
+  const [purgePreviewing, setPurgePreviewing] = useState(false)
+  const [purgeConfirm, setPurgeConfirm] = useState(false)
+  const [purgeCreating, setPurgeCreating] = useState(false)
+  const [purgeError, setPurgeError] = useState('')
 
   const abortRef = useRef<AbortController | null>(null)
   // refreshOnceRef: 用户显式触发(查询/刷新/删除后)时置 true, 让下一次
@@ -219,6 +235,57 @@ export default function InboxPage() {
       show(err instanceof ApiError ? err.message : '删除邮件失败')
     } finally {
       setDeleting(false)
+    }
+  }
+
+  // ── 批量清理 ──────────────────────────────────────────────
+  // 流程: 打开对话框 → 选预设(3天/7天/1月/半年) → 预览统计 →
+  //       确认清理 → 二次确认(不可恢复警示) → 创建任务。
+  async function runPurgePreview(days: number) {
+    setPurgeDays(days)
+    setPurgePreview(null)
+    setPurgeError('')
+    setPurgePreviewing(true)
+    try {
+      const end = dayjs()
+      const start = dayjs().subtract(days, 'day').startOf('day')
+      const data = await request<PurgePreview>('/api/inbox/purge/preview', {
+        method: 'POST',
+        body: {
+          account_id: accountId,
+          range_start: start.format('YYYY-MM-DDTHH:mm:ssZ'),
+          range_end: end.format('YYYY-MM-DDTHH:mm:ssZ'),
+        },
+      })
+      setPurgePreview(data)
+    } catch (err) {
+      setPurgeError(err instanceof ApiError ? err.message : '预览失败')
+    } finally {
+      setPurgePreviewing(false)
+    }
+  }
+
+  async function createPurgeTask() {
+    if (!purgePreview) return
+    setPurgeCreating(true)
+    setPurgeError('')
+    try {
+      await request('/api/inbox/purge', {
+        method: 'POST',
+        body: {
+          account_id: accountId,
+          range_start: purgePreview.range_start,
+          range_end: purgePreview.range_end,
+        },
+      })
+      setPurgeConfirm(false)
+      setPurgeOpen(false)
+      setPurgePreview(null)
+      show('清理任务已创建，可在日志页查看进度')
+    } catch (err) {
+      setPurgeError(err instanceof ApiError ? err.message : '创建清理任务失败')
+    } finally {
+      setPurgeCreating(false)
     }
   }
 
@@ -353,6 +420,20 @@ export default function InboxPage() {
         <div className="inbox-title">
           <h2>收件箱</h2>
           <p>查看发往隐私别名的邮件，仅显示纯文本摘要</p>
+        </div>
+        <div className="inbox-header-actions">
+          <button
+            className="inbox-action"
+            onClick={() => {
+              setPurgePreview(null)
+              setPurgeError('')
+              setPurgeOpen(true)
+            }}
+            disabled={!accountId}
+          >
+            <IconTrash size={15} />
+            清理邮件
+          </button>
         </div>
       </div>
 
@@ -550,6 +631,77 @@ export default function InboxPage() {
         )}
       </Dialog>
       {deleteFor && <ConfirmDialog title="删除邮件" message="邮件将从收件箱中永久删除。" open busy={deleting} onClose={() => setDeleteFor(null)} onConfirm={() => void deleteMessage()} />}
+
+      {/* 批量清理: 选范围 → 预览 → 确认 → 二次确认 */}
+      <Dialog
+        title="清理邮件"
+        open={purgeOpen}
+        onClose={() => {
+          if (!purgeCreating) setPurgeOpen(false)
+        }}
+      >
+        {purgeError && <div className="alert-error" role="alert">{purgeError}</div>}
+        <p className="hint">选择时间范围，删除该范围之前的所有邮件（含垃圾文件夹）。操作不可恢复。</p>
+        <div className="purge-presets">
+          {PURGE_PRESETS.map((p) => (
+            <button
+              key={p.label}
+              type="button"
+              className={`inbox-action${purgeDays === p.days && purgePreview ? ' primary' : ''}`}
+              onClick={() => void runPurgePreview(p.days)}
+              disabled={purgePreviewing || purgeCreating}
+            >
+              {p.label}
+            </button>
+          ))}
+        </div>
+        {purgePreviewing && <p className="hint">统计中…</p>}
+        {purgePreview && (
+          <div className="purge-preview">
+            <p>
+              将删除 <strong>{purgePreview.total}</strong> 封邮件
+              {purgePreview.estimated_seconds > 0 && `（预计约 ${purgePreview.estimated_seconds} 秒）`}
+            </p>
+            {purgePreview.folders.length > 0 && (
+              <ul className="purge-folder-list">
+                {purgePreview.folders.map((f) => (
+                  <li key={f.folder}>
+                    {f.folder}：{f.count} 封
+                  </li>
+                ))}
+              </ul>
+            )}
+            {purgePreview.total === 0 && <p className="hint">该范围没有邮件可清理。</p>}
+          </div>
+        )}
+        <div className="form-actions">
+          <button type="button" onClick={() => setPurgeOpen(false)} disabled={purgeCreating}>
+            取消
+          </button>
+          <button
+            type="button"
+            className="primary"
+            onClick={() => setPurgeConfirm(true)}
+            disabled={!purgePreview || purgePreview.total === 0 || purgeCreating}
+          >
+            确认清理
+          </button>
+        </div>
+      </Dialog>
+
+      {purgeConfirm && (
+        <ConfirmDialog
+          title="确认清理"
+          message={`将永久删除 ${purgePreview?.total ?? 0} 封邮件，操作不可恢复。确认继续？`}
+          confirmLabel="确认删除"
+          open
+          busy={purgeCreating}
+          onClose={() => {
+            if (!purgeCreating) setPurgeConfirm(false)
+          }}
+          onConfirm={() => void createPurgeTask()}
+        />
+      )}
     </section>
   )
 }

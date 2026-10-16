@@ -76,6 +76,8 @@ type Server struct {
 	fetchCount    atomic.Int64
 	fetchSeqCount atomic.Int64
 	noopCount     atomic.Int64
+	storeCount    atomic.Int64
+	expungeCount  atomic.Int64
 }
 
 // ReceivedID 返回客户端是否发送过非空 ID 声明。
@@ -104,6 +106,12 @@ func (s *Server) FetchCount() int64 { return s.fetchCount.Load() }
 // FetchSeqCount 返回服务器收到的非 UID FETCH(序列号)命令总数,
 // 即回退扫描路径的扫箱次数(UID 快照断言用)。
 func (s *Server) FetchSeqCount() int64 { return s.fetchSeqCount.Load() }
+
+// StoreCount 返回服务器收到的 STORE / UID STORE 命令总数(批量删除分块断言用)。
+func (s *Server) StoreCount() int64 { return s.storeCount.Load() }
+
+// ExpungeCount 返回服务器收到的 EXPUNGE 命令总数(批量删除分块断言用)。
+func (s *Server) ExpungeCount() int64 { return s.expungeCount.Load() }
 
 // NewServer 启动一台进程内 IMAP 服务器, 测试结束自动关闭。
 func NewServer(t *testing.T, opts Options) *Server {
@@ -256,6 +264,12 @@ func (e *ext) Command(name string) server.HandlerFactory {
 			h.ReadOnly = readOnly
 			return h
 		}
+	case "STORE":
+		// 统计 STORE / UID STORE(批量删除分块断言)。
+		return func() server.Handler { return &storeHandler{ext: e} }
+	case "EXPUNGE":
+		// 统计 EXPUNGE(批量删除分块断言)。
+		return func() server.Handler { return &expungeHandler{ext: e} }
 	}
 	return nil
 }
@@ -333,6 +347,33 @@ func (h *fetchHandler) Handle(c server.Conn) error {
 func (h *fetchHandler) UidHandle(c server.Conn) error {
 	h.ext.srv.fetchCount.Add(1)
 	return h.Fetch.UidHandle(c)
+}
+
+// storeHandler 统计 STORE / UID STORE 命令数(批量删除分块断言)。
+type storeHandler struct {
+	ext *ext
+	server.Store
+}
+
+func (h *storeHandler) Handle(c server.Conn) error {
+	h.ext.srv.storeCount.Add(1)
+	return h.Store.Handle(c)
+}
+
+func (h *storeHandler) UidHandle(c server.Conn) error {
+	h.ext.srv.storeCount.Add(1)
+	return h.Store.UidHandle(c)
+}
+
+// expungeHandler 统计 EXPUNGE 命令数(批量删除分块断言)。
+type expungeHandler struct {
+	ext *ext
+	server.Expunge
+}
+
+func (h *expungeHandler) Handle(c server.Conn) error {
+	h.ext.srv.expungeCount.Add(1)
+	return h.Expunge.Handle(c)
 }
 
 // idHandler 记录并(可选)接受 ID 命令。

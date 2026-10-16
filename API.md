@@ -21,7 +21,7 @@ HTTP JSON API，所有接口返回统一格式：
 }
 ```
 
-**稳定错误码：** `AUTH_REQUIRED`、`INVALID_CREDENTIALS`、`RATE_LIMITED`、`CREATION_COOLDOWN`、`CREATION_LIMIT_REACHED`、`CSRF_INVALID`、`INVALID_API_KEY`、`PERMISSION_DENIED`、`ACCOUNT_NOT_ALLOWED`、`KEY_EXISTS`、`KEY_LIMIT_REACHED`、`KEY_NOT_FOUND`、`VALIDATION_ERROR`、`ACCOUNT_NOT_FOUND`、`OTP_REQUIRED`、`OTP_INVALID`、`UPSTREAM_UNAUTHORIZED`、`UPSTREAM_FAILURE`、`INTERNAL_ERROR`
+**稳定错误码：** `AUTH_REQUIRED`、`INVALID_CREDENTIALS`、`RATE_LIMITED`、`CREATION_COOLDOWN`、`CREATION_LIMIT_REACHED`、`CSRF_INVALID`、`INVALID_API_KEY`、`PERMISSION_DENIED`、`ACCOUNT_NOT_ALLOWED`、`PURGE_IN_PROGRESS`、`PURGE_NOT_FOUND`、`KEY_EXISTS`、`KEY_LIMIT_REACHED`、`KEY_NOT_FOUND`、`VALIDATION_ERROR`、`ACCOUNT_NOT_FOUND`、`OTP_REQUIRED`、`OTP_INVALID`、`UPSTREAM_UNAUTHORIZED`、`UPSTREAM_FAILURE`、`INTERNAL_ERROR`
 
 **安全约定：**
 
@@ -378,6 +378,97 @@ IMAP 不可用而回退到 Web API 时，响应会额外带 `warning` 字段说�
 
 `date` 取邮件 `Date` 头（缺失时回退 IMAP `INTERNALDATE`）；`days` 过滤与排序改用服务端收件时间 `INTERNALDATE`，因为 `Date` 由发件人填写，不可靠。
 
+### 14.1 批量清理邮件（按时间范围）
+
+**权限：** `inbox.purge`（与单封删除 `inbox.delete` 分离——批量清空风险量级不同，独立授权）。
+
+**时间粒度：** IMAP SEARCH 按「日」比较（RFC 3501），清理范围的自然粒度是**天**。
+
+**覆盖文件夹：** `INBOX`、`Junk`、`垃圾邮件`（与读信口径一致）。
+
+**风控设计（分块节流）：**
+- 每块 = 1×`UID STORE +FLAGS \Deleted`（整块 seqset，连续 UID 自动压缩为区间）+ 1×`EXPUNGE`，而非逐封删除——1 万封从 ~2 万次往返压到 ~40 次；
+- 块大小 500 封；块间间隔 3s + 0~2s 随机抖动；
+- 滚动 1 小时最多 20 块（1 万封），超出转 `throttled` 状态等待窗口滚动；
+- 失败单块重试 1 次，仍失败 → `paused`（记录错误，可从断点继续）；
+- 按账号并发：同账号同时最多 1 个任务，不同账号可并行。
+
+**预览（仅统计，不删除）：**
+
+```http
+POST /api/inbox/purge/preview
+X-CSRF-Token: <token>
+
+{"account_id":"acc_1","range_start":"2026-01-01T00:00:00Z","range_end":"2026-10-16T00:00:00Z"}
+```
+
+响应：
+
+```json
+{
+  "success": true,
+  "data": {
+    "total": 1234,
+    "folders": [{"folder":"INBOX","count":1200},{"folder":"Junk","count":34}],
+    "estimated_seconds": 8,
+    "range_start": "2026-01-01T00:00:00Z",
+    "range_end": "2026-10-16T00:00:00Z"
+  }
+}
+```
+
+**创建清理任务（异步执行）：**
+
+```http
+POST /api/inbox/purge
+X-CSRF-Token: <token>
+
+{"account_id":"acc_1","range_start":"...","range_end":"..."}
+```
+
+同账号已有活跃任务时返回 `409 PURGE_IN_PROGRESS`。
+
+**任务列表（秘钥按账号范围过滤）：**
+
+```http
+GET /api/purge-tasks
+```
+
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "id": "purge_a1b2c3d4e5f60718",
+      "account_id": "acc_1",
+      "account_name": "主账号",
+      "range_start": "2026-01-01T00:00:00Z",
+      "range_end": "2026-10-16T00:00:00Z",
+      "status": "running",
+      "total": 1234, "processed": 500, "deleted": 500, "failed": 0,
+      "current_message": "INBOX: 删除 500 封",
+      "started_at": "2026-10-16T09:00:00Z"
+    }
+  ]
+}
+```
+
+`status` 取值：`running`｜`throttled`（风控节流中）｜`paused`（失败/手动暂停）｜`done`｜`failed`｜`cancelled`｜`interrupted`（服务重启中断，可 resume）。
+
+**任务控制：**
+
+```http
+POST /api/purge-tasks/:id/pause
+POST /api/purge-tasks/:id/resume
+POST /api/purge-tasks/:id/cancel
+```
+
+任务不存在或不在秘钥账号范围内 → `404 PURGE_NOT_FOUND`（防存在性探测）。
+
+**持久化：** 任务存 `<数据目录>/purge_tasks.json`，保留最近 50 条；服务重启后运行中的任务标记 `interrupted`，可 resume 从断点继续。
+
+**注意：** `EXPUNGE` 是文件夹级操作（go-imap v1 无 UID EXPUNGE/UIDPLUS）——若其它客户端有「延迟 expunge」的待删邮件，会被一并清掉。这是标准 IMAP 行为，与单封删除路径一致。
+
 ### 15. 列出别名
 
 ```http
@@ -606,7 +697,7 @@ GET /api/permissions
 }
 ```
 
-**权限 ID 一览：** `accounts.list`、`accounts.write`、`aliases.list`、`aliases.create`、`aliases.write`、`tasks.list`、`tasks.write`、`inbox.list`、`inbox.get`、`inbox.previews`、`inbox.delete`、`system.reload`。
+**权限 ID 一览：** `accounts.list`、`accounts.write`、`aliases.list`、`aliases.create`、`aliases.write`、`tasks.list`、`tasks.write`、`inbox.list`、`inbox.get`、`inbox.previews`、`inbox.delete`、`inbox.purge`、`system.reload`。
 
 ---
 

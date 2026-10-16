@@ -53,6 +53,7 @@ var permissionCatalog = []Permission{
 	{ID: "inbox.get", Label: "读取邮件详情", Group: "inbox"},
 	{ID: "inbox.previews", Label: "读取邮件摘要", Group: "inbox"},
 	{ID: "inbox.delete", Label: "删除邮件", Group: "inbox"},
+	{ID: "inbox.purge", Label: "批量清理邮件（按时间范围）", Group: "inbox"},
 	// 系统
 	{ID: "system.reload", Label: "重载配置", Group: "system"},
 }
@@ -109,6 +110,12 @@ var protectedRouteList = []routePermission{
 	{"POST", "/inbox/previews", "inbox.previews"},
 	{"GET", "/inbox/:message_id", "inbox.get"},
 	{"DELETE", "/inbox/:message_id", "inbox.delete"},
+	{"POST", "/inbox/purge/preview", "inbox.purge"},
+	{"POST", "/inbox/purge", "inbox.purge"},
+	{"GET", "/purge-tasks", "inbox.purge"},
+	{"POST", "/purge-tasks/:id/pause", "inbox.purge"},
+	{"POST", "/purge-tasks/:id/resume", "inbox.purge"},
+	{"POST", "/purge-tasks/:id/cancel", "inbox.purge"},
 
 	// 系统
 	{"POST", "/reload", "system.reload"},

@@ -215,6 +215,9 @@ type AliasTaskLog struct {
 	Time    string `json:"time"`
 	Level   string `json:"level"`
 	Message string `json:"message"`
+	// Category 标识日志来源: auto_task / batch_alias / purge。
+	// 旧数据无该字段(空串), 读侧视作 auto_task(向后兼容)。
+	Category string `json:"category,omitempty"`
 }
 
 // now 与 rand 可注入，便于测试确定化。rand 返回 [0,1) 均匀随机数。

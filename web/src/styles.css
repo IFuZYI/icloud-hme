@@ -1465,3 +1465,102 @@ tbody tr:nth-child(n + 6) { animation-delay: 150ms; }
   white-space: nowrap;
   border: 0;
 }
+
+/* ─── 清理任务卡(日志页) ─── */
+.purge-task-cards {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+.purge-task-card {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-3) var(--space-4);
+  background: var(--color-surface);
+}
+
+.purge-task-card.is-active {
+  border-color: var(--color-primary);
+}
+
+.purge-task-card.is-paused {
+  border-color: var(--color-warning, #d97706);
+}
+
+.purge-task-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  margin-bottom: var(--space-2);
+}
+
+.purge-task-summary,
+.purge-task-detail {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+}
+
+.purge-task-detail {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  margin-top: var(--space-2);
+}
+
+.purge-progress {
+  height: 8px;
+  border-radius: var(--radius-pill);
+  background: var(--color-surface-secondary, rgba(0, 0, 0, 0.06));
+  overflow: hidden;
+}
+
+.purge-progress-fill {
+  height: 100%;
+  background: var(--color-primary);
+  border-radius: var(--radius-pill);
+  transition: width var(--dur-med, 300ms) var(--ease-out, ease);
+}
+
+.purge-task-actions {
+  display: flex;
+  gap: var(--space-3);
+  margin-top: var(--space-2);
+}
+
+/* ─── 清理对话框(收件箱) ─── */
+.purge-presets {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  margin: var(--space-3) 0;
+}
+
+.purge-folder-list {
+  margin: var(--space-2) 0;
+  padding-left: var(--space-4);
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+}
+
+/* ─── 日志类别筛选 ─── */
+.logs-filter {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+  font-size: var(--text-sm);
+}
+
+.logs-filter select {
+  min-height: 36px;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  color: var(--color-text);
+}

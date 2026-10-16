@@ -175,6 +175,11 @@ func (s *Server) requirePermission() gin.HandlerFunc {
 				failCode(c, http.StatusNotFound, "TASK_NOT_FOUND", "alias task not found: 任务不存在")
 				return
 			}
+			// 清理任务路由: 同上, 伪装与 handler 一致。
+			if strings.HasPrefix(c.FullPath(), "/api/purge-tasks/") {
+				failCode(c, http.StatusNotFound, "PURGE_NOT_FOUND", "清理任务不存在")
+				return
+			}
 			failCode(c, http.StatusForbidden, "ACCOUNT_NOT_ALLOWED", "API 秘钥无权访问该账号")
 			return
 		}
@@ -184,9 +189,11 @@ func (s *Server) requirePermission() gin.HandlerFunc {
 
 // resourceAccountFor 解析请求涉及的全部目标账号 ID, 覆盖两类来源:
 //
-//  1. 资源归属账号(优先)——任务路由(/api/alias-tasks/:id)的 :id 是任务 ID,
-//     必须查其真实 AccountID; 请求声明的 account_id 一律忽略, 否则攻击者
-//     可用「范围内 account_id + 他账号 task_id」越权(实测 DELETE -> 200)。
+//  1. 资源归属账号(优先)——任务路由的 :id 是任务 ID, 必须查其真实
+//     AccountID; 请求声明的 account_id 一律忽略, 否则攻击者可用
+//     「范围内 account_id + 他账号 task_id」越权(实测 DELETE -> 200)。
+//     - /api/alias-tasks/:id  → autoTaskManager.get
+//     - /api/purge-tasks/:id  → purgeManager.get
 //  2. 请求直接携带的账号 ID(query/body account_id, 账号路由 :id)。
 //
 // 关键: 无 :id 的路由(query/body 携带 account_id)必须校验**每个**来源,
@@ -205,6 +212,15 @@ func (s *Server) resourceAccountFor(c *gin.Context) []string {
 		}
 		// 任务不存在: 返回空交给 handler 404, 不落回 query/body 的
 		// 自述账号(否则又给了越权面)。
+		return nil
+	}
+	// 清理任务路由: 同上, 以清理任务真实归属为准。
+	if strings.HasPrefix(c.FullPath(), "/api/purge-tasks/") {
+		if id := strings.TrimSpace(c.Param("id")); id != "" {
+			if tk, ok := s.purge.get(id); ok {
+				return []string{tk.AccountID}
+			}
+		}
 		return nil
 	}
 	return accountScopeTargets(c)
