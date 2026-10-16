@@ -39,6 +39,7 @@ const logs = [
   { id: 'l1', task_id: 'auto_1', time: '2026-10-16T08:00:00Z', level: 'info', message: '自动任务日志', category: 'auto_task' },
   { id: 'l2', task_id: 'batch_alias_delete', time: '2026-10-16T08:10:00Z', level: 'info', message: '批量删除完成：成功 2，失败 0', category: 'batch_alias' },
   { id: 'l3', task_id: 'purge_1', time: '2026-10-16T08:20:00Z', level: 'info', message: '清理任务开始', category: 'purge' },
+  { id: 'l4', task_id: 'purge_2', time: '2026-10-16T09:05:00Z', level: 'info', message: '清理完成: 删除 1000 封', category: 'purge' },
 ]
 
 function renderPage() {
@@ -70,11 +71,57 @@ describe('LogsPage 清理任务与类别', () => {
     expect(screen.getAllByText('主账号').length).toBeGreaterThan(0)
   })
 
-  it('完成的任务显示摘要', async () => {
+  it('已完成任务的完整信息在日志详情里可见(不再占卡片区)', async () => {
     renderPage()
     await screen.findByRole('progressbar')
-    // done 任务显示「已删除 1000 封」摘要。
-    expect(screen.getByText(/已删除 1000 封/)).toBeInTheDocument()
+    // 卡片区只留运行中任务; done 任务的信息改由日志详情承载。
+    expect(screen.queryByText(/已删除 1000 封/)).not.toBeInTheDocument()
+    // 日志详情里可见(点 purge_2 行的查看详情)。
+    const user = userEvent.setup()
+    const table = screen.getByRole('table')
+    const rows = within(table).getAllByRole('row')
+    const purgeRow = rows.find((r) => within(r).queryByText('清理完成: 删除 1000 封'))
+    if (!purgeRow) throw new Error('未找到清理日志行')
+    await user.click(within(purgeRow).getByRole('button', { name: /查看/ }))
+    const dialog = await screen.findByRole('dialog')
+    expect(within(dialog).getByText(/已删除 1000 封/)).toBeInTheDocument()
+  })
+
+  it('已完成清理任务不显示为卡片(卡片区只留运行中任务)', async () => {
+    renderPage()
+    await screen.findByRole('progressbar')
+    // done 任务的摘要不应作为卡片出现(其信息改在日志详情里)。
+    expect(screen.queryByText(/已删除 1000 封/)).not.toBeInTheDocument()
+  })
+
+  it('清理日志的「查看详情」显示任务完整信息', async () => {
+    renderPage()
+    await screen.findByText('清理完成: 删除 1000 封')
+    const user = userEvent.setup()
+    // 找到 purge_2 日志行, 点它的查看详情。
+    const table = screen.getByRole('table')
+    const rows = within(table).getAllByRole('row')
+    const purgeRow = rows.find((r) => within(r).queryByText('清理完成: 删除 1000 封'))
+    if (!purgeRow) throw new Error('未找到清理日志行')
+    await user.click(within(purgeRow).getByRole('button', { name: /查看/ }))
+    const dialog = await screen.findByRole('dialog')
+    // 详情里应有任务级信息: 状态/账号/范围/删除数/完成时间。
+    expect(within(dialog).getByText('已完成')).toBeInTheDocument()
+    expect(within(dialog).getByText(/主账号/)).toBeInTheDocument()
+    expect(within(dialog).getByText(/已删除 1000 封/)).toBeInTheDocument()
+  })
+
+  it('非清理日志的详情不含任务区块', async () => {
+    renderPage()
+    await screen.findByText('自动任务日志')
+    const user = userEvent.setup()
+    const table = screen.getByRole('table')
+    const rows = within(table).getAllByRole('row')
+    const row = rows.find((r) => within(r).queryByText('自动任务日志'))
+    if (!row) throw new Error('未找到自动任务日志行')
+    await user.click(within(row).getByRole('button', { name: /查看/ }))
+    const dialog = await screen.findByRole('dialog')
+    expect(within(dialog).queryByText(/已删除/)).not.toBeInTheDocument()
   })
 
   it('日志表显示类别列', async () => {
@@ -84,7 +131,8 @@ describe('LogsPage 清理任务与类别', () => {
     const table = screen.getByRole('table')
     expect(within(table).getByText('自动任务')).toBeInTheDocument()
     expect(within(table).getByText('批量操作')).toBeInTheDocument()
-    expect(within(table).getByText('邮件清理')).toBeInTheDocument()
+    // 两条清理日志 → 「邮件清理」徽标出现多次。
+    expect(within(table).getAllByText('邮件清理').length).toBeGreaterThanOrEqual(1)
   })
 
   it('类别筛选: 选「邮件清理」只显示清理日志', async () => {
