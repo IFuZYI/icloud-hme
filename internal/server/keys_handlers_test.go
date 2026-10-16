@@ -191,6 +191,27 @@ func TestKeysUpdateValidation(t *testing.T) {
 	}
 }
 
+// 更新为空名称必须拒绝(与创建路径一致: 名称必填, 不允许被清空)。
+func TestKeysUpdateRejectsEmptyName(t *testing.T) {
+	f := &fakeBackend{}
+	s, ts := newTestServer(t, f)
+	session, csrf := login(t, ts, "admin-pass-2026-strong")
+	key := createTestKey(t, s, "accounts.list")
+
+	for _, body := range []string{`{"name":""}`, `{"name":"   "}`} {
+		req := sessionReq(t, serverURL(ts.URL), session, csrf, "PATCH", "/api/keys/"+key.ID, body)
+		code, raw, _ := do(t, req)
+		if code != 400 || !strings.Contains(raw, "VALIDATION_ERROR") {
+			t.Fatalf("空名称(%s)应 400 VALIDATION_ERROR, got %d %s", body, code, raw)
+		}
+	}
+	// 名称未被清空。
+	got, ok := s.keys.Get(key.ID)
+	if !ok || got.Name != "测试" {
+		t.Fatalf("名称应保持原值, got %q", got.Name)
+	}
+}
+
 // 权限目录接口返回分组与条目。
 func TestPermissionsCatalogEndpoint(t *testing.T) {
 	f := &fakeBackend{}

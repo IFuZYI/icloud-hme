@@ -15,11 +15,12 @@ function formatKeyTime(raw: string): string {
   return formatDateTime(d)
 }
 
-/** 秘钥脱敏: 保留 sk- 前缀与首尾各 2 位, 中间以省略号替代。
+/** 秘钥脱敏: 只对足够长的秘钥保留首尾各 4 位, 中间以省略号替代。
  *
- *  短秘钥(不足以脱敏)整体显示为固定掩码, 不泄露长度信息。 */
+ *  长度不足以安全脱敏(≤ 16)的秘钥整体显示为固定掩码——否则首尾各露 4 位
+ *  会暴露短秘钥的大部分内容(自定义秘钥下限 8 位)。 */
 function maskKey(key: string): string {
-  if (key.length <= 10) return '••••••••'
+  if (key.length <= 16) return '••••••••'
   return `${key.slice(0, 4)}••••${key.slice(-4)}`
 }
 
@@ -198,7 +199,7 @@ export default function KeysPage() {
           <h2>秘钥</h2>
           <p>为脚本创建 API 秘钥，每个秘钥可单独设置可访问的接口</p>
         </div>
-        <button className="keys-create-btn" onClick={openCreate}>
+        <button className="primary" onClick={openCreate}>
           <IconKey size={16} />
           创建秘钥
         </button>
@@ -258,14 +259,14 @@ export default function KeysPage() {
                       <span className="hint">从未使用</span>
                     )}
                   </td>
-                  <td className="row-actions">
+                  <td className="key-row-actions">
                     <button type="button" className="link-button" aria-label="编辑秘钥" onClick={() => openEdit(k)}>
                       编辑
                     </button>
                     <button type="button" className="link-button" aria-label="启用或停用秘钥" onClick={() => void toggleEnabled(k)}>
                       {k.enabled ? '停用' : '启用'}
                     </button>
-                    <button type="button" className="link-button danger-link" aria-label="删除秘钥" onClick={() => setDeleteTarget(k)}>
+                    <button type="button" className="link-button key-danger-link" aria-label="删除秘钥" onClick={() => setDeleteTarget(k)}>
                       删除
                     </button>
                   </td>
@@ -292,6 +293,7 @@ export default function KeysPage() {
             onChange={(e) => setForm((prev) => ({ ...prev, name: e.target.value }))}
             placeholder="如：签到脚本"
             autoComplete="off"
+            maxLength={64}
           />
         </div>
         {!editing && (
@@ -303,6 +305,7 @@ export default function KeysPage() {
               onChange={(e) => setForm((prev) => ({ ...prev, key: e.target.value }))}
               placeholder="留空自动生成"
               autoComplete="off"
+              maxLength={128}
             />
             <p className="hint">留空将自动生成 sk- 开头的 24 位随机秘钥；也可手动指定（8-128 位）。</p>
           </div>

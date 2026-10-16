@@ -27,4 +27,26 @@ describe('AppShell 导航', () => {
     const link = screen.getByRole('link', { name: /秘钥/ })
     expect(link).toHaveAttribute('href', '/keys')
   })
+
+  it('菜单顺序为 账号→别名→收件箱→自动任务→秘钥→日志', () => {
+    render(
+      <MemoryRouter initialEntries={['/accounts']}>
+        <AuthProvider>
+          <ToastProvider>
+            <AppShell />
+          </ToastProvider>
+        </AuthProvider>
+      </MemoryRouter>,
+    )
+    const nav = screen.getByRole('navigation', { name: '主导航' })
+    const hrefs = Array.from(nav.querySelectorAll('a')).map((a) => a.getAttribute('href'))
+    expect(hrefs).toEqual([
+      '/accounts',
+      '/aliases',
+      '/inbox',
+      '/alias-tasks',
+      '/keys',
+      '/logs',
+    ])
+  })
 })

@@ -85,6 +85,11 @@ func (s *Server) updateKeyHandler(c *gin.Context) {
 		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "参数错误: 请求体格式无效")
 		return
 	}
+	if req.Name != nil && strings.TrimSpace(*req.Name) == "" {
+		// 与创建路径一致: 名称必填, 不允许被清空(前端表单也要求非空)。
+		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "参数错误: name 不能为空")
+		return
+	}
 	if req.Permissions != nil {
 		if bad, valid := validatePermissions(*req.Permissions); !valid {
 			failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "参数错误: 未知权限 "+bad)

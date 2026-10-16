@@ -68,7 +68,10 @@ func New(mgr *account.Manager, cfg Config) (*Server, error) {
 	}); err != nil {
 		return nil, err
 	}
-	s := newWithBackend(&managerBackend{mgr: mgr}, cfg)
+	s, err := newWithBackendE(&managerBackend{mgr: mgr}, cfg)
+	if err != nil {
+		return nil, err
+	}
 	s.newLoginSession = func(accountID string) (LoginSession, error) {
 		return mgr.NewLoginSession(accountID)
 	}
@@ -76,7 +79,23 @@ func New(mgr *account.Manager, cfg Config) (*Server, error) {
 }
 
 // newWithBackend 创建 Server 并注入 Backend(测试使用内存 fake)。
+//
+// 测试经 AutoTaskFile 指向各自临时目录, 秘钥文件不存在 = 空集合, 加载必然
+// 成功; 若真失败(如目录不可写)说明测试环境异常, 直接 panic 暴露。
 func newWithBackend(be Backend, cfg Config) *Server {
+	s, err := newWithBackendE(be, cfg)
+	if err != nil {
+		panic("newWithBackend(测试构造): " + err.Error())
+	}
+	return s
+}
+
+// newWithBackendE 创建 Server 并注入 Backend; 秘钥文件损坏时返回错误。
+//
+// 必须返回错误而不是带 nil manager 继续运行: 损坏的 api_keys.json 会让
+// 每个带 X-API-Key 的请求在中间件里 nil 解引用(500)。生产路径(main.go)
+// 据此拒绝启动, 与损坏的 accounts.json 同语义。
+func newWithBackendE(be Backend, cfg Config) (*Server, error) {
 	if !cfg.Debug {
 		gin.SetMode(gin.ReleaseMode)
 	}
@@ -92,7 +111,11 @@ func newWithBackend(be Backend, cfg Config) *Server {
 	if keyFile == "" && cfg.AutoTaskFile != "" {
 		keyFile = filepath.Join(filepath.Dir(cfg.AutoTaskFile), "api_keys.json")
 	}
-	s.keys, _ = apikey.NewManager(keyFile)
+	keys, err := apikey.NewManager(keyFile)
+	if err != nil {
+		return nil, fmt.Errorf("加载秘钥文件失败: %w", err)
+	}
+	s.keys = keys
 	s.task = newAutoTaskManager(cfg.AutoTaskFile, be)
 	s.auth, _ = auth.NewManager(auth.Options{
 		Password: cfg.AdminPassword,
@@ -105,7 +128,7 @@ func newWithBackend(be Backend, cfg Config) *Server {
 	_ = s.r.SetTrustedProxies(nil)
 	s.register()
 	s.task.start()
-	return s
+	return s, nil
 }
 
 // Run 启动 HTTP 服务(阻塞)。收到 SIGINT/SIGTERM 后优雅停机:先停止接收新

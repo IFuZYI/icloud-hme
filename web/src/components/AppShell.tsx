@@ -47,20 +47,20 @@ export default function AppShell() {
             <IconAliases />
             别名
           </NavLink>
-          <NavLink to="/alias-tasks">
-            <IconClock />
-            自动任务
-          </NavLink>
-          <NavLink to="/logs">
-            日志
-          </NavLink>
           <NavLink to="/inbox">
             <IconInbox />
             收件箱
           </NavLink>
+          <NavLink to="/alias-tasks">
+            <IconClock />
+            自动任务
+          </NavLink>
           <NavLink to="/keys">
             <IconKey />
             秘钥
+          </NavLink>
+          <NavLink to="/logs">
+            日志
           </NavLink>
         </nav>
         <span className="spacer" />

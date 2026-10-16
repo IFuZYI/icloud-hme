@@ -27,29 +27,9 @@ func sessionIDFromCookie(c *gin.Context) string {
 	return ""
 }
 
-// requireSession 校验会话,失败返回 401/AUTH_REQUIRED。
-//
-// 保留为独立函数: 仅会话路径仍可能在特殊场景单独使用(当前注册表统一走
-// requireAuth 双模认证)。
-func requireSession(mgr *authManager) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		sessionID := sessionIDFromCookie(c)
-		if sessionID == "" {
-			slog.Debug("会话校验失败: 请求缺少会话 Cookie",
-				"path", c.Request.URL.Path, "method", c.Request.Method, "ip", c.ClientIP())
-			failCode(c, http.StatusUnauthorized, "AUTH_REQUIRED", "请先登录")
-			return
-		}
-		if _, ok := mgr.Validate(sessionID); !ok {
-			slog.Debug("会话校验失败: 会话不存在或已过期",
-				"path", c.Request.URL.Path, "method", c.Request.Method, "ip", c.ClientIP())
-			failCode(c, http.StatusUnauthorized, "AUTH_REQUIRED", "会话已失效,请重新登录")
-			return
-		}
-		c.Set("session_id", sessionID)
-		c.Next()
-	}
-}
+// requireSession 已并入 requireAuth(apikey_auth.go)的会话分支:
+// 双模认证统一在一条中间件里处理(秘钥优先, 否则会话), 避免两处会话校验
+// 逻辑漂移。本函数已删除。
 
 // setSessionCookie 设置会话 Cookie(固定属性:Path=/、HttpOnly、SameSite=Strict)。
 func setSessionCookie(c *gin.Context, sessionID string, expiresAt time.Time, secure bool) {

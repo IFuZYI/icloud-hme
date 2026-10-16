@@ -1,25 +1,20 @@
 /* 秘钥页面样式 */
 
-.keys-create-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-
 /* 秘钥列: 脱敏/明文 + 显示/复制按钮 */
 .key-cell {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   flex-wrap: wrap;
 }
 
 .key-value {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 0.85em;
+  font-size: var(--text-sm);
   padding: 2px 6px;
   border-radius: 6px;
-  background: var(--surface-2, rgba(127, 127, 127, 0.12));
+  background: var(--color-bg-subtle);
+  border: 1px solid var(--color-border);
   word-break: break-all;
 }
 
@@ -29,7 +24,7 @@
 
 /* 权限勾选分组 */
 .permission-group {
-  border: 1px solid var(--border, rgba(127, 127, 127, 0.3));
+  border: 1px solid var(--color-border);
   border-radius: 10px;
   padding: 10px 12px 12px;
   margin: 0 0 10px;
@@ -38,33 +33,63 @@
 
 .permission-group legend {
   padding: 0 6px;
-  font-size: 0.85em;
+  font-size: var(--text-sm);
   font-weight: 600;
 }
 
 .permission-item {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   padding: 4px 0;
   cursor: pointer;
   user-select: none;
+  font-size: var(--text-sm);
 }
 
 .permission-item input[type='checkbox'] {
   width: 16px;
   height: 16px;
-  accent-color: var(--accent, #0a84ff);
+  accent-color: var(--color-primary);
   cursor: pointer;
 }
 
-/* 行内操作按钮组 */
-.row-actions {
+/* 秘钥行内操作按钮组(独立类名: 全局 .row-actions 为胶囊按钮样式, 语义不同) */
+.key-row-actions {
   display: flex;
-  gap: 10px;
+  gap: var(--space-2);
   flex-wrap: wrap;
 }
 
-.danger-link {
-  color: var(--danger, #ff453a);
+/* 行内操作是纯文字链式按钮: 补足触控命中区(移动端手指可达)。
+   与项目移动端约定一致(aliases-ui.css 的 min-height: 44px)。 */
+.key-row-actions .link-button,
+.key-cell .link-button {
+  min-height: 40px;
+  padding-inline: 4px;
+}
+
+.key-danger-link {
+  color: var(--color-danger);
+}
+
+/* 移动端: 操作按钮与权限勾选项放大到触控友好的 44px(项目统一约定)。
+   秘钥列在窄屏改为纵向堆叠, 避免脱敏值 + 两个按钮挤成一行溢出。 */
+@media (max-width: 640px) {
+  .key-row-actions .link-button,
+  .key-cell .link-button {
+    min-height: 44px;
+    padding-inline: 8px;
+  }
+
+  .key-cell {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--space-1);
+  }
+
+  .permission-item {
+    min-height: 44px;
+    padding: 0;
+  }
 }

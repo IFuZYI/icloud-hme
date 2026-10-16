@@ -131,6 +131,23 @@ func TestAPIKeyBearerHeaderAccepted(t *testing.T) {
 	}
 }
 
+// Authorization 的 scheme 大小写不敏感(RFC 7235: auth-scheme 大小写不敏感):
+// 各类 HTTP 客户端/脚本可能发出 "bearer"/"BEARER" 前缀, 必须同样接受。
+func TestAPIKeyBearerSchemeCaseInsensitive(t *testing.T) {
+	f := &fakeBackend{}
+	s, ts := newTestServer(t, f)
+	key := createTestKey(t, s, "accounts.list")
+
+	for _, scheme := range []string{"bearer ", "BEARER ", "BeArEr "} {
+		req, _ := http.NewRequest("GET", ts.URL+"/api/accounts", nil)
+		req.Header.Set("Authorization", scheme+key.Key)
+		code, raw, _ := do(t, req)
+		if code == 401 || code == 403 {
+			t.Fatalf("scheme %q 应通过鉴权: %d %s", scheme, code, raw)
+		}
+	}
+}
+
 // 秘钥鉴权跳过 CSRF: 非 GET 请求不带 X-CSRF-Token 也应成功。
 func TestAPIKeySkipsCSRF(t *testing.T) {
 	f := &fakeBackend{}

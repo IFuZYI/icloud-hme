@@ -95,6 +95,24 @@ describe('KeysPage', () => {
     await waitFor(() => expect(writeText).toHaveBeenCalledWith('sk-abcdefghijklmnopqrstuvwx'))
   })
 
+  it('短秘钥整体脱敏, 不泄露字符', async () => {
+    // 自定义短秘钥(12 位): 首尾各露 4 位会暴露 8/12 字符, 必须整体掩码。
+    const shortKey = 'abcdefghijkl'
+    server.use(
+      http.get('/api/keys', () =>
+        HttpResponse.json({
+          success: true,
+          data: { count: 1, keys: [{ ...keys[0], id: 'key_short', key: shortKey }] },
+        }),
+      ),
+    )
+    renderPage()
+    await screen.findByText('脚本A')
+    expect(screen.queryByText(shortKey)).not.toBeInTheDocument()
+    expect(screen.queryByText(/abcd/)).not.toBeInTheDocument()
+    expect(screen.getByText('••••••••')).toBeInTheDocument()
+  })
+
   it('创建秘钥: 名称必填、秘钥可留空自动生成、权限按分组勾选', async () => {
     let created: unknown = null
     server.use(

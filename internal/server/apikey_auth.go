@@ -31,17 +31,22 @@ const (
 
 	// apiKeyHeader 是秘钥请求头(首选)。
 	apiKeyHeader = "X-API-Key"
-	// bearerPrefix 是 Authorization 头的 Bearer 前缀(标准脚本写法)。
-	bearerPrefix = "Bearer "
+	// bearerScheme 是 Authorization 头的 scheme(RFC 7235: 大小写不敏感)。
+	bearerScheme = "bearer"
 )
 
 // apiKeyFromRequest 提取请求中的秘钥: X-API-Key 优先, 其次 Authorization: Bearer。
+// scheme 大小写不敏感(RFC 7235), 兼容各类客户端发出的 "bearer"/"BEARER"。
 func apiKeyFromRequest(c *gin.Context) string {
 	if v := strings.TrimSpace(c.GetHeader(apiKeyHeader)); v != "" {
 		return v
 	}
-	if auth := c.GetHeader("Authorization"); strings.HasPrefix(auth, bearerPrefix) {
-		return strings.TrimSpace(strings.TrimPrefix(auth, bearerPrefix))
+	auth := c.GetHeader("Authorization")
+	// "Bearer <key>": 按第一个空格切分 scheme 与凭据。
+	if i := strings.IndexByte(auth, ' '); i > 0 {
+		if strings.EqualFold(strings.TrimSpace(auth[:i]), bearerScheme) {
+			return strings.TrimSpace(auth[i+1:])
+		}
 	}
 	return ""
 }
