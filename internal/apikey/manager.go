@@ -14,6 +14,7 @@ package apikey
 
 import (
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -182,7 +183,7 @@ func (m *Manager) saveLocked() error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(m.file), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(m.file), 0o700); err != nil {
 		return err
 	}
 	tmp := m.file + ".tmp"
@@ -396,27 +397,32 @@ func (m *Manager) Delete(id string) error {
 
 // Validate 校验秘钥: 命中且启用时返回记录并记录 last_used(节流写盘)。
 // 未知/停用/空串一律返回 false(对外不区分, 不泄露秘钥是否存在)。
+//
+// 恒定时间比较: 用手动秘钥时值可能低熵(8 位), 用 crypto/subtle 常量时间
+// 比较并扫完全表(不因匹配/不匹配提前中断), 减少时序侧信道。
 func (m *Manager) Validate(key, ip string) (Key, bool) {
 	if key == "" {
 		return Key{}, false
 	}
+	keyBytes := []byte(key)
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	var matched *Key
 	for _, k := range m.keys {
-		if k.Key != key {
-			continue
+		// 常量时间比较: 长度不等时 ConstantTimeCompare 返回 0, 不泄露前缀信息。
+		if subtle.ConstantTimeCompare([]byte(k.Key), keyBytes) == 1 {
+			matched = k
 		}
-		if !k.Enabled {
-			return Key{}, false
-		}
-		k.LastUsedAt = m.now().Format(time.RFC3339)
-		k.LastUsedIP = ip
-		if lastUsedPersistInterval <= 0 || m.now().Sub(m.lastPersist) >= lastUsedPersistInterval {
-			if err := m.saveLocked(); err == nil {
-				m.lastPersist = m.now()
-			}
-		}
-		return *k, true
 	}
-	return Key{}, false
+	if matched == nil || !matched.Enabled {
+		return Key{}, false
+	}
+	matched.LastUsedAt = m.now().Format(time.RFC3339)
+	matched.LastUsedIP = ip
+	if lastUsedPersistInterval <= 0 || m.now().Sub(m.lastPersist) >= lastUsedPersistInterval {
+		if err := m.saveLocked(); err == nil {
+			m.lastPersist = m.now()
+		}
+	}
+	return *matched, true
 }

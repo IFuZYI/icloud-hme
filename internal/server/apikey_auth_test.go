@@ -417,3 +417,116 @@ func TestAPIKeyAccountScopeChecksPathAccountID(t *testing.T) {
 		t.Fatalf("错误码应为 ACCOUNT_NOT_ALLOWED: %s", raw)
 	}
 }
+
+// ====================================================================
+// 空秘钥头: 存在但为空 → 视为使用秘钥(失败关闭), 不回退会话
+// ====================================================================
+//
+// 契约: X-API-Key 头「存在但为空」时不得静默降级为会话调用。
+// 理由: 调用方意图用秘钥(带了头), 空值应报错而非悄悄走 Cookie 路径——
+// 否则「脚本带空秘钥 + 浏览器恰好有会话」会通过, 削弱失败关闭语义。
+
+// 空 X-API-Key 头 + 有效会话 → 401(不回退会话)。
+func TestAPIKeyEmptyHeaderDoesNotFallbackToSession(t *testing.T) {
+	f := &fakeBackend{}
+	s, ts := newTestServer(t, f)
+	_ = s
+	session, _ := login(t, ts, "admin-pass-2026-strong")
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/accounts", nil)
+	req.Header.Set("X-API-Key", "") // 存在但为空
+	req.AddCookie(&http.Cookie{Name: "hme_session", Value: session})
+	code, raw, _ := do(t, req)
+	if code != 401 {
+		t.Fatalf("空秘钥头应 401(不回退会话), got %d %s", code, raw)
+	}
+	if !strings.Contains(raw, "INVALID_API_KEY") {
+		t.Fatalf("错误码应为 INVALID_API_KEY: %s", raw)
+	}
+}
+
+// 纯空格 X-API-Key 头同样不回退。
+func TestAPIKeyWhitespaceHeaderDoesNotFallback(t *testing.T) {
+	f := &fakeBackend{}
+	_, ts := newTestServer(t, f)
+	session, _ := login(t, ts, "admin-pass-2026-strong")
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/accounts", nil)
+	req.Header.Set("X-API-Key", "   ")
+	req.AddCookie(&http.Cookie{Name: "hme_session", Value: session})
+	code, _, _ := do(t, req)
+	if code != 401 {
+		t.Fatalf("空格秘钥头应 401, got %d", code)
+	}
+}
+
+// 空 Authorization: Bearer 头同样不回退。
+func TestAPIKeyEmptyBearerDoesNotFallback(t *testing.T) {
+	f := &fakeBackend{}
+	_, ts := newTestServer(t, f)
+	session, _ := login(t, ts, "admin-pass-2026-strong")
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/accounts", nil)
+	req.Header.Set("Authorization", "Bearer ")
+	req.AddCookie(&http.Cookie{Name: "hme_session", Value: session})
+	code, _, _ := do(t, req)
+	if code != 401 {
+		t.Fatalf("空 Bearer 应 401, got %d", code)
+	}
+}
+
+// 无秘钥头时仍正常回退会话(不误伤浏览器调用)。
+func TestNoKeyHeaderStillUsesSession(t *testing.T) {
+	f := &fakeBackend{}
+	_, ts := newTestServer(t, f)
+	session, _ := login(t, ts, "admin-pass-2026-strong")
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/accounts", nil)
+	req.AddCookie(&http.Cookie{Name: "hme_session", Value: session})
+	code, raw, _ := do(t, req)
+	if code == 401 {
+		t.Fatalf("无秘钥头应正常回退会话, got %d %s", code, raw)
+	}
+}
+
+// ====================================================================
+// N1: Content-Type 不得成为账号范围校验的旁路
+// ====================================================================
+//
+// 契约: 无论 Content-Type 是什么, 只要请求体能被解析出 account_id,
+// 就必须做账号范围校验。gin 的 ShouldBindJSON 忽略 Content-Type 照常
+// 绑定 JSON, 若中间件的提取依赖 Content-Type, 攻击者可用 text/plain
+// 携带 JSON body 绕过范围校验(实测 403->200 越权)。
+
+// text/plain + JSON body 不得绕过范围校验。
+func TestAPIKeyScopeIgnoresContentTypeForBodyAccountID(t *testing.T) {
+	f := &fakeBackend{}
+	s, ts := newTestServer(t, f)
+	key := createTestKeyScoped(t, s, []string{"acc_1"}, "aliases.write")
+
+	body := `{"account_id":"acc_2","action":"delete","aliases":[{"anonymous_id":"a1","email":"x@y.com"}]}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/aliases/batch", strings.NewReader(body))
+	req.Header.Set("Content-Type", "text/plain") // 伪装类型
+	req.Header.Set("X-API-Key", key.Key)
+
+	code, raw, _ := do(t, req)
+	if code != 403 || !strings.Contains(raw, "ACCOUNT_NOT_ALLOWED") {
+		t.Fatalf("text/plain 不得绕过范围校验, got %d %s", code, raw)
+	}
+}
+
+// 无 Content-Type 头 + JSON body 同样不得绕过。
+func TestAPIKeyScopeIgnoresMissingContentType(t *testing.T) {
+	f := &fakeBackend{}
+	s, ts := newTestServer(t, f)
+	key := createTestKeyScoped(t, s, []string{"acc_1"}, "aliases.write")
+
+	body := `{"account_id":"acc_2","action":"delete","aliases":[{"anonymous_id":"a1","email":"x@y.com"}]}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/aliases/batch", strings.NewReader(body))
+	req.Header.Set("X-API-Key", key.Key) // 不设 Content-Type
+
+	code, raw, _ := do(t, req)
+	if code != 403 || !strings.Contains(raw, "ACCOUNT_NOT_ALLOWED") {
+		t.Fatalf("缺 Content-Type 不得绕过范围校验, got %d %s", code, raw)
+	}
+}

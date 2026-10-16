@@ -50,8 +50,8 @@ func (s *Server) createKeyHandler(c *gin.Context) {
 		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "参数错误: 未知权限 "+bad)
 		return
 	}
-	if bad, valid := s.validateAccountIDs(req.AccountIDs); !valid {
-		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "参数错误: 账号不存在 "+bad)
+	if _, valid := s.validateAccountIDs(req.AccountIDs); !valid {
+		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "参数错误: 含不存在的账号")
 		return
 	}
 
@@ -106,8 +106,8 @@ func (s *Server) updateKeyHandler(c *gin.Context) {
 		}
 	}
 	if req.AccountIDs != nil {
-		if bad, valid := s.validateAccountIDs(*req.AccountIDs); !valid {
-			failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "参数错误: 账号不存在 "+bad)
+		if _, valid := s.validateAccountIDs(*req.AccountIDs); !valid {
+			failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "参数错误: 含不存在的账号")
 			return
 		}
 	}

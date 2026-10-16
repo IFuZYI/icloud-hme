@@ -448,3 +448,113 @@ func TestAccountIDsPersistAcrossReload(t *testing.T) {
 		t.Fatalf("重新加载后 AccountIDs = %v, want [acc_7]", got.AccountIDs)
 	}
 }
+
+// ====================================================================
+// 恒定时间秘钥比较
+// ====================================================================
+//
+// 契约: Validate 用 crypto/subtle 常量时间比较, 且不因某个秘钥匹配而提前
+// 中断遍历——时间开销与「匹配项位置」无关, 减少时序侧信道。
+// (手动秘钥允许 8 位, 低熵场景下时序信息更敏感。)
+
+// Validate 对整个列表做常量时间比较: 匹配项在头部与尾部时结果一致。
+func TestValidateMatchesRegardlessOfPosition(t *testing.T) {
+	m, _ := newTestManager(t)
+	// 先建若干秘钥, 目标秘钥放最后。
+	base := "sk-aaaaaaaaaaaaaaaaaaaaaa"
+	for i := 0; i < 5; i++ {
+		custom := string(rune('0'+i)) + base[3:]
+		if _, err := m.Create(CreateInput{Name: string(rune('a' + i)), Key: custom}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	target, err := m.Create(CreateInput{Name: "target", Key: "sk-bbbbbbbbbbbbbbbbbbbbbb"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok := m.Validate(target.Key, "127.0.0.1")
+	if !ok || got.ID != target.ID {
+		t.Fatalf("列表尾部秘钥应校验通过, ok=%v", ok)
+	}
+}
+
+// 停用秘钥排在启用秘钥之前时, 不得因提前短路而误放行后面的启用秘钥。
+func TestValidateDoesNotShortCircuitOnDisabled(t *testing.T) {
+	m, _ := newTestManager(t)
+	// 先建一个停用秘钥, 再建一个启用的。
+	disabled, err := m.Create(CreateInput{Name: "disabled", Key: "sk-cccccccccccccccccccccccc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	off := false
+	if _, err := m.Update(disabled.ID, UpdateInput{Enabled: &off}); err != nil {
+		t.Fatal(err)
+	}
+	enabled, err := m.Create(CreateInput{Name: "enabled", Key: "sk-dddddddddddddddddddddddd"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, ok := m.Validate(enabled.Key, "127.0.0.1"); !ok {
+		t.Fatal("启用秘钥应校验通过")
+	}
+	if _, ok := m.Validate(disabled.Key, "127.0.0.1"); ok {
+		t.Fatal("停用秘钥不应通过")
+	}
+}
+
+// 恒定时间比较的源码契约: Validate 必须使用 crypto/subtle 而非明文 == 比较。
+//
+// 理由: 手动秘钥允许 8 位低熵值, 明文字符串比较的短路时机可泄露前缀匹配
+// 长度。本测试钉住实现方式(无运行时行为面可观测), 靠变异验证保证非空洞
+// ——把 subtle 换回 == 会让本测试变红。
+func TestValidateUsesConstantTimeCompare(t *testing.T) {
+	src, err := os.ReadFile("manager.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(src)
+	if !strings.Contains(body, "subtle.ConstantTimeCompare(") {
+		t.Fatal("Validate 应使用 crypto/subtle 恒定时间比较, 未找到 subtle.ConstantTimeCompare")
+	}
+	// 防御性: Validate 函数体内不得出现明文的秘钥 == 比较。
+	start := strings.Index(body, "func (m *Manager) Validate(")
+	if start < 0 {
+		t.Fatal("未找到 Validate 函数")
+	}
+	fn := body[start:]
+	if end := strings.Index(fn, "\nfunc "); end > 0 {
+		fn = fn[:end]
+	}
+	if strings.Contains(fn, "k.Key ==") || strings.Contains(fn, "k.Key !=") {
+		t.Fatal("Validate 仍含明文秘钥比较(应全部走 ConstantTimeCompare)")
+	}
+}
+
+// ====================================================================
+// F8: 数据目录权限收紧
+// ====================================================================
+//
+// 契约: 秘钥目录创建时使用 0700(仅属主可进入)。秘钥文件本身 0600,
+// 目录若为 0755 则同机其他用户可列目录、推断文件名(内容仍受 0600 保护)。
+
+// 首次写入时创建的目录权限为 0700。
+func TestSaveCreatesDirWith0700(t *testing.T) {
+	base := t.TempDir()
+	nested := filepath.Join(base, "sub", "deep")
+	file := filepath.Join(nested, "api_keys.json")
+	m, err := NewManager(file)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if _, err := m.Create(CreateInput{Name: "x"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	info, err := os.Stat(nested)
+	if err != nil {
+		t.Fatalf("目录未创建: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o700 {
+		t.Fatalf("数据目录权限 = %o, want 0700", perm)
+	}
+}

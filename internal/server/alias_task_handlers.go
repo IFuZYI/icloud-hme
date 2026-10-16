@@ -2,8 +2,10 @@ package server
 
 import (
 	"errors"
-	"github.com/gin-gonic/gin"
+	"log/slog"
 	"net/http"
+
+	"github.com/gin-gonic/gin"
 )
 
 func aliasTaskFail(c *gin.Context, err error) {
@@ -17,8 +19,22 @@ func aliasTaskFail(c *gin.Context, err error) {
 	}
 }
 
-func (s *Server) listAliasTasksHandler(c *gin.Context)    { ok(c, s.task.list()) }
-func (s *Server) listAliasTaskLogsHandler(c *gin.Context) { ok(c, s.task.listLogs()) }
+// listAliasTasksHandler 处理 GET /api/alias-tasks。
+//
+// 秘钥路径: 只返回秘钥账号范围内的任务(防止受限秘钥读到其它账号的任务配置)。
+// 会话路径: 返回全部。
+func (s *Server) listAliasTasksHandler(c *gin.Context) {
+	tasks := s.task.list()
+	ok(c, filterTasksByKeyScope(c, tasks))
+}
+
+// listAliasTaskLogsHandler 处理 GET /api/alias-task-logs。
+//
+// 秘钥路径: 只返回秘钥账号范围内任务的日志; 会话路径返回全部。
+func (s *Server) listAliasTaskLogsHandler(c *gin.Context) {
+	logs := s.task.listLogs()
+	ok(c, filterTaskLogsByKeyScope(c, s, logs))
+}
 
 // cleanupAliasTaskLogsHandler 处理 POST /api/alias-task-logs/cleanup。
 //
@@ -36,7 +52,8 @@ func (s *Server) cleanupAliasTaskLogsHandler(c *gin.Context) {
 		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "参数错误: older_than_days 需为 1-3650 的整数")
 		return
 	}
-	deleted, remaining, err := s.task.cleanupLogs(*req.OlderThanDays)
+	scope, _ := keyScopeFromContext(c)
+	deleted, remaining, err := s.task.cleanupLogsScoped(*req.OlderThanDays, scope)
 	if err != nil {
 		failCode(c, http.StatusInternalServerError, "INTERNAL_ERROR", "日志清理失败: "+err.Error())
 		return
@@ -61,6 +78,15 @@ func (s *Server) updateAliasTaskHandler(c *gin.Context) {
 	if c.ShouldBindJSON(&in) != nil {
 		failCode(c, 400, "VALIDATION_ERROR", "参数错误")
 		return
+	}
+	// 范围受限秘钥不得改变任务归属账号: body 的 account_id 若存在且不在
+	// 秘钥白名单内, 拒绝——否则可把范围内任务迁移到范围外账号。
+	if scope, restricted := keyScopeFromContext(c); restricted {
+		if in.AccountID != "" && !containsString(scope, in.AccountID) {
+			slog.Debug("范围受限秘钥试图迁移任务归属", "account_id", in.AccountID)
+			failCode(c, http.StatusForbidden, "ACCOUNT_NOT_ALLOWED", "API 秘钥无权将任务迁移到该账号")
+			return
+		}
 	}
 	t, e := s.task.update(c.Param("id"), in)
 	if e != nil {

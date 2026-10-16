@@ -67,12 +67,31 @@ func (m *autoTaskManager) listLogs() []AliasTaskLog {
 //
 // 返回 (删除数, 剩余数, error)。
 func (m *autoTaskManager) cleanupLogs(olderThanDays int) (int, int, error) {
+	return m.cleanupLogsScoped(olderThanDays, nil)
+}
+
+// cleanupLogsScoped 按账号白名单清理日志。
+//
+//	scope 为 nil/空 → 清理全部账号(会话/空范围秘钥);
+//	scope 非空 → 只清理归属账号在白名单内的日志, 范围外账号的日志一律保留
+//	           (防止受限秘钥越权抹除范围外账号的活动痕迹)。
+//
+// 归属判定经 TaskID → 任务 AccountID; 归属未知(任务已删)的日志保守保留。
+func (m *autoTaskManager) cleanupLogsScoped(olderThanDays int, scope []string) (int, int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	cutoff := m.now().AddDate(0, 0, -olderThanDays)
+	restricted := len(scope) > 0
 	kept := make([]AliasTaskLog, 0, len(m.logs))
 	deleted := 0
 	for _, entry := range m.logs {
+		if restricted {
+			tk, ok := m.tasks[entry.TaskID]
+			if !ok || !containsString(scope, tk.AccountID) {
+				kept = append(kept, entry) // 范围外/归属未知: 保留
+				continue
+			}
+		}
 		ts, err := time.Parse(time.RFC3339, entry.Time)
 		if err != nil {
 			// 时间非法: 保守保留

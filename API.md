@@ -518,7 +518,13 @@ X-CSRF-Token: <token>
 
 **权限模型：** 每个秘钥独立授权，按接口粒度勾选（权限 ID 见 `GET /api/permissions`）。权限不足返回 `403 PERMISSION_DENIED`；秘钥无效/已停用返回 `401 INVALID_API_KEY`（与未知秘钥同文案，不泄露秘钥存在性）。
 
-**账号使用范围：** 每个秘钥可额外限定可访问的账号列表（`account_ids`）。**留空 = 全部账号**（默认，向后兼容）；**非空 = 白名单**，仅列出的账号可用。请求的目标账号不在范围内时返回 `403 ACCOUNT_NOT_ALLOWED`，且校验早于业务逻辑（不会到达 handler）。目标账号从 query `account_id`、JSON body `account_id`、或账号路由路径 `:id` 中提取。
+**账号使用范围：** 每个秘钥可额外限定可访问的账号列表（`account_ids`）。**留空 = 全部账号**（默认，向后兼容）；**非空 = 白名单**，仅列出的账号可用。请求的目标账号不在范围内时返回 `403 ACCOUNT_NOT_ALLOWED`，且校验早于业务逻辑（不会到达 handler）。目标账号从 query `account_id`、JSON body `account_id`、或账号路由路径 `:id` 中提取；**不依赖 `Content-Type`**（只要请求体能解析出 `account_id` 即校验，防止用 `text/plain` 携带 JSON body 绕过）。
+
+范围限制同时作用于**读**与**写**：
+- 列表接口只返回范围内数据：`/api/accounts`、`/api/aliases`、`/api/alias-tasks`、`/api/alias-task-logs`；
+- 单项操作按资源**真实归属账号**判定：`/api/alias-tasks/:id`（经任务 ID 解析归属）；
+- 日志清理 `/api/alias-task-logs/cleanup` 仅清理范围内账号的日志；
+- 为防枚举探测，任务路由上「范围外」与「不存在」统一返回 `404 TASK_NOT_FOUND`。
 
 ### 20. 列出秘钥
 

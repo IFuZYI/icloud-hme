@@ -364,3 +364,31 @@ func TestUpdateKeyAccountScope(t *testing.T) {
 		t.Fatalf("清空后 AccountIDs = %v, want 空", got.AccountIDs)
 	}
 }
+
+// ====================================================================
+// F6: 秘钥创建/更新错误文案不得回显账号 ID
+// ====================================================================
+//
+// 最小泄露: 错误响应不回声请求里提交的账号 ID 原文(避免把用户输入
+// 反射进响应/日志)。
+
+// 引用未知账号时错误文案不含该账号 ID 原文。
+func TestCreateKeyUnknownAccountDoesNotEchoID(t *testing.T) {
+	f := &fakeBackend{accounts: []account.Summary{{ID: "acc_1"}}}
+	_, ts := newTestServer(t, f)
+	session, csrf := login(t, ts, "admin-pass-2026-strong")
+
+	body := `{"name":"脚本A","permissions":["inbox.list"],"account_ids":["acc_1","secret_marker_zz9"]}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/keys", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-CSRF-Token", csrf)
+	req.AddCookie(&http.Cookie{Name: "hme_session", Value: session})
+
+	code, raw, _ := do(t, req)
+	if code != 400 {
+		t.Fatalf("未知账号应 400, got %d %s", code, raw)
+	}
+	if strings.Contains(raw, "secret_marker_zz9") {
+		t.Fatalf("错误响应回显了账号 ID 原文: %s", raw)
+	}
+}

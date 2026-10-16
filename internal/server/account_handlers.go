@@ -13,8 +13,22 @@ import (
 )
 
 // listAccountsHandler 处理 GET /api/accounts。
+//
+// 秘钥路径: 只返回秘钥账号范围内的账号摘要(防止受限秘钥读到范围外账号
+// 的名称/邮箱等)。会话路径: 返回全部。
 func (s *Server) listAccountsHandler(c *gin.Context) {
-	ok(c, s.be.ListAccounts())
+	accounts := s.be.ListAccounts()
+	scope, restricted := keyScopeFromContext(c)
+	if restricted {
+		filtered := make([]account.Summary, 0, len(accounts))
+		for _, a := range accounts {
+			if containsString(scope, a.ID) {
+				filtered = append(filtered, a)
+			}
+		}
+		accounts = filtered
+	}
+	ok(c, accounts)
 }
 
 // addAccountReq 是 POST /api/accounts 请求体。
