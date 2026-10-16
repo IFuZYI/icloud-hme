@@ -129,6 +129,8 @@ export interface ApiKey {
   key: string
   enabled: boolean
   permissions: string[]
+  /** 账号使用范围白名单; 空/缺省 = 全部账号。 */
+  account_ids?: string[]
   created_at: string
   last_used_at?: string
   last_used_ip?: string

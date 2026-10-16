@@ -352,3 +352,99 @@ func TestHasPermission(t *testing.T) {
 		t.Fatal("权限匹配错误")
 	}
 }
+
+// ====================================================================
+// 账号使用范围: Key.AccountIDs
+// ====================================================================
+//
+// 语义(失败关闭):
+//   - 空 AccountIDs = 不限账号(全部账号可用) —— 保持建秘钥时的默认行为;
+//   - 非空 AccountIDs = 白名单, 只有列出的账号可用;
+//   - 未列入白名单的账号一律拒绝(不允许空范围扩张成"全部")。
+
+// 空范围放行任意账号(向后兼容: 旧秘钥不受影响)。
+func TestAllowsAccountEmptyScopeMeansAll(t *testing.T) {
+	k := Key{}
+	for _, id := range []string{"acc_1", "acc_2", ""} {
+		if !k.AllowsAccount(id) {
+			t.Fatalf("空范围应对账号 %q 放行", id)
+		}
+	}
+}
+
+// 非空范围只放行列出的账号; 未列出的账号(含空串)必须拒绝。
+func TestAllowsAccountWhitelist(t *testing.T) {
+	k := Key{AccountIDs: []string{"acc_1", "acc_3"}}
+	if !k.AllowsAccount("acc_1") || !k.AllowsAccount("acc_3") {
+		t.Fatal("白名单内账号应放行")
+	}
+	if k.AllowsAccount("acc_2") {
+		t.Fatal("白名单外账号 acc_2 必须拒绝")
+	}
+	if k.AllowsAccount("") {
+		t.Fatal("空账号 ID 在白名单模式下必须拒绝(不能当作通配)")
+	}
+}
+
+// 创建时带账号范围应被保存并去重。
+func TestCreateStoresAccountIDs(t *testing.T) {
+	m, _ := newTestManager(t)
+	rec, err := m.Create(CreateInput{
+		Name:        "脚本A",
+		Permissions: []string{"inbox.list"},
+		AccountIDs:  []string{"acc_1", "acc_2", "acc_1"},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if len(rec.AccountIDs) != 2 {
+		t.Fatalf("AccountIDs = %v, want 去重后 2 项", rec.AccountIDs)
+	}
+	got, _ := m.Get(rec.ID)
+	if len(got.AccountIDs) != 2 {
+		t.Fatalf("Get 后 AccountIDs = %v, want 2 项", got.AccountIDs)
+	}
+}
+
+// 账号范围可经 Update 修改; nil 保持不变, 显式空切片清空为"全部"。
+func TestUpdateAccountIDs(t *testing.T) {
+	m, _ := newTestManager(t)
+	rec, _ := m.Create(CreateInput{Name: "x", AccountIDs: []string{"acc_1"}})
+
+	// nil: 不变
+	got, err := m.Update(rec.ID, UpdateInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.AccountIDs) != 1 || got.AccountIDs[0] != "acc_1" {
+		t.Fatalf("nil 更新后 AccountIDs = %v, want [acc_1]", got.AccountIDs)
+	}
+
+	// 显式空切片: 清空 = 全部
+	empty := []string{}
+	got, err = m.Update(rec.ID, UpdateInput{AccountIDs: &empty})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.AccountIDs) != 0 {
+		t.Fatalf("清空后 AccountIDs = %v, want 空(全部)", got.AccountIDs)
+	}
+}
+
+// 账号范围需持久化, 重新加载后仍然生效。
+func TestAccountIDsPersistAcrossReload(t *testing.T) {
+	m, file := newTestManager(t)
+	rec, _ := m.Create(CreateInput{Name: "x", AccountIDs: []string{"acc_7"}})
+
+	reloaded, err := NewManager(file)
+	if err != nil {
+		t.Fatalf("重新加载: %v", err)
+	}
+	got, ok := reloaded.Get(rec.ID)
+	if !ok {
+		t.Fatal("重新加载后找不到秘钥")
+	}
+	if len(got.AccountIDs) != 1 || got.AccountIDs[0] != "acc_7" {
+		t.Fatalf("重新加载后 AccountIDs = %v, want [acc_7]", got.AccountIDs)
+	}
+}

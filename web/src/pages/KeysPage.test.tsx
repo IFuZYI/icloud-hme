@@ -244,4 +244,83 @@ describe('KeysPage', () => {
     renderPage()
     expect(await screen.findByText('读取失败')).toBeInTheDocument()
   })
+
+  it('创建对话框: 可选择账号使用范围, 随请求提交 account_ids', async () => {
+    let created: Record<string, unknown> | null = null
+    server.use(
+      http.get('/api/accounts', () =>
+        HttpResponse.json({
+          success: true,
+          data: {
+            count: 2,
+            accounts: [
+              { id: 'acc_1', name: '主账号', real_email: 'a@x.com', status: 'active' },
+              { id: 'acc_2', name: '备用账号', real_email: 'b@x.com', status: 'active' },
+            ],
+          },
+        }),
+      ),
+      http.post('/api/keys', async ({ request }) => {
+        created = (await request.json()) as Record<string, unknown>
+        return HttpResponse.json({ success: true, data: keys[0] })
+      }),
+    )
+    const user = userEvent.setup()
+    renderPage()
+    await screen.findByText('脚本A')
+
+    await user.click(screen.getByRole('button', { name: /创建秘钥/ }))
+    const dialog = await screen.findByRole('dialog', { name: '创建秘钥' })
+    await user.type(within(dialog).getByLabelText('名称'), '范围脚本')
+
+    // 账号范围区域: 勾选一个账号
+    await user.click(await within(dialog).findByLabelText(/主账号/))
+    await user.click(within(dialog).getByRole('button', { name: /保存|创建/ }))
+
+    await waitFor(() => expect(created).not.toBeNull())
+    expect(created!.account_ids).toEqual(['acc_1'])
+  })
+
+  it('创建对话框: 不选账号 = 全部账号(提交空数组)', async () => {
+    let created: Record<string, unknown> | null = null
+    server.use(
+      http.get('/api/accounts', () =>
+        HttpResponse.json({ success: true, data: { count: 1, accounts: [{ id: 'acc_1', name: '主账号' }] } }),
+      ),
+      http.post('/api/keys', async ({ request }) => {
+        created = (await request.json()) as Record<string, unknown>
+        return HttpResponse.json({ success: true, data: keys[0] })
+      }),
+    )
+    const user = userEvent.setup()
+    renderPage()
+    await screen.findByText('脚本A')
+    await user.click(screen.getByRole('button', { name: /创建秘钥/ }))
+    const dialog = await screen.findByRole('dialog', { name: '创建秘钥' })
+    await user.type(within(dialog).getByLabelText('名称'), '全部账号脚本')
+    await user.click(within(dialog).getByRole('button', { name: /保存|创建/ }))
+    await waitFor(() => expect(created).not.toBeNull())
+    expect(created!.account_ids).toEqual([])
+  })
+
+  it('列表展示账号范围(全部 / N 个账号)', async () => {
+    server.use(
+      http.get('/api/keys', () =>
+        HttpResponse.json({
+          success: true,
+          data: {
+            count: 2,
+            keys: [
+              { ...keys[0], id: 'k_all', account_ids: undefined },
+              { ...keys[1], id: 'k_scoped', account_ids: ['acc_1', 'acc_2'] },
+            ],
+          },
+        }),
+      ),
+    )
+    renderPage()
+    await screen.findByText('脚本A')
+    expect(screen.getByText('全部账号')).toBeInTheDocument()
+    expect(screen.getByText('2 个账号')).toBeInTheDocument()
+  })
 })

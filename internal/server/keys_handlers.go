@@ -29,11 +29,13 @@ type createKeyReq struct {
 	Name        string   `json:"name"`
 	Key         string   `json:"key"`
 	Permissions []string `json:"permissions"`
+	// AccountIDs 是账号使用范围(空 = 全部账号)。
+	AccountIDs []string `json:"account_ids"`
 }
 
 // createKeyHandler 创建秘钥。
 //
-//	POST /api/keys  {"name":"脚本A","key":"可留空","permissions":["inbox.list"]}
+//	POST /api/keys  {"name":"脚本A","key":"可留空","permissions":["inbox.list"],"account_ids":["acc_1"]}
 func (s *Server) createKeyHandler(c *gin.Context) {
 	var req createKeyReq
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -48,11 +50,16 @@ func (s *Server) createKeyHandler(c *gin.Context) {
 		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "参数错误: 未知权限 "+bad)
 		return
 	}
+	if bad, valid := s.validateAccountIDs(req.AccountIDs); !valid {
+		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "参数错误: 账号不存在 "+bad)
+		return
+	}
 
 	rec, err := s.keys.Create(apikey.CreateInput{
 		Name:        req.Name,
 		Key:         req.Key,
 		Permissions: req.Permissions,
+		AccountIDs:  req.AccountIDs,
 	})
 	switch {
 	case errors.Is(err, apikey.ErrKeyExists):
@@ -72,10 +79,12 @@ func (s *Server) createKeyHandler(c *gin.Context) {
 type updateKeyReq struct {
 	Name        *string   `json:"name"`
 	Permissions *[]string `json:"permissions"`
-	Enabled     *bool     `json:"enabled"`
+	// AccountIDs 为 nil 时不变; 指向空数组清空(= 全部账号)。
+	AccountIDs *[]string `json:"account_ids"`
+	Enabled    *bool     `json:"enabled"`
 }
 
-// updateKeyHandler 更新秘钥的名称/权限/启用状态(秘钥值不可变)。
+// updateKeyHandler 更新秘钥的名称/权限/账号范围/启用状态(秘钥值不可变)。
 //
 //	PATCH /api/keys/:id
 func (s *Server) updateKeyHandler(c *gin.Context) {
@@ -96,10 +105,17 @@ func (s *Server) updateKeyHandler(c *gin.Context) {
 			return
 		}
 	}
+	if req.AccountIDs != nil {
+		if bad, valid := s.validateAccountIDs(*req.AccountIDs); !valid {
+			failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "参数错误: 账号不存在 "+bad)
+			return
+		}
+	}
 
 	rec, err := s.keys.Update(id, apikey.UpdateInput{
 		Name:        req.Name,
 		Permissions: req.Permissions,
+		AccountIDs:  req.AccountIDs,
 		Enabled:     req.Enabled,
 	})
 	switch {
@@ -137,4 +153,29 @@ func (s *Server) listPermissionsHandler(c *gin.Context) {
 		"groups":      permissionGroups,
 		"permissions": permissionCatalog,
 	})
+}
+
+// validateAccountIDs 校验账号范围里的每个 ID 都对应一个已存在账号。
+//
+// 拒绝未知账号: 防止秘钥绑定了不存在/已删除的账号 ID, 导致面板显示
+// 幽灵条目、或范围判定出现意外放行。空列表合法(不限账号)。
+// 第二个返回值 false 时, 第一个返回值为第一个不存在的 ID。
+func (s *Server) validateAccountIDs(ids []string) (string, bool) {
+	if len(ids) == 0 {
+		return "", true
+	}
+	known := map[string]bool{}
+	for _, acc := range s.be.ListAccounts() {
+		known[acc.ID] = true
+	}
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue // 空串由 normalize 阶段丢弃, 不算未知账号
+		}
+		if !known[id] {
+			return id, false
+		}
+	}
+	return "", true
 }

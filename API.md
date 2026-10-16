@@ -21,7 +21,7 @@ HTTP JSON API，所有接口返回统一格式：
 }
 ```
 
-**稳定错误码：** `AUTH_REQUIRED`、`INVALID_CREDENTIALS`、`RATE_LIMITED`、`CREATION_COOLDOWN`、`CREATION_LIMIT_REACHED`、`CSRF_INVALID`、`INVALID_API_KEY`、`PERMISSION_DENIED`、`KEY_EXISTS`、`KEY_LIMIT_REACHED`、`KEY_NOT_FOUND`、`VALIDATION_ERROR`、`ACCOUNT_NOT_FOUND`、`OTP_REQUIRED`、`OTP_INVALID`、`UPSTREAM_UNAUTHORIZED`、`UPSTREAM_FAILURE`、`INTERNAL_ERROR`
+**稳定错误码：** `AUTH_REQUIRED`、`INVALID_CREDENTIALS`、`RATE_LIMITED`、`CREATION_COOLDOWN`、`CREATION_LIMIT_REACHED`、`CSRF_INVALID`、`INVALID_API_KEY`、`PERMISSION_DENIED`、`ACCOUNT_NOT_ALLOWED`、`KEY_EXISTS`、`KEY_LIMIT_REACHED`、`KEY_NOT_FOUND`、`VALIDATION_ERROR`、`ACCOUNT_NOT_FOUND`、`OTP_REQUIRED`、`OTP_INVALID`、`UPSTREAM_UNAUTHORIZED`、`UPSTREAM_FAILURE`、`INTERNAL_ERROR`
 
 **安全约定：**
 
@@ -518,6 +518,8 @@ X-CSRF-Token: <token>
 
 **权限模型：** 每个秘钥独立授权，按接口粒度勾选（权限 ID 见 `GET /api/permissions`）。权限不足返回 `403 PERMISSION_DENIED`；秘钥无效/已停用返回 `401 INVALID_API_KEY`（与未知秘钥同文案，不泄露秘钥存在性）。
 
+**账号使用范围：** 每个秘钥可额外限定可访问的账号列表（`account_ids`）。**留空 = 全部账号**（默认，向后兼容）；**非空 = 白名单**，仅列出的账号可用。请求的目标账号不在范围内时返回 `403 ACCOUNT_NOT_ALLOWED`，且校验早于业务逻辑（不会到达 handler）。目标账号从 query `account_id`、JSON body `account_id`、或账号路由路径 `:id` 中提取。
+
 ### 20. 列出秘钥
 
 ```http
@@ -538,6 +540,7 @@ GET /api/keys
         "key": "sk-eAWxxxxxxxxxxxxxxxxxxxxHBwr",
         "enabled": true,
         "permissions": ["inbox.list"],
+        "account_ids": ["acc_ba6fcc58b77b586a"],
         "created_at": "2026-10-15T19:56:29+08:00",
         "last_used_at": "2026-10-15T20:01:00+08:00",
         "last_used_ip": "192.168.1.5"
@@ -553,11 +556,12 @@ GET /api/keys
 POST /api/keys
 X-CSRF-Token: <token>
 
-{"name":"签到脚本","key":"","permissions":["inbox.list","inbox.get"]}
+{"name":"签到脚本","key":"","permissions":["inbox.list","inbox.get"],"account_ids":["acc_ba6fcc58b77b586a"]}
 ```
 
 - `name` 必填；`key` 留空自动生成 `sk-` + 24 位随机字符（大小写字母+数字），手动指定时要求 8–128 位可打印 ASCII（不含空格）且全局唯一
 - `permissions` 为权限 ID 列表（可空 = 无任何权限）；未知权限 ID 直接 `400 VALIDATION_ERROR`
+- `account_ids` 为账号使用范围（**空/缺省 = 全部账号**）；引用不存在的账号返回 `400 VALIDATION_ERROR`（不做幽灵绑定）
 - 重复秘钥 `409 KEY_EXISTS`；数量达上限（100）`409 KEY_LIMIT_REACHED`
 
 ### 22. 更新秘钥
@@ -566,10 +570,10 @@ X-CSRF-Token: <token>
 PATCH /api/keys/:id
 X-CSRF-Token: <token>
 
-{"name":"新名字","permissions":["inbox.list"],"enabled":false}
+{"name":"新名字","permissions":["inbox.list"],"account_ids":["acc_1","acc_2"],"enabled":false}
 ```
 
-字段均可选（缺省不变）；**秘钥值不可修改**（需要换值请删除重建）。不存在 `404 KEY_NOT_FOUND`。
+字段均可选（缺省不变）；**秘钥值不可修改**（需要换值请删除重建）。`account_ids` 传空数组 `[]` 表示清空为「全部账号」；`account_ids` 为 null/缺省则不变。不存在 `404 KEY_NOT_FOUND`。
 
 ### 23. 删除秘钥
 
@@ -649,8 +653,9 @@ curl -H "X-API-Key: $KEY" "$BASE/api/inbox?account_id=acc_1&limit=10"
 curl -H "Authorization: Bearer $KEY" "$BASE/api/accounts"
 
 # 3. 权限不足/秘钥无效的区分:
-#    403 PERMISSION_DENIED = 秘钥有效但未勾选该接口
-#    401 INVALID_API_KEY   = 秘钥错误或已停用(删除/停用后立即失效)
+#    403 PERMISSION_DENIED  = 秘钥有效但未勾选该接口
+#    403 ACCOUNT_NOT_ALLOWED = 秘钥有效但该账号不在其账号使用范围内
+#    401 INVALID_API_KEY    = 秘钥错误或已停用(删除/停用后立即失效)
 ```
 
 ---

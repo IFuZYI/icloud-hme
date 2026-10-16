@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { ApiError, request } from '../api/client'
 import { formatDateTime } from '../utils/datetime'
 import { copyText } from '../utils/clipboard'
-import type { ApiKey, PermissionCatalog } from '../api/types'
+import type { ApiKey, AccountSummary, PermissionCatalog } from '../api/types'
 import Dialog from '../components/Dialog'
 import ConfirmDialog from '../components/ConfirmDialog'
 import { useToast } from '../components/ToastProvider'
@@ -29,19 +29,28 @@ interface KeyForm {
   name: string
   key: string
   permissions: Set<string>
+  /** 账号使用范围; 空集合 = 全部账号。 */
+  accountIDs: Set<string>
 }
 
 function emptyForm(): KeyForm {
-  return { name: '', key: '', permissions: new Set() }
+  return { name: '', key: '', permissions: new Set(), accountIDs: new Set() }
 }
 
 function formFromKey(k: ApiKey): KeyForm {
-  return { name: k.name, key: k.key, permissions: new Set(k.permissions) }
+  return {
+    name: k.name,
+    key: k.key,
+    permissions: new Set(k.permissions),
+    accountIDs: new Set(k.account_ids ?? []),
+  }
 }
 
 export default function KeysPage() {
   const [keys, setKeys] = useState<ApiKey[]>([])
   const [catalog, setCatalog] = useState<PermissionCatalog>({ groups: [], permissions: [] })
+  // 账号列表(供账号范围选择; 与账号页同源)。
+  const [accounts, setAccounts] = useState<AccountSummary[]>([])
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
   // 展开查看的秘钥 ID 集合(默认全部脱敏)。
@@ -76,6 +85,14 @@ export default function KeysPage() {
       })
       .catch(() => {
         // 权限目录加载失败不阻塞列表; 对话框里会提示
+      })
+    // 账号列表供账号范围勾选; 失败不阻塞(选择区显示空)。
+    request<{ accounts: AccountSummary[] }>('/api/accounts')
+      .then((data) => {
+        if (!cancelled) setAccounts(data.accounts ?? [])
+      })
+      .catch(() => {
+        // 账号加载失败: 账号范围选择区为空, 秘钥仍可创建(默认全部账号)
       })
     return () => {
       cancelled = true
@@ -114,6 +131,15 @@ export default function KeysPage() {
     })
   }
 
+  function toggleAccount(id: string) {
+    setForm((prev) => {
+      const next = new Set(prev.accountIDs)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return { ...prev, accountIDs: next }
+    })
+  }
+
   async function submitForm() {
     if (submitting) return
     const name = form.name.trim()
@@ -125,17 +151,18 @@ export default function KeysPage() {
     setFormError('')
     try {
       const permissions = [...form.permissions]
+      const account_ids = [...form.accountIDs]
       if (dialog?.editing) {
         await request(`/api/keys/${encodeURIComponent(dialog.editing.id)}`, {
           method: 'PATCH',
-          body: { name, permissions },
+          body: { name, permissions, account_ids },
         })
         show('秘钥已更新')
       } else {
         // 秘钥留空 = 服务端自动生成(sk- + 24 位随机字符)。
         await request('/api/keys', {
           method: 'POST',
-          body: { name, key: form.key.trim(), permissions },
+          body: { name, key: form.key.trim(), permissions, account_ids },
         })
         show('秘钥已创建')
       }
@@ -216,6 +243,7 @@ export default function KeysPage() {
                 <th>名称</th>
                 <th>秘钥</th>
                 <th>权限</th>
+                <th>账号范围</th>
                 <th>状态</th>
                 <th>最近使用</th>
                 <th>操作</th>
@@ -247,6 +275,11 @@ export default function KeysPage() {
                     </button>
                   </td>
                   <td>{k.permissions.length > 0 ? `${k.permissions.length} 项` : '无权限'}</td>
+                  <td>
+                    {!k.account_ids || k.account_ids.length === 0
+                      ? '全部账号'
+                      : `${k.account_ids.length} 个账号`}
+                  </td>
                   <td>
                     <span className={k.enabled ? 'badge badge-active' : 'badge badge-neutral'}>
                       {k.enabled ? '已启用' : '已停用'}
@@ -310,6 +343,25 @@ export default function KeysPage() {
             <p className="hint">留空将自动生成 sk- 开头的 24 位随机秘钥；也可手动指定（8-128 位）。</p>
           </div>
         )}
+        <div className="form-field">
+          <span className="field-label">账号使用范围</span>
+          <p className="hint">
+            不选 = 全部账号；勾选后仅限选定的账号可用。
+          </p>
+          {accounts.length === 0 && <p className="hint">暂无账号或加载中…</p>}
+          <div className="account-scope-list">
+            {accounts.map((acc) => (
+              <label key={acc.id} className="permission-item">
+                <input
+                  type="checkbox"
+                  checked={form.accountIDs.has(acc.id)}
+                  onChange={() => toggleAccount(acc.id)}
+                />
+                {acc.name || acc.id}
+              </label>
+            ))}
+          </div>
+        </div>
         <div className="form-field">
           <span className="field-label">权限</span>
           {grouped.length === 0 && <p className="hint">权限目录加载中…</p>}

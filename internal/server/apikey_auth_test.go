@@ -315,3 +315,105 @@ func TestPermissionCatalogJSONShape(t *testing.T) {
 		}
 	}
 }
+
+// ====================================================================
+// 账号使用范围: 秘钥限定可访问账号
+// ====================================================================
+//
+// 契约:
+//  6. 秘钥可设账号范围(--account-ids); 空范围 = 全部账号;
+//  7. 请求的目标账号不在范围内 → 403 ACCOUNT_NOT_ALLOWED(失败关闭);
+//  8. 范围校验早于业务逻辑: 越权账号的请求不得到达 handler(不泄露账号是否存在);
+//  9. 从 query/body/path 三处提取目标账号 ID。
+
+// createTestKeyScoped 建一个带账号范围的秘钥。
+func createTestKeyScoped(t *testing.T, s *Server, accountIDs []string, perms ...string) apikey.Key {
+	t.Helper()
+	rec, err := s.keys.Create(apikey.CreateInput{
+		Name:        "范围测试",
+		Permissions: perms,
+		AccountIDs:  accountIDs,
+	})
+	if err != nil {
+		t.Fatalf("创建范围秘钥: %v", err)
+	}
+	return rec
+}
+
+// 白名单内账号放行(query account_id)。
+func TestAPIKeyAccountScopeAllowsListedAccount(t *testing.T) {
+	f := &fakeBackend{}
+	s, ts := newTestServer(t, f)
+	key := createTestKeyScoped(t, s, []string{"acc_1"}, "inbox.list")
+
+	req := keyReq(t, serverURL(ts.URL), "GET", "/api/inbox?account_id=acc_1", key.Key, "")
+	code, raw, _ := do(t, req)
+	if code == 401 || code == 403 {
+		t.Fatalf("白名单内账号应放行: %d %s", code, raw)
+	}
+}
+
+// 白名单外账号拒绝(403 ACCOUNT_NOT_ALLOWED), 且不得到达 handler。
+func TestAPIKeyAccountScopeDeniesUnlistedAccount(t *testing.T) {
+	f := &fakeBackend{}
+	s, ts := newTestServer(t, f)
+	key := createTestKeyScoped(t, s, []string{"acc_1"}, "inbox.list")
+
+	req := keyReq(t, serverURL(ts.URL), "GET", "/api/inbox?account_id=acc_2", key.Key, "")
+	code, raw, _ := do(t, req)
+	if code != 403 {
+		t.Fatalf("范围外账号应 403, got %d %s", code, raw)
+	}
+	if !strings.Contains(raw, "ACCOUNT_NOT_ALLOWED") {
+		t.Fatalf("错误码应为 ACCOUNT_NOT_ALLOWED: %s", raw)
+	}
+	if f.listInboxQuery.AccountID != "" {
+		t.Fatalf("越权请求不应到达 handler, listInboxQuery=%+v", f.listInboxQuery)
+	}
+}
+
+// 空范围 = 全部账号放行(向后兼容旧秘钥)。
+func TestAPIKeyEmptyAccountScopeAllowsAny(t *testing.T) {
+	f := &fakeBackend{}
+	s, ts := newTestServer(t, f)
+	key := createTestKey(t, s, "inbox.list") // 无范围
+
+	req := keyReq(t, serverURL(ts.URL), "GET", "/api/inbox?account_id=acc_any", key.Key, "")
+	code, raw, _ := do(t, req)
+	if code == 401 || code == 403 {
+		t.Fatalf("空范围应放行任意账号: %d %s", code, raw)
+	}
+}
+
+// body account_id 也被范围校验(POST /create)。
+func TestAPIKeyAccountScopeChecksBodyAccountID(t *testing.T) {
+	f := &fakeBackend{}
+	s, ts := newTestServer(t, f)
+	key := createTestKeyScoped(t, s, []string{"acc_1"}, "aliases.create")
+
+	body := `{"account_id":"acc_9","label":"x"}`
+	req := keyReq(t, serverURL(ts.URL), "POST", "/api/create", key.Key, body)
+	code, raw, _ := do(t, req)
+	if code != 403 {
+		t.Fatalf("body 中范围外账号应 403, got %d %s", code, raw)
+	}
+	if !strings.Contains(raw, "ACCOUNT_NOT_ALLOWED") {
+		t.Fatalf("错误码应为 ACCOUNT_NOT_ALLOWED: %s", raw)
+	}
+}
+
+// 路径 :id(账号路由)也纳入范围校验(PATCH /accounts/:id)。
+func TestAPIKeyAccountScopeChecksPathAccountID(t *testing.T) {
+	f := &fakeBackend{}
+	s, ts := newTestServer(t, f)
+	key := createTestKeyScoped(t, s, []string{"acc_1"}, "accounts.write")
+
+	req := keyReq(t, serverURL(ts.URL), "PATCH", "/api/accounts/acc_2", key.Key, `{"label":"y"}`)
+	code, raw, _ := do(t, req)
+	if code != 403 {
+		t.Fatalf("路径中范围外账号应 403, got %d %s", code, raw)
+	}
+	if !strings.Contains(raw, "ACCOUNT_NOT_ALLOWED") {
+		t.Fatalf("错误码应为 ACCOUNT_NOT_ALLOWED: %s", raw)
+	}
+}

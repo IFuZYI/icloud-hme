@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"icloud-hme/internal/account"
 	"icloud-hme/internal/apikey"
 )
 
@@ -274,5 +275,92 @@ func TestKeysWriteRequiresCSRF(t *testing.T) {
 	code, raw, _ := do(t, req)
 	if code != 403 || !strings.Contains(raw, "CSRF_INVALID") {
 		t.Fatalf("缺 CSRF 应 403, got %d %s", code, raw)
+	}
+}
+
+// ====================================================================
+// 秘钥账号范围: HTTP 创建/更新接口
+// ====================================================================
+
+// 创建秘钥可带账号范围, 返回体含 account_ids。
+func TestCreateKeyWithAccountScope(t *testing.T) {
+	f := &fakeBackend{accounts: []account.Summary{{ID: "acc_1"}, {ID: "acc_2"}}}
+	_, ts := newTestServer(t, f)
+	session, csrf := login(t, ts, "admin-pass-2026-strong")
+
+	body := `{"name":"脚本A","permissions":["inbox.list"],"account_ids":["acc_1","acc_2"]}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/keys", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-CSRF-Token", csrf)
+	req.AddCookie(&http.Cookie{Name: "hme_session", Value: session})
+
+	code, raw, _ := do(t, req)
+	if code != 200 {
+		t.Fatalf("创建应成功, got %d %s", code, raw)
+	}
+	if !strings.Contains(raw, `"acc_1"`) || !strings.Contains(raw, `"acc_2"`) {
+		t.Fatalf("返回体应含账号范围: %s", raw)
+	}
+}
+
+// 创建时引用不存在的账号 → 400 VALIDATION_ERROR。
+func TestCreateKeyRejectsUnknownAccount(t *testing.T) {
+	f := &fakeBackend{accounts: []account.Summary{{ID: "acc_1"}}}
+	_, ts := newTestServer(t, f)
+	session, csrf := login(t, ts, "admin-pass-2026-strong")
+
+	body := `{"name":"脚本A","permissions":["inbox.list"],"account_ids":["acc_1","acc_ghost"]}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/keys", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-CSRF-Token", csrf)
+	req.AddCookie(&http.Cookie{Name: "hme_session", Value: session})
+
+	code, raw, _ := do(t, req)
+	if code != 400 {
+		t.Fatalf("未知账号应 400, got %d %s", code, raw)
+	}
+	if !strings.Contains(raw, "VALIDATION_ERROR") {
+		t.Fatalf("错误码应为 VALIDATION_ERROR: %s", raw)
+	}
+}
+
+// 更新秘钥账号范围(含清空为全部)。
+func TestUpdateKeyAccountScope(t *testing.T) {
+	f := &fakeBackend{accounts: []account.Summary{{ID: "acc_1"}, {ID: "acc_2"}}}
+	s, ts := newTestServer(t, f)
+	session, csrf := login(t, ts, "admin-pass-2026-strong")
+
+	rec, err := s.keys.Create(apikey.CreateInput{Name: "x", AccountIDs: []string{"acc_1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 改为 acc_2
+	body := `{"account_ids":["acc_2"]}`
+	req, _ := http.NewRequest("PATCH", ts.URL+"/api/keys/"+rec.ID, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-CSRF-Token", csrf)
+	req.AddCookie(&http.Cookie{Name: "hme_session", Value: session})
+	code, raw, _ := do(t, req)
+	if code != 200 {
+		t.Fatalf("更新应成功, got %d %s", code, raw)
+	}
+	got, _ := s.keys.Get(rec.ID)
+	if len(got.AccountIDs) != 1 || got.AccountIDs[0] != "acc_2" {
+		t.Fatalf("更新后 AccountIDs = %v, want [acc_2]", got.AccountIDs)
+	}
+
+	// 清空为全部
+	body = `{"account_ids":[]}`
+	req, _ = http.NewRequest("PATCH", ts.URL+"/api/keys/"+rec.ID, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-CSRF-Token", csrf)
+	req.AddCookie(&http.Cookie{Name: "hme_session", Value: session})
+	if code, raw, _ := do(t, req); code != 200 {
+		t.Fatalf("清空应成功, got %d %s", code, raw)
+	}
+	got, _ = s.keys.Get(rec.ID)
+	if len(got.AccountIDs) != 0 {
+		t.Fatalf("清空后 AccountIDs = %v, want 空", got.AccountIDs)
 	}
 }

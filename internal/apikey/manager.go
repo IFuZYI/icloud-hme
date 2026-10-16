@@ -59,9 +59,12 @@ type Key struct {
 	Key         string   `json:"key"`
 	Enabled     bool     `json:"enabled"`
 	Permissions []string `json:"permissions"`
-	CreatedAt   string   `json:"created_at"`
-	LastUsedAt  string   `json:"last_used_at,omitempty"`
-	LastUsedIP  string   `json:"last_used_ip,omitempty"`
+	// AccountIDs 是账号使用范围白名单。空 = 不限(全部账号可用);
+	// 非空 = 仅列出的账号可用(失败关闭)。omitempty: 空范围序列化为省略。
+	AccountIDs []string `json:"account_ids,omitempty"`
+	CreatedAt  string   `json:"created_at"`
+	LastUsedAt string   `json:"last_used_at,omitempty"`
+	LastUsedIP string   `json:"last_used_ip,omitempty"`
 }
 
 // HasPermission 判断秘钥是否拥有指定权限(失败关闭: 空列表不放行)。
@@ -74,18 +77,38 @@ func (k Key) HasPermission(id string) bool {
 	return false
 }
 
+// AllowsAccount 判断秘钥是否被允许访问指定账号(失败关闭)。
+//
+//   - 空 AccountIDs = 不限账号, 任意账号(含空串)放行;
+//   - 非空 AccountIDs = 白名单, 只有明确列出的账号放行, 其余(含空串)拒绝。
+func (k Key) AllowsAccount(accountID string) bool {
+	if len(k.AccountIDs) == 0 {
+		return true
+	}
+	for _, id := range k.AccountIDs {
+		if id == accountID {
+			return true
+		}
+	}
+	return false
+}
+
 // CreateInput 是创建秘钥的输入。Key 留空时自动生成。
 type CreateInput struct {
 	Name        string
 	Key         string
 	Permissions []string
+	// AccountIDs 是账号使用范围(空 = 全部账号)。
+	AccountIDs []string
 }
 
 // UpdateInput 是更新秘钥的输入; nil 字段保持不变(秘钥值不可更新)。
 type UpdateInput struct {
 	Name        *string
 	Permissions *[]string
-	Enabled     *bool
+	// AccountIDs 为 nil 时不变; 指向空切片则清空(= 全部账号)。
+	AccountIDs *[]string
+	Enabled    *bool
 }
 
 // Manager 管理秘钥集合, 线程安全。
@@ -204,6 +227,7 @@ func (m *Manager) Create(in CreateInput) (Key, error) {
 		Key:         key,
 		Enabled:     true,
 		Permissions: normalizePermissions(in.Permissions),
+		AccountIDs:  normalizeAccountIDs(in.AccountIDs),
 		// 纳秒精度: 同一秒内连续创建的秘钥也要有稳定顺序(列表按新→旧)。
 		CreatedAt: m.now().Format(time.RFC3339Nano),
 	}
@@ -279,6 +303,28 @@ func normalizePermissions(perms []string) []string {
 	return out
 }
 
+// normalizeAccountIDs 去重并保持输入顺序; 空列表合法(不限账号)。
+// 结果始终为 nil 或非 nil 切片: 空输入返回 nil(序列化为 omitempty 省略)。
+func normalizeAccountIDs(ids []string) []string {
+	if len(ids) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(ids))
+	seen := map[string]bool{}
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 // List 返回全部秘钥, 按创建时间新→旧。
 func (m *Manager) List() []Key {
 	m.mu.Lock()
@@ -324,6 +370,9 @@ func (m *Manager) Update(id string, in UpdateInput) (Key, error) {
 	}
 	if in.Permissions != nil {
 		k.Permissions = normalizePermissions(*in.Permissions)
+	}
+	if in.AccountIDs != nil {
+		k.AccountIDs = normalizeAccountIDs(*in.AccountIDs)
 	}
 	if in.Enabled != nil {
 		k.Enabled = *in.Enabled

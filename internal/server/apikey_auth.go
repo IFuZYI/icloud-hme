@@ -11,6 +11,9 @@
 package server
 
 import (
+	"bytes"
+	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -91,7 +94,8 @@ func (s *Server) requireAuth() gin.HandlerFunc {
 	}
 }
 
-// requirePermission 对秘钥请求做权限判定; 会话请求直接放行(管理员拥有全部权限)。
+// requirePermission 对秘钥请求做权限判定与账号范围判定;
+// 会话请求直接放行(管理员拥有全部权限)。
 //
 // 判定依据是 gin 解析出的路由模板(c.FullPath()), 不是原始 URL——
 // 避免路径穿越/参数混淆绕过权限表。
@@ -118,6 +122,64 @@ func (s *Server) requirePermission() gin.HandlerFunc {
 			failCode(c, http.StatusForbidden, "PERMISSION_DENIED", "API 秘钥权限不足")
 			return
 		}
+
+		// 账号使用范围: 秘钥限定了账号白名单时, 请求目标账号必须在范围内。
+		// 空范围 = 全部账号放行(向后兼容); 未限定账号的接口(如 /reload)
+		// 不触发本检查。
+		if accountID := accountScopeTarget(c); accountID != "" && !key.AllowsAccount(accountID) {
+			slog.Debug("秘钥账号范围不足",
+				"path", c.Request.URL.Path, "method", c.Request.Method,
+				"key_id", key.ID, "account_id", accountID)
+			failCode(c, http.StatusForbidden, "ACCOUNT_NOT_ALLOWED", "API 秘钥无权访问该账号")
+			return
+		}
 		c.Next()
 	}
+}
+
+// accountScopeTarget 提取请求要访问的目标账号 ID(失败关闭时返回 "")。
+//
+// 优先级: query account_id > JSON body account_id > 路径 :id(仅账号路由)。
+// 返回 "": 该请求不针对特定账号(如 /reload), 或无法确定——此时不做范围
+// 校验(由下方 scopeHasAccountTarget 保证「账号路由必有目标」由测试钉住)。
+func accountScopeTarget(c *gin.Context) string {
+	if v := strings.TrimSpace(c.Query("account_id")); v != "" {
+		return v
+	}
+	if accountRouteHasPathID(c.FullPath()) {
+		if v := strings.TrimSpace(c.Param("id")); v != "" {
+			return v
+		}
+	}
+	return accountIDFromBody(c)
+}
+
+// accountIDFromBody 尝试从 JSON body 读取 account_id, 不消费请求体
+// (读取后原样写回, 供后续 handler 再次绑定)。
+func accountIDFromBody(c *gin.Context) string {
+	if c.Request.Body == nil || !strings.Contains(c.GetHeader("Content-Type"), "application/json") {
+		return ""
+	}
+	raw, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		return ""
+	}
+	// 无论解析结果如何都还原 body, 避免影响 handler 的 ShouldBindJSON。
+	c.Request.Body = io.NopCloser(bytes.NewReader(raw))
+	var probe struct {
+		AccountID string `json:"account_id"`
+	}
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(probe.AccountID)
+}
+
+// accountRouteHasPathID 判断路由模板的 :id 是否是账号 ID。
+//
+// 仅账号路由(/api/accounts/:id...)的 :id 是 account_id;
+// /alias-tasks/:id、/aliases/:id 的 :id 是任务/别名 ID, 不在此列——
+// 这些资源的账号归属另行判定(见 auto_task / 别名作用域), 不在此处误判。
+func accountRouteHasPathID(fullPath string) bool {
+	return strings.HasPrefix(fullPath, "/api/accounts/")
 }

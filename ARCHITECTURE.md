@@ -85,6 +85,7 @@ Gin Server /api ─────────────────────�
 | CSRF | 会话请求：除 GET/HEAD/OPTIONS 外，已认证 API 必须携带 `X-CSRF-Token`；秘钥请求豁免（不经 Cookie，无 CSRF 面） |
 | API 秘钥 | `X-API-Key: sk-…` 或 `Authorization: Bearer sk-…`（前者优先）；`apikey.Manager` 管理，存 `data/api_keys.json`（0600） |
 | 秘钥权限 | 按接口粒度（`permission_catalog.go` 的 `permissionCatalog` + `protectedRouteList`）；不足 → 403 `PERMISSION_DENIED`；无效/停用 → 401 `INVALID_API_KEY` |
+| 秘钥账号范围 | 每秘钥可选账号白名单（`Key.AccountIDs`）；空 = 全部账号，非空 = 仅列出账号。中间件 `accountScopeTarget` 从 query/body `account_id` 或账号路由 `:id` 提取目标账号，越权 → 403 `ACCOUNT_NOT_ALLOWED`（早于 handler） |
 | 秘钥管理接口 | `/api/keys`、`/api/permissions`、`/api/auth/logout` 仅限会话（`sessionOnlyRoutes`），秘钥访问一律 403 |
 | 路由表完整性 | `TestRoutePermissionTableComplete` 双向钉住 gin 路由与权限表；新增路由必须声明权限或列入 `sessionOnlyRoutes` |
 | 前端状态 | CSRF token 只保存在 `AuthProvider`/`api/client.ts` 的内存中 |

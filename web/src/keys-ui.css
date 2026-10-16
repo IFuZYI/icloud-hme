@@ -61,6 +61,15 @@
   flex-wrap: wrap;
 }
 
+/* 账号范围多选列表: 窄屏可换行的复选框组 */
+.account-scope-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  max-height: 168px;
+  overflow-y: auto;
+}
+
 /* 行内操作是纯文字链式按钮: 补足触控命中区(移动端手指可达)。
    与项目移动端约定一致(aliases-ui.css 的 min-height: 44px)。 */
 .key-row-actions .link-button,
