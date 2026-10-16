@@ -13,12 +13,13 @@
 - ✅ **两类自动创建任务** — 自主任务（手动输入每天 1–50 个，系统按当天剩余时间分摊创建时刻）与定时任务（每隔固定分钟创建固定数量）；均到达目标总数后停止，单次失败自动重试、连续 2 次或近 5 次中 3 次失败才暂停
 - ✅ **三种标签生成方式** — 名称库自动轮换、前缀+顺序序号（`主邮箱001`）、前缀+随机哈希（`主邮箱k7m9`）
 - ✅ **收取邮件** — 通过 IMAP 或 Web API 读取发到 HME 别名的邮件
+- ✅ **邮件批量清理** — 按时间范围一次性永久删除邮件（异步任务分块节流执行、防邮箱风控），进度实时可见，可暂停 / 继续 / 取消，服务重启后可断点续传
 - ✅ **双路径读信** — 邮件读取优先走 IMAP (App Password),无 App Password 时回退 Web API (Cookie)
 - ✅ **多账号管理** — 支持多个 iCloud 账号并行管理
 - ✅ **API 秘钥** — 为脚本创建独立秘钥（`sk-` 开头，可手动指定），按接口粒度勾选权限，并按账号设定使用范围，免 Cookie/CSRF 调用
 - ✅ **双认证模式** — Cookie (创建别名 + 读邮件回退) 和 App Password (IMAP 优先)
 - ✅ **安全模型** — 单管理员会话、CSRF 校验、登录限流、响应脱敏
-- ✅ **Apple 风格响应式 UI** — 深色模式、减少动态效果、移动端布局与键盘无障碍操作
+- ✅ **Apple 风格响应式 UI** — 深色模式、减少动态效果、移动端布局与键盘无障碍操作；静态资源 gzip 压缩 + 路由级代码分割（首屏传输约 147KB）
 
 ## 快速开始
 
@@ -207,9 +208,9 @@ export ICLOUD_HME_ADMIN_PASSWORD='your-strong-password'
 - **账号**：添加账号时可直接粘贴 Cookie JSON；区域下拉框支持全球区和中国区。
 - **别名**：支持搜索、状态筛选、创建时间排序和多选批量操作。确认批量删除后弹窗立即关闭，结果通过通知和任务日志反馈。
 - **自动任务**：两种任务类型可选——自主任务手动输入每天创建数量（1–50，默认 20），系统按当天剩余时间把创建时刻分摊到活跃时段（中午开始只排半天目标）；定时任务设定间隔分钟与每批数量。标签可选名称库自动轮换、前缀顺序序号或前缀随机哈希。展示进度、下次执行时间和失败原因，达到目标总数后自动停止。
-- **日志**：查看自动任务及批量操作的逐项成功/失败记录和详细原因。
-- **收件箱**：按账号、别名、数量和时间范围筛选邮件。
+- **收件箱**：按账号、别名、数量和时间范围筛选邮件；「刷新」按钮强制取最新邮件（无条件回源），「查询」按钮按筛选条件查询（受限刷新、防连点）；支持单封删除与「清理邮件」批量按时间范围永久删除（异步任务、进度在日志页实时可见）。
 - **秘钥**：为脚本创建 API 秘钥，每个秘钥独立勾选可访问的接口（按接口粒度授权），并可限定可访问的账号范围（不选 = 全部账号，勾选后仅限选定账号）；支持查看/复制、启用停用、编辑权限与账号范围、删除，显示最近使用时间与来源 IP。
+- **日志**：查看自动任务、批量操作与邮件清理的完整运行记录（可按类别筛选）；清理类日志的「查看详情」可打开对应清理任务的完整信息（状态/账号/范围/删除数/时间 + 运行日志）。
 
 ## API 接口
 
@@ -248,9 +249,13 @@ GET /api/inbox?account_id=acc_1&alias=xyz123@icloud.com&limit=20&start=2026-08-0
 # 参数说明:
 #   account_id - 必填: 账号 ID
 #   alias      - 可选: 只读取发到该别名的邮件
-#   limit      - 可选: 返回邮件数量 (默认 20)
+#   limit      - 可选: 返回邮件数量 (默认 20, 范围 1-100)
 #   start/end  - 可选: 日期区间 (YYYY-MM-DD 或 RFC3339; end 含当天)
 #   days       - 可选: 旧的"最近 N 天"参数, 无 start/end 时生效 (默认 7)
+#   refresh    - 可选: 1 = 受限刷新(前端「查询」按钮): 绕过服务端缓存回源,
+#                受 5 秒节流地板约束(地板内连点复用最近一次结果)
+#   force      - 可选: 1 = 强制刷新(前端「刷新」按钮): 每次都无条件真实回源,
+#                并作废 IMAP 层 30 秒列表快照, 不受任何节流约束
 # 注: 同时扫描收件箱与垃圾邮件箱(Junk; 网易邮箱为「垃圾邮件」); 非 INBOX 邮件的 id 形如 "Junk:88"
 
 # 响应
@@ -260,6 +265,7 @@ GET /api/inbox?account_id=acc_1&alias=xyz123@icloud.com&limit=20&start=2026-08-0
     "account_id": "acc_1",
     "alias": "xyz123@icloud.com",
     "count": 2,
+    "total": 2,
     "method": "imap",
     "messages": [
       {
@@ -268,7 +274,8 @@ GET /api/inbox?account_id=acc_1&alias=xyz123@icloud.com&limit=20&start=2026-08-0
         "to": "xyz123@icloud.com",
         "subject": "欢迎注册",
         "preview": "感谢您的注册...",
-        "date": "2026-07-09T14:32:10+08:00"
+        "date": "2026-07-09T14:32:10+08:00",
+        "folder": "INBOX"
       }
     ]
   }
@@ -277,6 +284,34 @@ GET /api/inbox?account_id=acc_1&alias=xyz123@icloud.com&limit=20&start=2026-08-0
 # 读取方式 (自动选择):
 #   method: "imap"    — 通过 App Password 认证 (优先)
 #   method: "web_api" — 通过 Cookie 认证,无需 App Password (回退)
+```
+
+#### 批量清理邮件（按时间范围）
+
+按时间范围**永久删除**邮件（收件箱 + 垃圾邮件箱），异步执行、分块节流（每块 500 封、块间 3s + 抖动、滚动 1 小时最多 20 块），防邮箱风控；同账号同时最多 1 个任务，不同账号可并行。
+
+```bash
+# 1. 预览（仅统计，不删除）
+POST /api/inbox/purge/preview
+{"account_id":"acc_1","range_start":"2026-01-01T00:00:00Z","range_end":"2026-10-16T00:00:00Z"}
+# 响应 data: {total, folders:[{folder,count}], estimated_seconds, range_start, range_end}
+
+# 2. 创建清理任务（异步执行; 同账号已有活跃任务返回 409 PURGE_IN_PROGRESS）
+POST /api/inbox/purge
+{"account_id":"acc_1","range_start":"...","range_end":"..."}
+
+# 3. 查看任务进度（新→旧）
+GET /api/purge-tasks
+# 响应 data: [{id, account_id, account_name, range_start, range_end, status,
+#              total, processed, deleted, failed, current_message, started_at, finished_at}]
+# status: running | throttled(风控节流中) | paused | done | failed | cancelled | interrupted(重启中断,可续传)
+
+# 4. 任务控制
+POST /api/purge-tasks/:id/pause    # 暂停
+POST /api/purge-tasks/:id/resume   # 继续（含重启后的断点续传）
+POST /api/purge-tasks/:id/cancel   # 取消
+
+# 注: 任务持久化在 data/purge_tasks.json（保留最近 50 条）; EXPUNGE 为文件夹级操作
 ```
 
 ### 账号管理接口
@@ -356,18 +391,29 @@ POST /api/accounts/:id/login
   "otp_code": "123456"                  # 可选,2FA 验证码
 }
 
-# 响应
+# 响应: 只返回账号摘要, 绝不返回 Cookies(自动持久化到账号配置)
 {
   "success": true,
-  "data": {
-    "id": "acc_1",
-    "cookies": {
-      "x-apple-session-token": "...",
-      "X-APPLE-WEBAUTH-TOKEN": "..."
-    }
-  }
+  "data": { "id": "acc_1", "status": "active", "has_cookies": true, ... }
 }
+
+# 需要 2FA: 409 OTP_REQUIRED; 验证码错误: 401 OTP_INVALID
 ```
+
+> 推荐改用**两段式登录**（避免在单个请求内阻塞等待验证码）：
+>
+> ```bash
+> POST /api/accounts/:id/login/begin   {"password":"..."}
+>   → {"status":"done","account":{...}}                    # 无需 2FA
+>   → {"status":"otp_required","session_id":"...","push_sent":true,
+>      "delivery":"trusted_devices"}                        # 需要 2FA
+> POST /api/accounts/:id/login/otp     {"session_id":"...","code":"123456"}
+> POST /api/accounts/:id/login/sms     {"session_id":"...","phone_id":2}   # 短信通道
+> GET  /api/accounts/:id/login/phones?session_id=...        # 可选手机号列表
+> POST /api/accounts/:id/login/resend  {"session_id":"..."} # 重发验证码
+> ```
+>
+> `delivery` 表示服务端实际选择的验证码通道：`trusted_devices`（已推送受信任设备）、`sms`（自动发短信）、`sms_selection_required`（多手机号，需先选择）。会话有效期 5 分钟；验证码错误时会话保留可重试；投递限流 5 次/30 秒。
 
 #### 删除账号
 
@@ -606,6 +652,41 @@ POST /api/alias-tasks/:id/toggle
 - 任务配置持久化在 `data/alias_task.json`，运行日志持久化在 `data/alias_task_logs.json`（重启后自动恢复）
 - 旧版任务向后兼容：缺 `mode` 视为 `scheduled`，缺 `label_mode` 视为 `library`，缺 `persona` 按种子回填
 
+### API 秘钥接口（脚本调用）
+
+为脚本创建独立秘钥，免 Cookie / CSRF 调用 API。秘钥仅限管理员会话管理（秘钥不能管理秘钥或给自己提权）。
+
+**认证：** 请求头 `X-API-Key: sk-...`（首选）或 `Authorization: Bearer sk-...`；两者同时出现时以 `X-API-Key` 为准。秘钥请求**豁免 CSRF**。
+
+**权限模型：** 每个秘钥独立授权、按接口粒度勾选（权限 ID 见 `GET /api/permissions`）。权限不足 `403 PERMISSION_DENIED`；秘钥无效/已停用 `401 INVALID_API_KEY`（与未知秘钥同文案）。
+
+**账号使用范围：** `account_ids` 留空 = 全部账号（默认）；非空 = 白名单，范围外账号 `403 ACCOUNT_NOT_ALLOWED`（校验早于业务逻辑）。范围同时作用于读与写。
+
+| 接口 | 说明 |
+|---|---|
+| `GET /api/keys` | 列出秘钥（含明文秘钥，面板可查看/复制；记录最近使用时间与来源 IP） |
+| `POST /api/keys` | 创建秘钥（`key` 留空自动生成 `sk-` + 24 位随机字符；可手动指定 8–128 位可打印 ASCII） |
+| `PATCH /api/keys/:id` | 更新名称 / 权限 / 账号范围 / 启停（秘钥值不可修改） |
+| `DELETE /api/keys/:id` | 删除秘钥（立即失效） |
+| `GET /api/permissions` | 权限目录（分组 + 条目） |
+
+```bash
+# 创建（会话 + CSRF）
+POST /api/keys
+{"name":"签到脚本","key":"","permissions":["inbox.list","inbox.get"],"account_ids":["acc_1"]}
+
+# 脚本使用（无需 Cookie / CSRF）
+curl -H "X-API-Key: sk-..." "http://localhost:8081/api/inbox?account_id=acc_1&limit=10"
+
+# 错误区分:
+#   403 PERMISSION_DENIED   = 秘钥有效但未勾选该接口
+#   403 ACCOUNT_NOT_ALLOWED = 秘钥有效但该账号不在其使用范围内
+#   401 INVALID_API_KEY     = 秘钥错误或已停用
+#   409 KEY_EXISTS / KEY_LIMIT_REACHED = 重复秘钥 / 数量达上限(100)
+```
+
+**权限 ID 一览：** `accounts.list`、`accounts.write`、`aliases.list`、`aliases.create`、`aliases.write`、`tasks.list`、`tasks.write`、`inbox.list`、`inbox.get`、`inbox.previews`、`inbox.delete`、`inbox.purge`、`system.reload`。
+
 ## 认证方式
 
 ### 方式一: Cookie 认证 (推荐,功能最完整)
@@ -669,41 +750,52 @@ icloud-hme/
 ├── docker-compose.yml      # 持久化、健康检查与运行时加固
 ├── data/                   # 运行数据目录 (自动生成，Git 忽略)
 ├── go.mod
-└── internal/
-    ├── account/
-    │   ├── manager.go      # 多账号管理器 (持久化、客户端工厂)
-    │   └── public.go       # 公开 DTO (Summary) 与输入校验
-    ├── auth/
-    │   ├── manager.go      # 管理员会话 + CSRF
-    │   └── limiter.go      # 登录失败限流
-    ├── hme/
-    │   ├── client.go       # iCloud HME Web 客户端 (Cookie 认证)
-    │   └── auth.go         # SRP 登录 (账号密码 + 2FA 获取 Cookie)
-    ├── mail/
-    │   ├── client.go       # IMAP 邮件客户端 (App Password 认证)
-    │   └── web_client.go   # Web 邮件客户端 (Cookie 认证,无需 App Password)
-    ├── server/
-    │   ├── server.go       # 路由分组 (认证 + CSRF)
-    │   ├── backend.go      # 业务接口与 Manager 适配器
-    │   ├── auth.go         # 登录/会话/退出 handler 与中间件
-    │   ├── account_handlers.go  # 账号管理 handler
-    │   ├── auto_task.go    # 自动创建任务调度器 (间隔执行/总数上限/自动暂停)
-    │   ├── auto_task_logs.go    # 任务运行日志持久化
-    │   ├── alias_task_handlers.go # 自动任务 API handler
-    │   └── middleware.go   # 安全响应头、请求上限
-    └── webui/
-        └── embed.go        # 内嵌前端资源 + SPA fallback
+├── internal/
+│   ├── account/
+│   │   ├── manager.go      # 多账号管理器 (持久化、客户端工厂)
+│   │   └── public.go       # 公开 DTO (Summary) 与输入校验
+│   ├── apikey/
+│   │   └── manager.go      # API 秘钥管理 (创建/校验/持久化)
+│   ├── auth/
+│   │   ├── manager.go      # 管理员会话 + CSRF
+│   │   └── limiter.go      # 登录失败限流
+│   ├── hme/
+│   │   ├── client.go       # iCloud HME Web 客户端 (Cookie 认证)
+│   │   └── auth.go         # SRP 登录 (账号密码 + 2FA 获取 Cookie)
+│   ├── mail/
+│   │   ├── client.go       # IMAP 邮件客户端 (App Password 认证)
+│   │   ├── pool.go         # IMAP 连接池 (长连接复用 + 保活)
+│   │   ├── snapshot.go     # 列表快照 (翻页不重复 SEARCH)
+│   │   ├── purge.go        # 批量删除原语 (分块 seqset STORE + EXPUNGE)
+│   │   └── web_client.go   # Web 邮件客户端 (Cookie 认证,无需 App Password)
+│   ├── server/
+│   │   ├── server.go       # 路由分组 (认证 + CSRF)
+│   │   ├── backend.go      # 业务接口与 Manager 适配器 (读缓存/singleflight)
+│   │   ├── apikey_auth.go  # 秘钥认证中间件 (权限 + 账号范围)
+│   │   ├── keys_handlers.go     # 秘钥管理 handler
+│   │   ├── auth.go         # 登录/会话/退出 handler 与中间件
+│   │   ├── account_handlers.go  # 账号管理 handler
+│   │   ├── auto_task.go    # 自动创建任务调度器 (间隔执行/总数上限/自动暂停)
+│   │   ├── auto_task_logs.go    # 任务运行日志持久化
+│   │   ├── alias_task_handlers.go # 自动任务 API handler
+│   │   ├── purge_manager.go     # 批量清理任务管理器 (持久化/断点续传)
+│   │   ├── purge_runner.go      # 批量清理执行器 (分块节流删除)
+│   │   └── middleware.go   # 安全响应头、请求上限
+│   └── webui/
+│       └── embed.go        # 内嵌前端资源 (gzip 协商) + SPA fallback
 ```
 
 ### 核心模块
 
 - **account.Manager**: 管理多个 iCloud 账号,负责配置持久化和客户端创建
+- **apikey.Manager**: API 秘钥的创建、校验（恒定时间比较）、按接口粒度权限与账号范围
 - **server.autoTaskManager**: 自动创建任务调度器,负责任务持久化、间隔触发、总数上限与账号异常自动暂停
+- **server.purgeManager**: 批量清理任务管理器,负责分块节流删除、进度追踪、暂停/继续/取消与重启断点续传
 - **hme.Client**: 封装 iCloud HME Web API,支持 Cookie 认证
 - **hme.auth**: SRP 协议登录,支持账号密码 + 可选 2FA
-- **mail.Client**: IMAP 邮件客户端 (App Password,优先读邮件)
+- **mail.Client**: IMAP 邮件客户端 (App Password,优先读邮件;连接池复用 + 列表快照)
 - **mail.WebClient**: 通过 iCloud Web API (mccgateway) 读取邮件,无需 App Password
-- **server.Server**: HTTP API 服务 + 管理界面静态资源
+- **server.Server**: HTTP API 服务 + 管理界面静态资源 (gzip 压缩、路由级代码分割)
 
 ## 技术栈
 
@@ -787,14 +879,17 @@ A local management tool for Apple iCloud Hide My Email (HME) aliases, supporting
 
 - Built-in management UI at `http://localhost:8081`
 - Create HME aliases automatically
-- Low-frequency scheduled creation: choose a target count, a 20–60 minute interval and a daily cap; one alias per run, labels rotate from a common-service library, failures pause the task
+- Two auto-creation task types: self-paced tasks (1–50 per day, spread across the remaining active hours) and scheduled tasks (fixed count every N minutes); both stop at the target count, with retry tolerance (pause only after 2 consecutive or 3-of-5 recent failures)
+- Three label modes: rotating service-name library, prefix + sequential number, prefix + random hash
 - Batch deactivate, reactivate, and delete with per-item audit logs; long deletions do not block the confirmation dialog
 - List all aliases for an account
 - Read emails sent to HME aliases via IMAP or Web API
+- Bulk email purge by date range (async, chunked/throttled to avoid provider risk control, resumable after restart, pausable/cancellable)
 - Manage multiple iCloud accounts
+- API keys for scripts: per-endpoint permissions and per-account scope, no Cookie/CSRF needed
 - Dual authentication: Cookie and App Password
 - Security: single-admin session, CSRF checks, login rate limiting, redacted API responses
-- Responsive Apple-inspired UI with dark mode, reduced-motion support, and keyboard accessibility
+- Responsive Apple-inspired UI with dark mode, reduced-motion support, and keyboard accessibility; gzip-compressed assets and route-level code splitting (~147KB first load)
 
 ### Quick Start
 
