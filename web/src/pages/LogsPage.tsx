@@ -37,36 +37,82 @@ const CLEANUP_OPTIONS: Array<{ days: number; label: string }> = [
   { days: 30, label: '1 个月前' },
 ]
 
-/** 清理任务卡: 只用于运行中任务(进度条 + 暂停/继续/取消)。
+/** 清理任务状态: 值 → 展示文案。 */
+const PURGE_STATUS_TEXT: Record<string, string> = {
+  running: '进行中',
+  throttled: '风控节流中',
+  paused: '已暂停',
+  interrupted: '已中断',
+  done: '已完成',
+  failed: '失败',
+  cancelled: '已取消',
+}
+
+function purgeStatusText(status: string): string {
+  return PURGE_STATUS_TEXT[status] ?? status
+}
+
+/** 清理任务卡: 运行中显示进度条与操作, 已完成显示摘要行。
  *
- * 已完成任务的完整信息改由对应日志行的「查看详情」承载(不再占卡片区)。 */
+ * 每张卡片都带「查看详情」——任务的完整信息与该任务的运行日志都收在
+ * 那里; 单条日志的「查看详情」只显示日志本身。 */
 function PurgeTaskCard({
   task,
   onAction,
+  onDetail,
 }: {
   task: PurgeTask
   onAction: (id: string, action: 'pause' | 'resume' | 'cancel') => void
+  onDetail: (task: PurgeTask) => void
 }) {
+  const active = ['running', 'throttled', 'paused', 'interrupted'].includes(task.status)
   const pct = task.total > 0 ? Math.min(100, Math.round((task.processed / task.total) * 100)) : 0
 
-  const statusText: Record<string, string> = {
-    running: '进行中',
-    throttled: '风控节流中',
-    paused: '已暂停',
-    interrupted: '已中断',
-    done: '已完成',
-    failed: '失败',
-    cancelled: '已取消',
+  if (!active) {
+    // 完成态: 摘要行(状态徽标 + 账号 + 清理范围 + 删除数/完成时间)。
+    return (
+      <div className="purge-task-card is-done">
+        <div className="purge-task-head">
+          <span className={`badge ${task.status === 'done' ? 'badge-active' : task.status === 'failed' ? 'badge-error' : 'badge-neutral'}`}>
+            {purgeStatusText(task.status)}
+          </span>
+          <strong>{task.account_name || task.account_id}</strong>
+          <span className="hint">{task.range_start.slice(0, 10)} 之前的邮件</span>
+          <button
+            type="button"
+            className="link-button"
+            aria-label="查看清理任务详情"
+            onClick={() => onDetail(task)}
+          >
+            查看详情
+          </button>
+        </div>
+        <p className="purge-task-summary">
+          已删除 {task.deleted} 封
+          {task.failed > 0 && `，失败 ${task.failed}`}
+          {task.finished_at && ` · 完成于 ${formatLogTime(task.finished_at)}`}
+          {task.error && ` · ${task.error}`}
+        </p>
+      </div>
+    )
   }
 
   return (
     <div className={`purge-task-card is-active${task.status === 'paused' || task.status === 'interrupted' ? ' is-paused' : ''}`}>
       <div className="purge-task-head">
         <span className={`badge ${task.status === 'running' ? 'badge-active' : 'badge-neutral'}`}>
-          {statusText[task.status] ?? task.status}
+          {purgeStatusText(task.status)}
         </span>
         <strong>{task.account_name || task.account_id}</strong>
         <span className="hint">{task.range_start.slice(0, 10)} 之前的邮件</span>
+        <button
+          type="button"
+          className="link-button"
+          aria-label="查看清理任务详情"
+          onClick={() => onDetail(task)}
+        >
+          查看详情
+        </button>
       </div>
       {/* 进度条 */}
       <div
@@ -114,6 +160,8 @@ export default function LogsPage() {
   const [cleanupError, setCleanupError] = useState('')
   // 清理任务(进度卡区)。
   const [purgeTasks, setPurgeTasks] = useState<PurgeTask[]>([])
+  // 清理任务详情弹层(卡片「查看详情」)。
+  const [detailTask, setDetailTask] = useState<PurgeTask | null>(null)
   // 类别筛选('' = 全部)。
   const [categoryFilter, setCategoryFilter] = useState('')
   const { show } = useToast()
@@ -200,10 +248,13 @@ export default function LogsPage() {
     ? logs.filter((log) => (log.category || 'auto_task') === categoryFilter)
     : logs
 
-  /** 活跃任务置顶显示; 已完成任务不占卡片区(信息在日志详情里)。 */
+  /** 活跃任务(进度条)置顶; 已完成任务显示摘要卡(新→旧, 最多 3 条)。 */
   const activeTasks = purgeTasks.filter((t) => ['running', 'throttled', 'paused', 'interrupted'].includes(t.status))
-  /** purge 任务按 ID 索引: 日志详情据此关联任务级信息。 */
-  const purgeTaskById = new Map(purgeTasks.map((t) => [t.id, t]))
+  const finishedTasks = purgeTasks.filter((t) => !['running', 'throttled', 'paused', 'interrupted'].includes(t.status))
+  /** 详情弹层里展示的该任务运行日志(新→旧)。 */
+  const taskLogs = detailTask
+    ? logs.filter((log) => log.task_id === detailTask.id).slice().sort((a, b) => b.time.localeCompare(a.time))
+    : []
 
   return (
     <section>
@@ -218,11 +269,14 @@ export default function LogsPage() {
       </div>
       {error && <div className="alert-error">{error}</div>}
 
-      {/* 清理任务进度区: 只显示运行中任务(已完成的信息在日志详情里) */}
-      {activeTasks.length > 0 && (
+      {/* 清理任务卡片区: 运行中(进度) + 已完成(摘要, 各带「查看详情」) */}
+      {(activeTasks.length > 0 || finishedTasks.length > 0) && (
         <div className="purge-task-cards">
           {activeTasks.map((t) => (
-            <PurgeTaskCard key={t.id} task={t} onAction={purgeAction} />
+            <PurgeTaskCard key={t.id} task={t} onAction={purgeAction} onDetail={setDetailTask} />
+          ))}
+          {finishedTasks.slice(0, 3).map((t) => (
+            <PurgeTaskCard key={t.id} task={t} onAction={purgeAction} onDetail={setDetailTask} />
           ))}
         </div>
       )}
@@ -298,52 +352,6 @@ export default function LogsPage() {
                 <p>{failureReason(selected.message)}</p>
               </div>
             )}
-            {/* 清理任务日志: 关联任务级信息(状态/账号/范围/删除数/耗时)。 */}
-            {(() => {
-              const task = purgeTaskById.get(selected.task_id)
-              if (!task) return null
-              const statusText: Record<string, string> = {
-                running: '进行中',
-                throttled: '风控节流中',
-                paused: '已暂停',
-                interrupted: '已中断',
-                done: '已完成',
-                failed: '失败',
-                cancelled: '已取消',
-              }
-              return (
-                <div className="log-purge-summary">
-                  <dl>
-                    <div>
-                      <dt>状态</dt>
-                      <dd>
-                        <span className={`badge ${task.status === 'done' ? 'badge-active' : task.status === 'failed' ? 'badge-error' : 'badge-neutral'}`}>
-                          {statusText[task.status] ?? task.status}
-                        </span>
-                      </dd>
-                    </div>
-                    <div><dt>账号</dt><dd>{task.account_name || task.account_id}</dd></div>
-                    <div>
-                      <dt>清理范围</dt>
-                      <dd>
-                        {task.range_start.slice(0, 10)} 之前的邮件
-                      </dd>
-                    </div>
-                    <div>
-                      <dt>删除</dt>
-                      <dd>
-                        已删除 {task.deleted} 封
-                        {task.failed > 0 && `，失败 ${task.failed}`}
-                        {task.total > 0 && `（共 ${task.total} 封）`}
-                      </dd>
-                    </div>
-                    {task.started_at && <div><dt>开始时间</dt><dd>{formatLogTime(task.started_at)}</dd></div>}
-                    {task.finished_at && <div><dt>完成时间</dt><dd>{formatLogTime(task.finished_at)}</dd></div>}
-                    {task.error && <div><dt>错误</dt><dd className="log-message-error">{task.error}</dd></div>}
-                  </dl>
-                </div>
-              )
-            })()}
             <dl>
               <div><dt>时间</dt><dd>{formatLogTime(selected.time)}</dd></div>
               <div><dt>任务 ID</dt><dd><code>{selected.task_id}</code></dd></div>
@@ -352,6 +360,59 @@ export default function LogsPage() {
             </dl>
             <div className="form-actions">
               <button type="button" onClick={() => setSelected(null)}>关闭</button>
+            </div>
+          </div>
+        )}
+      </Dialog>
+
+      {/* 清理任务详情: 任务级信息 + 该任务的运行日志(卡片「查看详情」打开)。 */}
+      <Dialog
+        title="清理任务详情"
+        open={detailTask !== null}
+        onClose={() => setDetailTask(null)}
+      >
+        {detailTask && (
+          <div className="log-detail">
+            <dl>
+              <div>
+                <dt>状态</dt>
+                <dd>
+                  <span className={`badge ${detailTask.status === 'done' ? 'badge-active' : detailTask.status === 'failed' ? 'badge-error' : 'badge-neutral'}`}>
+                    {purgeStatusText(detailTask.status)}
+                  </span>
+                </dd>
+              </div>
+              <div><dt>账号</dt><dd>{detailTask.account_name || detailTask.account_id}</dd></div>
+              <div><dt>清理范围</dt><dd>{detailTask.range_start.slice(0, 10)} 之前的邮件</dd></div>
+              <div>
+                <dt>删除</dt>
+                <dd>
+                  已删除 {detailTask.deleted} 封
+                  {detailTask.failed > 0 && `，失败 ${detailTask.failed}`}
+                  {detailTask.total > 0 && `（共 ${detailTask.total} 封）`}
+                </dd>
+              </div>
+              {detailTask.started_at && <div><dt>开始时间</dt><dd>{formatLogTime(detailTask.started_at)}</dd></div>}
+              {detailTask.finished_at && <div><dt>完成时间</dt><dd>{formatLogTime(detailTask.finished_at)}</dd></div>}
+              {detailTask.error && <div><dt>错误</dt><dd className="log-message-error">{detailTask.error}</dd></div>}
+              <div><dt>任务 ID</dt><dd><code>{detailTask.id}</code></dd></div>
+            </dl>
+            {/* 该任务的运行日志(按 task_id 过滤)。 */}
+            {taskLogs.length > 0 && (
+              <>
+                <p className="purge-task-logs-title">运行日志</p>
+                <ul className="purge-task-logs">
+                  {taskLogs.map((log) => (
+                    <li key={log.id}>
+                      <span className="purge-log-time">{formatLogTime(log.time)}</span>
+                      <span className={log.level === 'error' ? 'log-message-error' : undefined}>{log.message}</span>
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
+            <div className="form-actions">
+              <button type="button" onClick={() => setDetailTask(null)}>关闭</button>
             </div>
           </div>
         )}

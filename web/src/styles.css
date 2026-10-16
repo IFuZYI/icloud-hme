@@ -1532,6 +1532,41 @@ tbody tr:nth-child(n + 6) { animation-delay: 150ms; }
   margin-top: var(--space-2);
 }
 
+/* 卡片头部右对齐的「查看详情」 */
+.purge-task-head .link-button {
+  margin-left: auto;
+}
+
+/* 清理任务详情: 任务日志列表 */
+.purge-task-logs-title {
+  margin: var(--space-4) 0 var(--space-2);
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+}
+
+.purge-task-logs {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.purge-task-logs li {
+  display: grid;
+  grid-template-columns: 128px minmax(0, 1fr);
+  gap: var(--space-3);
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}
+
+.purge-task-logs .purge-log-time {
+  color: var(--color-text-tertiary);
+}
+
 /* ─── 清理对话框(收件箱) ─── */
 .purge-presets {
   display: flex;
