@@ -216,6 +216,21 @@ export ICLOUD_HME_ADMIN_PASSWORD='your-strong-password'
 
 > **认证**：除 `POST /api/auth/login` 与 `GET /api/auth/session` 外，所有 `/api` 接口都需要管理员会话 Cookie（`hme_session`）或 API 秘钥（`X-API-Key: sk-…` / `Authorization: Bearer sk-…`）；会话请求的非 GET/HEAD/OPTIONS 还需携带 `X-CSRF-Token` 请求头（秘钥请求豁免）。完整契约与 curl 示例见 [API.md](API.md)。
 
+### 调用方式
+
+脚本 / 自动化推荐用 **API 秘钥**：在管理界面「秘钥」页创建（或调用 `POST /api/keys`），按需勾选接口权限与账号范围，请求头带 `X-API-Key`（也支持 `Authorization: Bearer sk-…`）即可，**免 Cookie、免 CSRF**：
+
+```bash
+# 读取邮件
+curl -H "X-API-Key: sk-xxxxxxxx" "http://localhost:8081/api/inbox?account_id=acc_1&limit=10"
+
+# 创建别名
+curl -X POST -H "X-API-Key: sk-xxxxxxxx" -H "Content-Type: application/json" \
+  -d '{"account_id":"acc_1","label":"GitHub"}' http://localhost:8081/api/create
+```
+
+浏览器 / 管理界面使用会话 Cookie（`hme_session`）：`POST /api/auth/login` 登录后，写操作还需带上响应中的 `csrf_token`（`X-CSRF-Token` 头）。下文各接口示例同样支持秘钥方式（秘钥需勾选对应权限）；秘钥管理接口（`/api/keys`、`/api/permissions`）仅限管理员会话。秘钥权限模型、账号范围与错误码见「API 秘钥接口」一节。
+
 ### 核心接口
 
 #### 创建 HME 别名
