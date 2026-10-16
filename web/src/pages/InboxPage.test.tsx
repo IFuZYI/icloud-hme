@@ -121,8 +121,7 @@ describe('InboxPage', () => {
     // 未选账号时不应显示统计摘要(「共 0 封」会让用户误以为查询过且没有邮件)
     expect(screen.queryByText(/共.*封/)).toBeNull()
     expect(screen.queryByText(/读取方式/)).toBeNull()
-    // 未选账号时刷新/查询按钮应禁用, 避免点击后静默无响应
-    expect(screen.getByRole('button', { name: '刷新收件箱' })).toBeDisabled()
+    // 未选账号时查询按钮应禁用, 避免点击后静默无响应
     expect(screen.getByRole('button', { name: '查询' })).toBeDisabled()
   })
 
@@ -585,7 +584,7 @@ describe('InboxPage', () => {
     expect(summary?.textContent).toContain('读取方式：IMAP')
   })
 
-  it('点击刷新时按钮进入忙碌态并禁用, 完成后恢复', async () => {
+  it('点击查询时按钮进入忙碌态并禁用, 完成后恢复', async () => {
     let release: (() => void) | undefined
     let calls = 0
     server.use(
@@ -601,14 +600,14 @@ describe('InboxPage', () => {
     renderPage()
     await screen.findByText('主题一')
     const user = userEvent.setup()
-    const refresh = screen.getByRole('button', { name: '刷新收件箱' })
-    expect(refresh.className).toBe('inbox-action')
+    const query = screen.getByRole('button', { name: '查询' })
+    expect(query.className).toContain('inbox-action')
 
-    await user.click(refresh)
-    await waitFor(() => expect(screen.getByRole('button', { name: '刷新收件箱' })).toBeDisabled())
-    expect(screen.getByRole('button', { name: '刷新收件箱' }).className).toContain('is-busy')
+    await user.click(query)
+    await waitFor(() => expect(screen.getByRole('button', { name: '查询' })).toBeDisabled())
+    expect(screen.getByRole('button', { name: '查询' }).className).toContain('is-busy')
 
     release?.()
-    await waitFor(() => expect(screen.getByRole('button', { name: '刷新收件箱' })).not.toBeDisabled())
+    await waitFor(() => expect(screen.getByRole('button', { name: '查询' })).not.toBeDisabled())
   })
 })

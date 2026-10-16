@@ -28,13 +28,6 @@
   font-size: var(--text-sm);
 }
 
-.inbox-page .inbox-header-actions {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-2);
-  flex-shrink: 0;
-}
-
 /* ─── 按钮 ───
    颜色、圆角、边框、hover 与 disabled 全部沿用全局 button / button.primary,
    这里只补齐「图标 + 文字」的排版与刷新中的旋转。 */
@@ -447,15 +440,6 @@
 }
 
 @media (max-width: 560px) {
-  .inbox-page .inbox-header-actions {
-    width: 100%;
-  }
-
-  .inbox-page .inbox-header-actions button {
-    flex: 1;
-    min-height: 44px;
-  }
-
   .inbox-page .inbox-item-main {
     grid-template-columns: minmax(0, 1fr);
     grid-template-areas:

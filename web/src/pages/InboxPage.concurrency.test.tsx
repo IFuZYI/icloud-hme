@@ -121,26 +121,26 @@ it('刷新进行中修改筛选: 新请求期间忙碌态保持, 不被旧请求
   await screen.findByText('主题一')
   const user = userEvent.setup()
 
-  // 1) 点刷新 → 请求 2 挂起, 刷新按钮进入忙碌态
-  const refresh = screen.getByRole('button', { name: '刷新收件箱' })
-  await user.click(refresh)
-  await waitFor(() => expect(screen.getByRole('button', { name: '刷新收件箱' })).toBeDisabled())
+  // 1) 点查询 → 请求 2 挂起, 查询按钮进入忙碌态
+  const query = screen.getByRole('button', { name: '查询' })
+  await user.click(query)
+  await waitFor(() => expect(screen.getByRole('button', { name: '查询' })).toBeDisabled())
 
-  // 2) 刷新进行中修改每页数量 → 请求 2 被 abort 让位, 请求 3 发起
+  // 2) 查询进行中修改每页数量 → 请求 2 被 abort 让位, 请求 3 发起
   await chooseOption(user, /每页数量/, '50')
   await waitFor(() => expect(calls).toBe(3))
 
-  // 3) 请求 3 仍在飞行: 刷新按钮必须保持忙碌(旧请求的收尾不得清掉新请求的忙碌态)
+  // 3) 请求 3 仍在飞行: 查询按钮必须保持忙碌(旧请求的收尾不得清掉新请求的忙碌态)
   await new Promise((r) => setTimeout(r, 50))
-  expect(screen.getByRole('button', { name: '刷新收件箱' })).toBeDisabled()
+  expect(screen.getByRole('button', { name: '查询' })).toBeDisabled()
 
   // 4) 请求 3 返回后: 忙碌态恢复, 展示新数据(不卡死、不残留旧态)
   release3?.()
   await screen.findByText('筛选后主题')
-  await waitFor(() => expect(screen.getByRole('button', { name: '刷新收件箱' })).not.toBeDisabled())
+  await waitFor(() => expect(screen.getByRole('button', { name: '查询' })).not.toBeDisabled())
 })
 
-it('刷新进行中: 查询与加载更多按钮禁用, 不叠加新请求', async () => {
+it('查询进行中: 加载更多按钮禁用, 不叠加新请求', async () => {
   let calls = 0
   let releaseRefresh: (() => void) | undefined
   server.use(
@@ -161,29 +161,26 @@ it('刷新进行中: 查询与加载更多按钮禁用, 不叠加新请求', asy
   await screen.findByText('主题一')
   const user = userEvent.setup()
 
-  const refresh = screen.getByRole('button', { name: '刷新收件箱' })
   const query = screen.getByRole('button', { name: /查询/ })
   const loadMoreBtn = screen.getByRole('button', { name: /加载更多/ })
   // 空闲时可点
   expect(query).not.toBeDisabled()
   expect(loadMoreBtn).not.toBeDisabled()
 
-  // 点刷新 → 请求挂起, 刷新按钮忙碌
-  await user.click(refresh)
-  await waitFor(() => expect(screen.getByRole('button', { name: '刷新收件箱' })).toBeDisabled())
+  // 点查询 → 请求挂起, 查询按钮忙碌
+  await user.click(query)
+  await waitFor(() => expect(screen.getByRole('button', { name: '查询' })).toBeDisabled())
 
-  // 忙碌期间: 查询/加载更多都必须禁用(避免叠加中止在飞请求、分页边界错位)
-  expect(query).toBeDisabled()
+  // 忙碌期间: 加载更多必须禁用(避免叠加中止在飞请求、分页边界错位)
   expect(loadMoreBtn).toBeDisabled()
 
-  // 刷新返回后: 全部恢复可点(不永久卡死)
+  // 返回后: 全部恢复可点(不永久卡死)
   releaseRefresh?.()
-  await waitFor(() => expect(screen.getByRole('button', { name: '刷新收件箱' })).not.toBeDisabled())
-  expect(screen.getByRole('button', { name: /查询/ })).not.toBeDisabled()
+  await waitFor(() => expect(screen.getByRole('button', { name: /查询/ })).not.toBeDisabled())
   expect(screen.getByRole('button', { name: /加载更多/ })).not.toBeDisabled()
 })
 
-it('加载更多进行中: 查询与刷新按钮禁用, 不叠加新请求', async () => {
+it('加载更多进行中: 查询按钮禁用, 不叠加新请求', async () => {
   let calls = 0
   let releaseMore: (() => void) | undefined
   server.use(
@@ -219,13 +216,11 @@ it('加载更多进行中: 查询与刷新按钮禁用, 不叠加新请求', asy
   await user.click(screen.getByRole('button', { name: /加载更多邮件/ }))
   await waitFor(() => expect(screen.getByRole('button', { name: /加载更多邮件/ })).toBeDisabled())
 
-  // 加载更多进行中: 查询与刷新都必须禁用(统一忙碌门禁)
+  // 加载更多进行中: 查询必须禁用(统一忙碌门禁)
   expect(screen.getByRole('button', { name: /查询/ })).toBeDisabled()
-  expect(screen.getByRole('button', { name: '刷新收件箱' })).toBeDisabled()
 
   // 返回后恢复
   releaseMore?.()
   await screen.findByText('第二页')
   await waitFor(() => expect(screen.getByRole('button', { name: /查询/ })).not.toBeDisabled())
-  expect(screen.getByRole('button', { name: '刷新收件箱' })).not.toBeDisabled()
 })

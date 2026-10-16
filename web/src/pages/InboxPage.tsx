@@ -354,17 +354,6 @@ export default function InboxPage() {
           <h2>收件箱</h2>
           <p>查看发往隐私别名的邮件，仅显示纯文本摘要</p>
         </div>
-        <div className="inbox-header-actions">
-          <button
-            className={`inbox-action${busy ? ' is-busy' : ''}`}
-            onClick={() => runQuery()}
-            aria-label="刷新收件箱"
-            disabled={busy || !accountId}
-          >
-            <IconRefresh size={15} />
-            刷新
-          </button>
-        </div>
       </div>
 
       <div className="inbox-filters">
@@ -431,7 +420,12 @@ export default function InboxPage() {
           />
         </div>
         <div className="inbox-field inbox-field-submit">
-          <button className="inbox-action primary" onClick={() => runQuery()} disabled={!accountId || busy}>
+          <button
+            className={`inbox-action primary${refreshing ? ' is-busy' : ''}`}
+            onClick={() => runQuery()}
+            disabled={!accountId || busy}
+          >
+            {refreshing && <IconRefresh size={15} />}
             查询
           </button>
         </div>
