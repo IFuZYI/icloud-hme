@@ -121,11 +121,12 @@ describe('InboxPage', () => {
     // 未选账号时不应显示统计摘要(「共 0 封」会让用户误以为查询过且没有邮件)
     expect(screen.queryByText(/共.*封/)).toBeNull()
     expect(screen.queryByText(/读取方式/)).toBeNull()
-    // 未选账号时查询按钮应禁用, 避免点击后静默无响应
+    // 未选账号时刷新/查询按钮应禁用, 避免点击后静默无响应
+    expect(screen.getByRole('button', { name: '刷新收件箱' })).toBeDisabled()
     expect(screen.getByRole('button', { name: '查询' })).toBeDisabled()
   })
 
-  it('点击查询/刷新时携带 refresh=1 绕过服务端缓存', async () => {
+  it('点击「查询」携带 refresh=1(受限刷新); 首屏不携带', async () => {
     const urls: string[] = []
     server.use(
       http.get('/api/accounts', () => HttpResponse.json({ success: true, data: accounts })),
@@ -139,10 +140,30 @@ describe('InboxPage', () => {
     // 首屏加载不强制刷新(允许命中服务端缓存)
     expect(new URL(urls[0]).searchParams.get('refresh')).toBeNull()
     const user = userEvent.setup()
-    await user.click(screen.getByRole('button', { name: /查询/ }))
+    await user.click(screen.getByRole('button', { name: '查询' }))
     await waitFor(() => {
       expect(urls.some((u) => new URL(u).searchParams.get('refresh') === '1')).toBe(true)
     })
+  })
+
+  it('点击「刷新」携带 force=1(强制刷新, 不受节流约束)', async () => {
+    const urls: string[] = []
+    server.use(
+      http.get('/api/accounts', () => HttpResponse.json({ success: true, data: accounts })),
+      http.get('/api/inbox', ({ request }) => {
+        urls.push(request.url)
+        return HttpResponse.json({ success: true, data: inboxResult })
+      }),
+    )
+    renderPage()
+    await screen.findByText('主题一')
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: '刷新收件箱' }))
+    await waitFor(() => {
+      expect(urls.some((u) => new URL(u).searchParams.get('force') === '1')).toBe(true)
+    })
+    // 强制刷新不得携带 refresh=1(语义互斥: force 优先)。
+    expect(urls.every((u) => new URL(u).searchParams.get('refresh') === null)).toBe(true)
   })
 
   it('加载更多同样携带 refresh=1, 保证分页边界与最新数据一致', async () => {

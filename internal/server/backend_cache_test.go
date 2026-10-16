@@ -249,6 +249,17 @@ func TestInboxRefreshParamPassedToBackend(t *testing.T) {
 	if !f.listInboxQuery.Refresh {
 		t.Fatal("refresh=1 应透传到后端(绕过缓存)")
 	}
+	if f.listInboxQuery.Force {
+		t.Fatal("refresh=1 不应置 Force(受限刷新)")
+	}
+
+	status, body = aliasTaskRequest(t, ts.URL, session, csrf, http.MethodGet, "/api/inbox?account_id=acc_1&days=7&force=1", "")
+	if status != http.StatusOK {
+		t.Fatalf("force=1: status = %d: %s", status, body)
+	}
+	if !f.listInboxQuery.Force {
+		t.Fatal("force=1 应透传到后端(强制刷新)")
+	}
 }
 
 // TestSetMailboxInvalidatesReadCaches 验证「接入收件邮箱」后该账号的读缓存

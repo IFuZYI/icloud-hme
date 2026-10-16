@@ -35,8 +35,12 @@ type InboxQuery struct {
 	Offset    int
 	// DateRange 是日期区间; 零值表示不限。
 	DateRange mail.DateRange
-	// Refresh 为 true 时绕过服务端 TTL 缓存, 强制回源(前端「查询/刷新」显式触发)。
+	// Refresh 为 true 时绕过服务端 TTL 缓存回源(前端「查询」按钮, 受限刷新):
+	// 受刷新节流地板约束——地板内的重复查询复用最近一次回源结果, 防连点。
 	Refresh bool
+	// Force 为 true 时无条件回源(前端「刷新」按钮, 强制刷新): 绕过 TTL 缓存
+	// 并作废 IMAP 层列表快照, 不受节流地板约束——每次点击都真实访问上游。
+	Force bool
 }
 
 // InboxResult 是收件箱查询结果。
@@ -90,6 +94,10 @@ type managerBackend struct {
 	cache   *responseCache
 	// flight 合并同一查询键的并发回源(见 singleflight.go)。
 	flight flightGroup
+	// refreshMu 保护 lastRefresh(刷新节流地板的状态)。
+	refreshMu sync.Mutex
+	// lastRefresh 记录各查询键最近一次真实回源的时间(refresh 节流地板)。
+	lastRefresh map[string]time.Time
 	// refreshGenMu 保护 refreshGen。
 	refreshGenMu sync.Mutex
 	// refreshGen 是显式刷新的代数: 每次刷新写入缓存后自增。非刷新读取在
@@ -106,16 +114,16 @@ func (b *managerBackend) currentRefreshGen() uint64 {
 }
 
 // storeInboxResult 写入收件箱响应缓存, 并处理与显式刷新的竞态:
-// 刷新写入最新数据并自增代数; 非刷新读取仅在「自其发起以来无刷新完成」
-// 时写入——否则其旧数据(可能来自快照)会覆盖刷新结果。
-func (b *managerBackend) storeInboxResult(key string, result InboxResult, refresh bool, gen uint64) {
+// 显式刷新(查询/刷新)写入最新数据并自增代数; 非刷新读取仅在「自其发起
+// 以来无刷新完成」时写入——否则其旧数据(可能来自快照)会覆盖刷新结果。
+func (b *managerBackend) storeInboxResult(key string, result InboxResult, explicit bool, gen uint64) {
 	b.refreshGenMu.Lock()
 	defer b.refreshGenMu.Unlock()
-	if !refresh && b.refreshGen != gen {
+	if !explicit && b.refreshGen != gen {
 		return // 已被刷新超越: 旧数据不写入, 刷新结果优先
 	}
 	b.respCache().set(key, result, inboxCacheTTL)
-	if refresh {
+	if explicit {
 		b.refreshGen++
 	}
 }
@@ -132,12 +140,16 @@ func (b *managerBackend) respCache() *responseCache {
 
 // 缓存有效期: 短 TTL 挡掉「切页/重复点击」的重复回源, 又不至于让用户
 // 长时间看不到新邮件; 摘要(正文片段)基本不变, 可缓存更久。
-// 只服务非刷新读取(refresh=0): 显式刷新每次都真实回源, 不复用缓存。
+// 只服务非刷新读取(refresh/force 均不带): 显式刷新走各自的回源路径。
 // 用 var 而非 const: 测试覆盖 TTL 验证过期行为。
 var (
 	inboxCacheTTL   = 30 * time.Second
 	aliasesCacheTTL = 30 * time.Second
 	previewCacheTTL = 5 * time.Minute
+	// inboxRefreshFloor 是「查询」(refresh=1, 受限刷新)的最小回源间隔
+	// (节流地板): 地板内的重复查询复用最近一次回源结果, 防连点打爆上游;
+	// 「刷新」(force=1, 强制刷新)不受该约束。0 表示不节流(测试用)。
+	inboxRefreshFloor = 5 * time.Second
 )
 
 // inboxCacheKey 生成收件箱查询的缓存键(账号+别名+分页+日期区间)。
@@ -541,27 +553,38 @@ func imapEnvelopeBudget(limit int) time.Duration {
 //
 // 缓存语义(对外部收件邮箱的风控防线, 见 cache.go 顶部说明):
 //  1. 非刷新读取: 命中 TTL 缓存即返回(切页/自动加载不打上游);
-//  2. 显式刷新(refresh=1, 前端「查询」按钮): 每次都真实回源——绕过 TTL
-//     缓存并作废 IMAP 层列表快照, 保证点「查询」立即看到新邮件;
-//  3. 并发合并: 同键并发请求只回源一次(singleflight)。
+//  2. 「查询」(Refresh=1, 受限刷新): 绕过 TTL 缓存回源, 但受刷新节流
+//     地板约束——地板内的重复查询复用最近一次回源结果, 防连点;
+//  3. 「刷新」(Force=1, 强制刷新): 每次都无条件真实回源——绕过 TTL 缓存
+//     并作废 IMAP 层列表快照, 不受任何节流约束;
+//  4. 并发合并: 同键并发请求只回源一次(singleflight)。
 func (b *managerBackend) ListInbox(q InboxQuery) (InboxResult, error) {
 	cacheKey := inboxCacheKey(q)
-	if !q.Refresh {
+	explicit := q.Refresh || q.Force
+	if !explicit {
 		if result, ok := b.cachedInbox(cacheKey); ok {
 			return result, nil
 		}
+	} else if q.Refresh && !q.Force {
+		// 「查询」的节流地板: 地板内的重复查询复用最近一次回源结果。
+		if result, ok := b.throttledRefreshResult(cacheKey); ok {
+			return result, nil
+		}
 	}
-	// 刷新与普通读取使用不同 flight 键: 刷新绝不与「可能命中快照的普通读取」
-	// 共享结果(否则刷新会被在飞普通读取的旧数据顶替); 同键并发仍合并为一次。
+	// 显式刷新与普通读取使用不同 flight 键: 刷新绝不与「可能命中快照的
+	// 普通读取」共享结果(否则刷新会被在飞普通读取的旧数据顶替); 同键并发
+	// 仍合并为一次。强制刷新另用独立键: 不受地板约束, 不与受限查询合流。
 	flightKey := cacheKey
-	if q.Refresh {
+	if q.Force {
+		flightKey += "|force"
+	} else if q.Refresh {
 		flightKey += "|refresh"
 	}
 	// 并发合并: 同键并发请求共享一次回源; 回源结果由 fn 内部写缓存,
 	// 等待者从缓存或返回值拿到同一结果。
 	result, err := b.flight.do(flightKey, func() (InboxResult, error) {
 		// 二次检查: 等待期间可能已有别的调用把结果写入缓存。
-		if !q.Refresh {
+		if !explicit {
 			if result, ok := b.cachedInbox(cacheKey); ok {
 				return result, nil
 			}
@@ -578,16 +601,50 @@ func (b *managerBackend) ListInbox(q InboxQuery) (InboxResult, error) {
 		if result.Messages == nil {
 			result.Messages = []mail.Message{}
 		}
-		if !q.Refresh && inboxBeforeCacheWriteForTest != nil {
+		if !explicit && inboxBeforeCacheWriteForTest != nil {
 			inboxBeforeCacheWriteForTest()
 		}
-		b.storeInboxResult(cacheKey, result, q.Refresh, gen)
+		b.storeInboxResult(cacheKey, result, explicit, gen)
+		if explicit {
+			b.noteRefresh(cacheKey)
+		}
 		return result, nil
 	})
 	if err != nil {
 		return result, err
 	}
 	return result, nil
+}
+
+// noteRefresh 记录某查询键最近一次真实回源的时间(查询节流地板用)。
+func (b *managerBackend) noteRefresh(key string) {
+	b.refreshMu.Lock()
+	defer b.refreshMu.Unlock()
+	if b.lastRefresh == nil {
+		b.lastRefresh = make(map[string]time.Time)
+	}
+	b.lastRefresh[key] = time.Now()
+}
+
+// throttledRefreshResult 实现「查询」的节流地板: 距离上次真实回源不足
+// inboxRefreshFloor 时, 返回缓存里的结果(即使是 refresh 请求)。
+//
+// 目的: 用户连点「查询」不再每次都打上游——对外部收件邮箱, 高频访问是
+// 风控的典型触发信号。地板内的结果与刚拉到的完全一致(用户无感知)。
+// 「刷新」(force) 不走此路径, 始终无条件回源。
+func (b *managerBackend) throttledRefreshResult(key string) (InboxResult, bool) {
+	if inboxRefreshFloor <= 0 {
+		return InboxResult{}, false
+	}
+	b.refreshMu.Lock()
+	last, ok := b.lastRefresh[key]
+	b.refreshMu.Unlock()
+	if !ok || time.Since(last) >= inboxRefreshFloor {
+		return InboxResult{}, false
+	}
+	// 地板内: 复用缓存结果。缓存可能恰好过期(30s TTL 远大于 5s 地板,
+	// 正常路径不会发生); 真过期时回退为真实回源, 不影响正确性。
+	return b.cachedInbox(key)
 }
 
 // inboxBeforeCacheWriteForTest 是测试钩子: 非刷新读取写缓存之前调用。
@@ -614,10 +671,10 @@ func (b *managerBackend) listInboxUncached(q InboxQuery) (InboxResult, error) {
 	validityChanged := false
 	poolErr := withIMAPTimeout(imapEnvelopeBudget(q.Limit), func() error {
 		return b.mgr.WithMailClient(q.AccountID, func(mc *mail.Client) error {
-			// 显式刷新: 作废 IMAP 层列表快照, 强制全量 SEARCH 拿最新 UID 集合。
-			// 快照(30s TTL)是给翻页/重复读取的优化, 不得让「查询」看到旧邮件
-			// (用户实测: 快照 TTL 内到达的新邮件查询不可见 = 语义矛盾)。
-			if q.Refresh {
+			// 显式刷新(查询/刷新): 作废 IMAP 层列表快照, 强制全量 SEARCH
+			// 拿最新 UID 集合。快照(30s TTL)是给翻页/重复读取的优化, 不得
+			// 让显式刷新看到旧邮件。
+			if q.Refresh || q.Force {
 				mc.InvalidateListSnapshots()
 			}
 			var e error

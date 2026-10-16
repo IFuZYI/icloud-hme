@@ -397,9 +397,11 @@ func (s *Server) listInboxHandler(c *gin.Context) {
 		dateRange = mail.DateRangeFromDays(days)
 	}
 
-	// refresh=1 由前端「查询/刷新」按钮显式携带: 绕过服务端 TTL 缓存强制回源。
-	// 首屏/自动加载不带该参数, 可命中缓存——避免反复访问 IMAP 触发风控。
+	// refresh=1 由前端「查询」按钮携带(受限刷新: 绕过 TTL 缓存回源, 受
+	// 节流地板约束); force=1 由「刷新」按钮携带(强制刷新: 无条件回源,
+	// 不受节流约束)。首屏/自动加载均不携带, 可命中缓存。
 	refresh := c.Query("refresh") == "1"
+	force := c.Query("force") == "1"
 
 	result, err := s.be.ListInbox(InboxQuery{
 		AccountID: accountID,
@@ -408,6 +410,7 @@ func (s *Server) listInboxHandler(c *gin.Context) {
 		Offset:    offset,
 		DateRange: dateRange,
 		Refresh:   refresh,
+		Force:     force,
 	})
 	if err != nil {
 		backendFail(c, err)

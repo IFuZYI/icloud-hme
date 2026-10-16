@@ -113,9 +113,12 @@ export default function InboxPage() {
   const [purgeError, setPurgeError] = useState('')
 
   const abortRef = useRef<AbortController | null>(null)
-  // refreshOnceRef: 用户显式触发(查询/刷新/删除后)时置 true, 让下一次
-  // loadPage 携带 refresh=1 绕过服务端 TTL 缓存; 首屏/自动加载不置位(可命中缓存)。
-  const refreshOnceRef = useRef(false)
+  // refreshModeRef: 下一次 loadPage 的显式刷新模式(用后即清)。
+  //   'refresh' = 受限刷新(「查询」按钮): 服务端绕过 TTL 缓存回源, 受节流
+  //               地板约束(防连点打爆上游);
+  //   'force'   = 强制刷新(「刷新」按钮): 无条件回源, 不受任何节流约束。
+  // 首屏/自动加载不置位(可命中缓存)。
+  const refreshModeRef = useRef<'refresh' | 'force' | null>(null)
   const { show } = useToast()
 
   /** 第二阶段: 对列表里 Preview 为空的邮件分批拉摘要(每批 10 封)。 */
@@ -153,11 +156,12 @@ export default function InboxPage() {
       if (rangeStart) params.set('start', rangeStart.format('YYYY-MM-DDTHH:mm:ss'))
       if (rangeEnd) params.set('end', rangeEnd.format('YYYY-MM-DDTHH:mm:ss'))
       if (alias) params.set('alias', alias)
-      // 用户显式触发(查询/加载更多)时强制回源: 「查询」的语义就是取新邮件,
-      // 服务端会绕过 TTL 缓存并作废 IMAP 列表快照(每次点击都真实访问上游)。
-      if (refreshOnceRef.current) {
-        refreshOnceRef.current = false
-        params.set('refresh', '1')
+      // 显式刷新: 「刷新」按钮 force=1(无条件回源); 「查询」/「加载更多」
+      // refresh=1(受限刷新, 服务端节流地板防连点)。
+      const mode = refreshModeRef.current
+      if (mode) {
+        refreshModeRef.current = null
+        params.set(mode === 'force' ? 'force' : 'refresh', '1')
       }
       try {
         const data = await request<InboxResult>(`/api/inbox?${params.toString()}`, {
@@ -229,7 +233,7 @@ export default function InboxPage() {
       setDetail(null)
       show('邮件已删除')
       // 删除改变了服务端数据: 刷新绕过缓存, 避免已删除邮件在列表里残留
-      refreshOnceRef.current = true
+      refreshModeRef.current = 'refresh'
       setRetryKey((key) => key + 1)
     } catch (err) {
       show(err instanceof ApiError ? err.message : '删除邮件失败')
@@ -381,7 +385,17 @@ export default function InboxPage() {
     setSearchParams(next, { replace: true })
     setDetail(null)
     // 保留现有列表, 只让刷新按钮进入忙碌态(loading 会让整块变成骨架屏)
-    refreshOnceRef.current = true
+    // 受限刷新: 服务端绕过 TTL 缓存回源, 受节流地板约束。
+    refreshModeRef.current = 'refresh'
+    setRefreshing(true)
+    setRetryKey((k) => k + 1)
+  }
+
+  /** 「刷新」: 强制刷新——无条件回源(force=1), 不受任何节流约束。 */
+  function runForceRefresh() {
+    if (!accountId) return
+    setDetail(null)
+    refreshModeRef.current = 'force'
     setRefreshing(true)
     setRetryKey((k) => k + 1)
   }
@@ -389,9 +403,9 @@ export default function InboxPage() {
   /** 加载更多: 追加下一页信封。 */
   function loadMore() {
     if (loadingMore || messages.length >= total) return
-    // 分页追加也强制回源: 若页 1 已刷新而后续页命中旧缓存, 新邮件到达时
+    // 分页追加也回源: 若页 1 已刷新而后续页命中旧缓存, 新邮件到达时
     // 页间边界错位, 合并视图会漏掉边界邮件。
-    refreshOnceRef.current = true
+    refreshModeRef.current = 'refresh'
     setLoadingMore(true)
     void loadPage(messages.length, true)
   }
@@ -422,6 +436,15 @@ export default function InboxPage() {
           <p>查看发往隐私别名的邮件，仅显示纯文本摘要</p>
         </div>
         <div className="inbox-header-actions">
+          <button
+            className={`inbox-action${refreshing ? ' is-busy' : ''}`}
+            onClick={() => runForceRefresh()}
+            aria-label="刷新收件箱"
+            disabled={!accountId || busy}
+          >
+            <IconRefresh size={15} />
+            刷新
+          </button>
           <button
             className="inbox-action"
             onClick={() => {

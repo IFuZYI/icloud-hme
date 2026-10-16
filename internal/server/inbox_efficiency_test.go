@@ -95,16 +95,19 @@ func TestListInboxConcurrentRequestsCoalesceToOneFetch(t *testing.T) {
 }
 
 // ====================================================================
-// 显式刷新(refresh=1): 每次点击都真实回源
+// 两级显式刷新: 「刷新」(force=1) 无条件回源; 「查询」(refresh=1) 受限
 // ====================================================================
 //
-// 背景: refresh=1 由前端「查询」按钮显式携带——用户点击「查询」的语义
-// 就是「取新邮件」, 任何缓存/节流都可能让刚到的新邮件不可见, 因此显式
-// 刷新必须无条件真实回源(绕过 TTL 缓存 + 作废 IMAP 层列表快照)。
-// 防重复访问由「非刷新读取的短 TTL 缓存 + singleflight」承担。
-//
-// 契约: 连续刷新每次都回源; 快照 TTL(30s)内到达的新邮件刷新后立即可见。
-func TestInboxEveryRefreshFetchesUpstream(t *testing.T) {
+// 语义(用户确认):
+//   - 「刷新」按钮(force=1): 强制刷新——每次点击都无条件真实回源(绕过
+//     TTL 缓存 + 作废 IMAP 层列表快照), 不受任何节流约束;
+//   - 「查询」按钮(refresh=1): 受限刷新——绕过 TTL 缓存回源, 但受刷新
+//     节流地板约束: 地板(默认 5s)内的重复查询复用最近一次回源结果,
+//     防连点打爆上游。
+// 防重复访问另由「非刷新读取的短 TTL 缓存 + singleflight」承担。
+
+// 「刷新」(force): 每次点击都真实回源。
+func TestInboxForceFetchesUpstreamEveryClick(t *testing.T) {
 	b, srv, accountID := newCacheTestBackend(t)
 	srv.AddMessage(t, "INBOX", "a@example.com", "u@163.com", "邮件", time.Now())
 
@@ -116,29 +119,26 @@ func TestInboxEveryRefreshFetchesUpstream(t *testing.T) {
 	warm := srv.SelectCount()
 
 	// 第一次刷新: 回源。
-	q.Refresh = true
+	q.Force = true
 	if _, err := b.ListInbox(q); err != nil {
 		t.Fatal(err)
 	}
-	afterRefresh1 := srv.SelectCount()
-	if afterRefresh1 == warm {
+	after1 := srv.SelectCount()
+	if after1 == warm {
 		t.Fatal("第一次刷新应回源")
 	}
 
-	// 紧接着再刷新: 不得被任何节流/缓存拦下。
+	// 紧接着再刷新: 不受任何节流/缓存拦下。
 	if _, err := b.ListInbox(q); err != nil {
 		t.Fatal(err)
 	}
-	if got := srv.SelectCount(); got == afterRefresh1 {
-		t.Fatalf("每次刷新都应真实回源, SELECT %d → %d(未变)", afterRefresh1, got)
+	if got := srv.SelectCount(); got == after1 {
+		t.Fatalf("每次刷新都应真实回源, SELECT %d → %d(未变)", after1, got)
 	}
 }
 
-// 刷新必须看到快照 TTL 内到达的新邮件。
-//
-// 背景: IMAP 层列表快照(默认 30s)服务翻页类读取; 但「查询」若命中旧
-// 快照, 新邮件要等快照过期才可见——与「查询=取新邮件」的语义矛盾。
-func TestInboxRefreshSeesNewMailWithinSnapshotTTL(t *testing.T) {
+// 「刷新」(force): 快照 TTL 内到达的新邮件立即可见(快照被作废)。
+func TestInboxForceSeesNewMailWithinSnapshotTTL(t *testing.T) {
 	b, srv, accountID := newCacheTestBackend(t)
 	srv.AddMessage(t, "INBOX", "a@example.com", "u@163.com", "第一封", time.Now())
 
@@ -151,11 +151,10 @@ func TestInboxRefreshSeesNewMailWithinSnapshotTTL(t *testing.T) {
 		t.Fatalf("预热应 1 封, got %d", len(r1.Messages))
 	}
 
-	// 快照 TTL 内到达新邮件。
+	// 快照 TTL 内到达新邮件(普通读取看不到, 刷新必须能看到)。
 	srv.AddMessage(t, "INBOX", "b@example.com", "u@163.com", "新邮件", time.Now().Add(time.Second))
 
-	// 点击「查询」: 新邮件必须立即可见。
-	q.Refresh = true
+	q.Force = true
 	r2, err := b.ListInbox(q)
 	if err != nil {
 		t.Fatal(err)
@@ -166,7 +165,7 @@ func TestInboxRefreshSeesNewMailWithinSnapshotTTL(t *testing.T) {
 
 	// 刷新结果同时更新响应缓存: 后续非刷新读取立即一致且不回源。
 	base := srv.SelectCount()
-	q.Refresh = false
+	q.Force = false
 	r3, err := b.ListInbox(q)
 	if err != nil {
 		t.Fatal(err)
@@ -176,6 +175,96 @@ func TestInboxRefreshSeesNewMailWithinSnapshotTTL(t *testing.T) {
 	}
 	if got := srv.SelectCount(); got != base {
 		t.Fatalf("刷新后的非刷新读取应命中刚写入的缓存, SELECT %d → %d", base, got)
+	}
+}
+
+// 「查询」(refresh): 首次回源(可见快照 TTL 内的新邮件); 地板内复用;
+// 超过地板后重新回源。
+func TestInboxRefreshThrottledByFloor(t *testing.T) {
+	prev := inboxRefreshFloor
+	inboxRefreshFloor = 300 * time.Millisecond
+	t.Cleanup(func() { inboxRefreshFloor = prev })
+
+	b, srv, accountID := newCacheTestBackend(t)
+	srv.AddMessage(t, "INBOX", "a@example.com", "u@163.com", "第一封", time.Now())
+
+	q := InboxQuery{AccountID: accountID, Limit: 20}
+	// 预热(普通读取)。
+	if _, err := b.ListInbox(q); err != nil {
+		t.Fatal(err)
+	}
+	warm := srv.SelectCount()
+
+	// 第一次查询: 回源, 且看到快照 TTL 内到达的新邮件。
+	srv.AddMessage(t, "INBOX", "b@example.com", "u@163.com", "新邮件", time.Now().Add(time.Second))
+	q.Refresh = true
+	r1, err := b.ListInbox(q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r1.Messages) != 2 {
+		t.Fatalf("查询应看到新邮件(2 封), got %d", len(r1.Messages))
+	}
+	after1 := srv.SelectCount()
+	if after1 == warm {
+		t.Fatal("第一次查询应回源")
+	}
+
+	// 地板内再次查询: 复用最近结果, 不回源。
+	r2, err := b.ListInbox(q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := srv.SelectCount(); got != after1 {
+		t.Fatalf("地板内重复查询不应回源, SELECT %d → %d", after1, got)
+	}
+	if len(r2.Messages) != 2 {
+		t.Fatalf("地板内查询应复用最近结果(2 封), got %d", len(r2.Messages))
+	}
+
+	// 超过地板: 回源。
+	time.Sleep(400 * time.Millisecond)
+	if _, err := b.ListInbox(q); err != nil {
+		t.Fatal(err)
+	}
+	if got := srv.SelectCount(); got == after1 {
+		t.Fatal("超过地板后查询应回源")
+	}
+}
+
+// 「刷新」(force) 不受节流地板约束: 地板内仍无条件回源。
+func TestInboxForceNotThrottledByFloor(t *testing.T) {
+	prev := inboxRefreshFloor
+	inboxRefreshFloor = 10 * time.Minute // 地板远大于测试时长
+	t.Cleanup(func() { inboxRefreshFloor = prev })
+
+	b, srv, accountID := newCacheTestBackend(t)
+	srv.AddMessage(t, "INBOX", "a@example.com", "u@163.com", "邮件", time.Now())
+
+	q := InboxQuery{AccountID: accountID, Limit: 20}
+	// 第一次查询: 回源并记录刷新时刻。
+	q.Refresh = true
+	if _, err := b.ListInbox(q); err != nil {
+		t.Fatal(err)
+	}
+	after1 := srv.SelectCount()
+
+	// 地板内查询: 复用(不回源)。
+	if _, err := b.ListInbox(q); err != nil {
+		t.Fatal(err)
+	}
+	if got := srv.SelectCount(); got != after1 {
+		t.Fatalf("地板内查询应复用结果, SELECT %d → %d", after1, got)
+	}
+
+	// 地板内刷新(force): 不受约束, 仍无条件回源。
+	q.Refresh = false
+	q.Force = true
+	if _, err := b.ListInbox(q); err != nil {
+		t.Fatal(err)
+	}
+	if got := srv.SelectCount(); got == after1 {
+		t.Fatalf("强制刷新不受地板约束, SELECT %d → %d(未变)", after1, got)
 	}
 }
 
