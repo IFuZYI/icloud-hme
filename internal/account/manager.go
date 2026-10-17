@@ -7,6 +7,7 @@ package account
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -20,6 +21,13 @@ import (
 	"icloud-hme/internal/hme"
 	"icloud-hme/internal/mail"
 )
+
+// ErrMailboxInUse 表示该外部收件邮箱已绑定到另一个账号。
+//
+// 邮箱池按 host:port:email 复用连接; 两个账号共享同一物理邮箱时,
+// 一个账号的 API 秘钥可读到/删除另一个账号别名的邮件(审计 B1)。
+// 因此绑定阶段即拒绝重复, 由 handler 映射为 409 MAILBOX_IN_USE。
+var ErrMailboxInUse = errors.New("该收件邮箱已被其他账号使用")
 
 // Account 描述一个 iCloud 账号。
 type Account struct {
@@ -817,7 +825,11 @@ func (m *Manager) imapCreds(id string) (imapEmail, appPassword string, err error
 	return imapEmail, snap.AppPassword, nil
 }
 
-// SetMailbox validates and stores an external IMAP mailbox after testing it.
+// SetMailbox 设置外部 IMAP 收件邮箱。
+//
+// 同一外部邮箱不允许绑定到多个账号: 邮箱池按 host:port:email 复用连接,
+// 两个账号共享同一物理邮箱时, 一个账号的秘钥能读到/删除另一个账号别名的
+// 邮件(审计 B1)。账号隔离优先于连接复用, 故在绑定时拒绝重复。
 func (m *Manager) SetMailbox(id string, config MailboxConfig) error {
 	config.Provider = strings.TrimSpace(config.Provider)
 	config.Email = strings.TrimSpace(config.Email)
@@ -830,6 +842,16 @@ func (m *Manager) SetMailbox(id string, config MailboxConfig) error {
 	}
 	m.mu.RLock()
 	_, ok := m.accounts[id]
+	// 同一邮箱不得被其它账号占用(不区分大小写; 忽略自身以便重复保存)。
+	for otherID, other := range m.accounts {
+		if otherID == id || other.Mailbox == nil {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(other.Mailbox.Email), config.Email) {
+			m.mu.RUnlock()
+			return fmt.Errorf("%w: 已被账号 %s 使用", ErrMailboxInUse, otherID)
+		}
+	}
 	m.mu.RUnlock()
 	if !ok {
 		return fmt.Errorf("账号不存在: %s", id)

@@ -6,6 +6,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -183,6 +184,10 @@ func (s *Server) setMailboxHandler(c *gin.Context) {
 		Provider: req.Provider, Email: req.Email, IMAPHost: req.IMAPHost, IMAPPort: req.IMAPPort, Password: req.AuthorizationCode,
 	})
 	if err != nil {
+		if errors.Is(err, account.ErrMailboxInUse) {
+			failCode(c, http.StatusConflict, "MAILBOX_IN_USE", "该收件邮箱已被其他账号绑定；一个外部邮箱只能绑定一个账号，请改用别名筛选或换一个邮箱")
+			return
+		}
 		backendFail(c, err)
 		return
 	}

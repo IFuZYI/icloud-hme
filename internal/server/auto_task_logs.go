@@ -81,37 +81,45 @@ func (m *autoTaskManager) listLogs() []AliasTaskLog {
 //   - 没有可清理条目时不重写文件;
 //   - 落盘失败时内存不变并返回错误(与 logLocked 一致: 先写盘成功才更新内存)。
 //
-// 返回 (删除数, 剩余数, error)。
+// 返回 (删除数, 剩余数, error)。会话路径不受范围限制。
 func (m *autoTaskManager) cleanupLogs(olderThanDays int) (int, int, error) {
-	return m.cleanupLogsScoped(olderThanDays, nil)
+	return m.cleanupLogsScoped(olderThanDays, nil, false)
 }
 
 // cleanupLogsScoped 按账号白名单清理日志。
 //
-//	scope 为 nil/空 → 清理全部账号(会话/空范围秘钥);
-//	scope 非空 → 只清理归属账号在白名单内的日志, 范围外账号的日志一律保留
-//	           (防止受限秘钥越权抹除范围外账号的活动痕迹)。
+//	restricted=false → 清理全部账号(会话/空范围秘钥), remaining 为全局日志数;
+//	restricted=true  → 只清理归属账号在白名单内的日志, 范围外账号的日志一律
+//	                   保留(防止受限秘钥越权抹除范围外账号的活动痕迹), 且
+//	                   remaining **只统计范围内的日志**——否则响应里的全局
+//	                   剩余数会构成范围外计数的侧信道(审计 A3)。
 //
-// 归属判定经 TaskID → 任务 AccountID; 归属未知(任务已删)的日志保守保留。
-func (m *autoTaskManager) cleanupLogsScoped(olderThanDays int, scope []string) (int, int, error) {
+// 归属判定经 TaskID → 任务 AccountID; 归属未知(任务已删)的日志保守保留,
+// 也不计入受限秘钥的 remaining。
+func (m *autoTaskManager) cleanupLogsScoped(olderThanDays int, scope []string, restricted bool) (int, int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	cutoff := m.now().AddDate(0, 0, -olderThanDays)
-	restricted := len(scope) > 0
+	inScope := func(entry AliasTaskLog) bool {
+		if !restricted {
+			return true
+		}
+		tk, ok := m.tasks[entry.TaskID]
+		return ok && containsString(scope, tk.AccountID)
+	}
 	kept := make([]AliasTaskLog, 0, len(m.logs))
 	deleted := 0
+	remaining := 0
 	for _, entry := range m.logs {
-		if restricted {
-			tk, ok := m.tasks[entry.TaskID]
-			if !ok || !containsString(scope, tk.AccountID) {
-				kept = append(kept, entry) // 范围外/归属未知: 保留
-				continue
-			}
+		if !inScope(entry) {
+			kept = append(kept, entry) // 范围外/归属未知: 保留, 且不计数
+			continue
 		}
 		ts, err := time.Parse(time.RFC3339, entry.Time)
 		if err != nil {
 			// 时间非法: 保守保留
 			kept = append(kept, entry)
+			remaining++
 			continue
 		}
 		if ts.Before(cutoff) {
@@ -119,13 +127,14 @@ func (m *autoTaskManager) cleanupLogsScoped(olderThanDays int, scope []string) (
 			continue
 		}
 		kept = append(kept, entry)
+		remaining++
 	}
 	if deleted == 0 {
-		return 0, len(m.logs), nil
+		return 0, remaining, nil
 	}
 	if err := m.writeLogs(m.logFile, kept); err != nil {
-		return 0, len(m.logs), err
+		return 0, remaining, err
 	}
 	m.logs = kept
-	return deleted, len(kept), nil
+	return deleted, remaining, nil
 }

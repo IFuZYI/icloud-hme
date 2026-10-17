@@ -137,7 +137,15 @@ func (s *Server) purgeCreateHandler(c *gin.Context) {
 			break
 		}
 	}
-	tk, err := s.purge.create(req.AccountID, name, st, en)
+	// 记录创建者秘钥(会话创建为空): runner 每块删除前据此重校权限,
+	// 秘钥被删除/停用/降权后任务自动暂停, 不再继续删除。
+	createdBy := ""
+	if k, ok := apiKeyFromContext(c); ok {
+		createdBy = k.ID
+	}
+	// 兜底接线执行期校验器(server.go 组装由其它车道持有)。
+	s.purge.ensureKeyGuard(s.keys)
+	tk, err := s.purge.createWithKey(req.AccountID, name, st, en, createdBy)
 	if err != nil {
 		if strings.Contains(err.Error(), "已有清理任务") {
 			failCode(c, http.StatusConflict, "PURGE_IN_PROGRESS", err.Error())
@@ -169,6 +177,20 @@ func (s *Server) listPurgeTasksHandler(c *gin.Context) {
 func (s *Server) purgeTaskActionHandler(action string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id := c.Param("id")
+		tk, found := s.purge.get(id)
+		if !found {
+			failCode(c, http.StatusNotFound, "PURGE_NOT_FOUND", "清理任务不存在")
+			return
+		}
+		// 所有权: 秘钥只能操作自己创建的任务(同账号范围的另一把秘钥不得
+		// 暂停/恢复/取消他人的任务)。管理员会话不受限; 历史任务
+		// (CreatedByKeyID 为空)保持旧行为。
+		if k, isKey := apiKeyFromContext(c); isKey && tk.CreatedByKeyID != "" && k.ID != tk.CreatedByKeyID {
+			failCode(c, http.StatusForbidden, "PERMISSION_DENIED", "只能操作本秘钥创建的任务")
+			return
+		}
+		// 兜底接线执行期校验器(server.go 组装由其它车道持有)。
+		s.purge.ensureKeyGuard(s.keys)
 		var err error
 		switch action {
 		case "pause":
@@ -182,6 +204,12 @@ func (s *Server) purgeTaskActionHandler(action string) gin.HandlerFunc {
 			err = s.purge.cancel(id)
 		}
 		if err != nil {
+			// 因创建者秘钥失效而暂停的任务不可 resume(会话亦不例外):
+			// 秘钥已被吊销/降权, 继续执行等于绕过吊销。
+			if errors.Is(err, ErrResumeDeniedByPolicy) {
+				failCode(c, http.StatusConflict, "PERMISSION_DENIED", purgeResumeDeniedMessage)
+				return
+			}
 			if strings.Contains(err.Error(), "不存在") {
 				failCode(c, http.StatusNotFound, "PURGE_NOT_FOUND", "清理任务不存在")
 				return
@@ -194,8 +222,9 @@ func (s *Server) purgeTaskActionHandler(action string) gin.HandlerFunc {
 			failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
 			return
 		}
-		tk, _ := s.purge.get(id)
-		ok(c, tk)
+		// 动作可能已改变状态: 回读最新快照返回。
+		cur, _ := s.purge.get(id)
+		ok(c, cur)
 	}
 }
 

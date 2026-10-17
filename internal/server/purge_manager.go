@@ -13,12 +13,14 @@ package server
 import (
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
 	"sync"
 	"time"
 
+	"icloud-hme/internal/apikey"
 	"icloud-hme/internal/mail"
 )
 
@@ -54,10 +56,16 @@ type PurgeTask struct {
 	ID          string `json:"id"`
 	AccountID   string `json:"account_id"`
 	AccountName string `json:"account_name,omitempty"`
-	RangeStart  string `json:"range_start"`
-	RangeEnd    string `json:"range_end"`
+	// CreatedByKeyID 是创建任务的 API 秘钥 ID; 管理员会话创建时为空。
+	// 执行期据此重校权限(秘钥删除/停用/缩权/缩范围 → 暂停任务)。
+	CreatedByKeyID string `json:"created_by_key_id,omitempty"`
+	RangeStart     string `json:"range_start"`
+	RangeEnd       string `json:"range_end"`
 	// Status: running|throttled|paused|done|failed|cancelled|interrupted
 	Status string `json:"status"`
+	// PauseReason 是机器可读的暂停原因(如 key_revoked); 普通暂停为空。
+	// 权限失效类原因会拒绝 resume(任务必须用新秘钥重建)。
+	PauseReason string `json:"pause_reason,omitempty"`
 	// Total 是预览确定的待删总数; Processed 是已处理数。
 	Total     int `json:"total"`
 	Processed int `json:"processed"`
@@ -74,6 +82,44 @@ type PurgeTask struct {
 	StartedAt    string   `json:"started_at"`
 	FinishedAt   string   `json:"finished_at,omitempty"`
 	Error        string   `json:"error,omitempty"`
+}
+
+// 暂停原因(机器可读): 由执行期秘钥校验器注入, 用于区分「权限失效」与
+// 普通失败暂停——前者一律拒绝 resume。
+const (
+	purgePauseReasonKeyRevoked           = "key_revoked"
+	purgePauseReasonKeyPermissionRevoked = "key_permission_revoked"
+	purgePauseReasonKeyScopeRevoked      = "key_scope_revoked"
+)
+
+// purgeResumeDeniedMessage 是「因权限失效暂停」的任务 resume 被拒时的
+// 用户可见文案(handler 409 与 manager 哨兵错误共用)。
+const purgeResumeDeniedMessage = "创建该任务的 API 秘钥已失效或权限已变更，请用新秘钥重新创建清理任务"
+
+// ErrResumeDeniedByPolicy 表示任务因创建者秘钥权限失效而暂停, 不允许
+// resume——继续执行等于绕过秘钥吊销, 必须用有效秘钥重建任务。
+var ErrResumeDeniedByPolicy = errors.New(purgeResumeDeniedMessage)
+
+// isPurgePolicyPauseReason 判断暂停原因是否属于「权限失效」类。
+func isPurgePolicyPauseReason(reason string) bool {
+	switch reason {
+	case purgePauseReasonKeyRevoked, purgePauseReasonKeyPermissionRevoked, purgePauseReasonKeyScopeRevoked:
+		return true
+	}
+	return false
+}
+
+// purgePauseReasonMessage 把机器可读的暂停原因翻译为用户可读文案。
+func purgePauseReasonMessage(reason string) string {
+	switch reason {
+	case purgePauseReasonKeyRevoked:
+		return "创建该任务的 API 秘钥已被删除或停用"
+	case purgePauseReasonKeyPermissionRevoked:
+		return "创建该任务的 API 秘钥已失去 inbox.purge 权限"
+	case purgePauseReasonKeyScopeRevoked:
+		return "账号已不在创建该任务的 API 秘钥账号范围内"
+	}
+	return "创建该任务的 API 秘钥权限已失效"
 }
 
 // IsActive 判断任务是否仍在进行(占用账号锁)。
@@ -108,6 +154,13 @@ type purgeManager struct {
 	// invalidateReads 让账号的读缓存失效(收件箱/摘要); nil 时空操作。
 	// 每块删除成功后调用——否则 30s 收件箱缓存仍展示已删邮件。
 	invalidateReads func(accountID string)
+	// keyGuard 在执行期重校任务创建者秘钥的当前权限(每块删除前调用)。
+	// 返回 !ok 时 reason 为暂停原因(key_revoked/key_permission_revoked/
+	// key_scope_revoked)。nil = 不校验(向后兼容: 既有测试/未接线部署)。
+	keyGuard func(keyID, accountID string) (ok bool, reason string)
+	// keyGuardExplicit 标记 keyGuard 已由 SetKeyGuard 显式注入(含 nil):
+	// 此时 ensureKeyGuard 不再覆盖调用方的选择。
+	keyGuardExplicit bool
 	// logFn 写审计日志(可空)。
 	logFn func(taskID, level, format string, args ...any)
 }
@@ -129,6 +182,131 @@ func newPurgeManager(file string, withClient func(string, func(*mail.Client) err
 		}
 	}
 	return m, nil
+}
+
+// SetKeyGuard 注入执行期秘钥校验器(生产 = purgeKeyGuard(keys))。
+//
+// fn 在每个 chunk 删除前被调用: 返回 !ok 时任务立即 paused 并记录 reason,
+// 不再删除任何邮件。传 nil 关闭校验(向后兼容)。
+func (m *purgeManager) SetKeyGuard(fn func(keyID, accountID string) (ok bool, reason string)) {
+	m.mu.Lock()
+	m.keyGuard = fn
+	m.keyGuardExplicit = true
+	m.mu.Unlock()
+}
+
+// ensureKeyGuard 在尚未显式注入校验器时用秘钥管理器兜底接线。
+//
+// server.go 的组装代码由其它车道持有, 因此由清理 handler 在入口处保证
+// 生产路径一定装上执行期校验; 已显式 SetKeyGuard(含 nil)则尊重调用方选择。
+func (m *purgeManager) ensureKeyGuard(keys *apikey.Manager) {
+	if keys == nil {
+		return
+	}
+	m.mu.Lock()
+	if !m.keyGuardExplicit {
+		m.keyGuard = purgeKeyGuard(keys)
+	}
+	m.mu.Unlock()
+}
+
+// keyGuardFn 快照当前校验器(避免与 SetKeyGuard 竞态)。
+func (m *purgeManager) keyGuardFn() func(keyID, accountID string) (ok bool, reason string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.keyGuard
+}
+
+// purgeKeyGuard 基于秘钥管理器构造执行期校验函数。
+//
+// 判定顺序(失败关闭): 秘钥不存在/已停用 → key_revoked; 缺 inbox.purge →
+// key_permission_revoked; 账号不在秘钥范围内 → key_scope_revoked。
+func purgeKeyGuard(keys *apikey.Manager) func(keyID, accountID string) (ok bool, reason string) {
+	return func(keyID, accountID string) (bool, string) {
+		if keys == nil {
+			return true, ""
+		}
+		k, ok := keys.Get(keyID)
+		if !ok || !k.Enabled {
+			return false, purgePauseReasonKeyRevoked
+		}
+		if !k.HasPermission("inbox.purge") {
+			return false, purgePauseReasonKeyPermissionRevoked
+		}
+		if !k.AllowsAccount(accountID) {
+			return false, purgePauseReasonKeyScopeRevoked
+		}
+		return true, ""
+	}
+}
+
+// checkKeyForTask 校验任务创建者秘钥当前是否仍有权对该账号执行清理。
+//
+// 会话创建的任务(CreatedByKeyID 为空)或未注入 keyGuard 时视为通过
+// (向后兼容)。返回 !ok 时 reason 已归一化为约定的三种取值之一。
+func (m *purgeManager) checkKeyForTask(tk PurgeTask) (bool, string) {
+	if tk.CreatedByKeyID == "" {
+		return true, ""
+	}
+	guard := m.keyGuardFn()
+	if guard == nil {
+		return true, ""
+	}
+	ok, reason := guard(tk.CreatedByKeyID, tk.AccountID)
+	if ok {
+		return true, ""
+	}
+	if reason == "" {
+		reason = purgePauseReasonKeyRevoked
+	}
+	return false, reason
+}
+
+// authorizeChunk 是每个 chunk 删除前的权限检查点。
+//
+// 返回 false 表示任务已被暂停(或已消失), 调用方必须立即停止, 不得再删除
+// 任何邮件。
+func (m *purgeManager) authorizeChunk(taskID string) bool {
+	tk, ok := m.get(taskID)
+	if !ok {
+		return false
+	}
+	ok, reason := m.checkKeyForTask(tk)
+	if !ok {
+		m.pauseWithPolicyReason(taskID, reason)
+	}
+	return ok
+}
+
+// pauseWithPolicyReason 因创建者秘钥权限失效而暂停任务: 记录机器可读原因
+// 与用户可读文案, 落盘, 并写一条 warn 级任务日志(category purge 由
+// server 侧 logFn 接线标注)。
+//
+// 这类暂停不可恢复(见 resume), 因此同时释放账号锁: 否则「请用新秘钥重建
+// 任务」会因同账号互斥一直 409, 而失效秘钥又无权 cancel, 形成死锁。
+func (m *purgeManager) pauseWithPolicyReason(taskID, reason string) {
+	msg := purgePauseReasonMessage(reason)
+	m.mu.Lock()
+	t, ok := m.tasks[taskID]
+	if !ok {
+		m.mu.Unlock()
+		return
+	}
+	// 终态任务不得被权限检查「复活」为 paused(取消与块检查可能并发)。
+	if t.Status == "done" || t.Status == "failed" || t.Status == "cancelled" {
+		m.mu.Unlock()
+		return
+	}
+	t.Status = "paused"
+	t.PauseReason = reason
+	t.Error = msg
+	t.CurrentMessage = msg
+	if m.active[t.AccountID] == t.ID {
+		delete(m.active, t.AccountID)
+	}
+	_ = m.saveLocked()
+	m.mu.Unlock()
+	m.log(taskID, "warn", "清理任务已暂停: %s (pause_reason=%s)", msg, reason)
 }
 
 // load 读取持久化任务; 运行中的任务标记 interrupted(重启中断)。
@@ -175,29 +353,36 @@ func (m *purgeManager) saveLocked() error {
 	return writeJSONAtomic(m.file, map[string]any{"tasks": tasks})
 }
 
-// create 创建任务。同账号已有活跃任务时返回错误。
+// create 创建任务(会话创建: 无创建者秘钥)。同账号已有活跃任务时返回错误。
 func (m *purgeManager) create(accountID, accountName string, start, end time.Time) (PurgeTask, error) {
+	return m.createWithKey(accountID, accountName, start, end, "")
+}
+
+// createWithKey 创建任务并记录创建者秘钥 ID(空 = 管理员会话创建)。
+func (m *purgeManager) createWithKey(accountID, accountName string, start, end time.Time, createdByKeyID string) (PurgeTask, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, busy := m.active[accountID]; busy {
 		return PurgeTask{}, fmt.Errorf("该账号已有清理任务在运行")
 	}
 	// 清理任务不重复: 已存在活跃任务的账号直接拒绝(即使 active 表因重启为空,
-	// 也检查任务表——双保险)。
+	// 也检查任务表——双保险)。权限失效暂停的任务永不恢复且已释放账号锁,
+	// 不算「活跃」——否则吊销秘钥后无法用新秘钥重建任务。
 	for _, id := range m.order {
 		t := m.tasks[id]
-		if t.AccountID == accountID && t.IsActive() {
+		if t.AccountID == accountID && t.IsActive() && !isPurgePolicyPauseReason(t.PauseReason) {
 			return PurgeTask{}, fmt.Errorf("该账号已有清理任务在运行")
 		}
 	}
 	tk := &PurgeTask{
-		ID:          "purge_" + randomHexToken(8),
-		AccountID:   accountID,
-		AccountName: accountName,
-		RangeStart:  start.Format(time.RFC3339),
-		RangeEnd:    end.Format(time.RFC3339),
-		Status:      "running",
-		StartedAt:   m.now().Format(time.RFC3339),
+		ID:             "purge_" + randomHexToken(8),
+		AccountID:      accountID,
+		AccountName:    accountName,
+		CreatedByKeyID: createdByKeyID,
+		RangeStart:     start.Format(time.RFC3339),
+		RangeEnd:       end.Format(time.RFC3339),
+		Status:         "running",
+		StartedAt:      m.now().Format(time.RFC3339),
 	}
 	m.tasks[tk.ID] = tk
 	m.order = append(m.order, tk.ID)
@@ -328,30 +513,52 @@ func (m *purgeManager) pause(id string) error {
 
 // resume 继续暂停/中断的任务。
 //
+// 权限失效暂停(PauseReason ∈ key_revoked/key_permission_revoked/
+// key_scope_revoked)的任务一律拒绝 resume(会话亦不例外): 秘钥已被删除/
+// 停用/降权, 继续执行等于绕过吊销, 必须用有效秘钥重建任务。
+//
 // 同账号互斥: 若账号已有其它活跃任务(active 映射指向别的任务 ID),
 // 拒绝 resume——否则同账号会并发两个 runner, IMAP 命令数翻倍。
 func (m *purgeManager) resume(id string) error {
+	tk, ok := m.get(id)
+	if !ok {
+		return fmt.Errorf("任务不存在")
+	}
+	if isPurgePolicyPauseReason(tk.PauseReason) {
+		return ErrResumeDeniedByPolicy
+	}
+	// 只有 paused/interrupted 可恢复: 先判状态, 避免对 done/cancelled 的
+	// 任务做权限检查时把它改写成 paused。
+	switch tk.Status {
+	case "paused", "interrupted":
+	default:
+		return fmt.Errorf("任务状态 %s 不可继续", tk.Status)
+	}
+	// 暂停后秘钥可能已失效(如重启遗留的 interrupted 任务): 先重校再恢复,
+	// 避免 resume 后 runner 才暂停(既产生一次空跑, 也让状态在两次请求间抖动)。
+	if ok, reason := m.checkKeyForTask(tk); !ok {
+		m.pauseWithPolicyReason(id, reason)
+		return ErrResumeDeniedByPolicy
+	}
+
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	t, ok := m.tasks[id]
 	if !ok {
-		m.mu.Unlock()
 		return fmt.Errorf("任务不存在")
 	}
 	if cur, busy := m.active[t.AccountID]; busy && cur != id {
-		m.mu.Unlock()
 		return fmt.Errorf("该账号已有清理任务在运行")
 	}
 	switch t.Status {
 	case "paused", "interrupted":
 		t.Status = "running"
+		t.PauseReason = "" // 普通暂停恢复: 清掉暂停原因
 		m.active[t.AccountID] = id
 	default:
-		m.mu.Unlock()
 		return fmt.Errorf("任务状态 %s 不可继续", t.Status)
 	}
-	err := m.saveLocked()
-	m.mu.Unlock()
-	return err
+	return m.saveLocked()
 }
 
 // cancel 取消任务并释放账号锁。
@@ -367,7 +574,11 @@ func (m *purgeManager) cancel(id string) error {
 	}
 	t.Status = "cancelled"
 	t.FinishedAt = m.now().Format(time.RFC3339)
-	delete(m.active, t.AccountID)
+	// 只释放自己持有的账号锁: 权限失效暂停会释放锁并把账号让给新任务,
+	// 此时取消旧任务不得误删新任务的锁。
+	if m.active[t.AccountID] == t.ID {
+		delete(m.active, t.AccountID)
+	}
 	return m.saveLocked()
 }
 

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"icloud-hme/internal/apikey"
 )
 
 const (
@@ -61,6 +62,12 @@ type AliasTask struct {
 	ID        string `json:"id"`
 	Enabled   bool   `json:"enabled"`
 	AccountID string `json:"account_id"`
+	// CreatedByKeyID 是创建任务的 API 秘钥 ID; 管理员会话创建时为空。
+	// 执行期据此重校权限(秘钥删除/停用/缩权/缩范围 → 停用任务), 避免
+	// 「创建时校验一次, 之后永久放行」的延迟权限漏洞。
+	CreatedByKeyID string `json:"created_by_key_id,omitempty"`
+	// PauseReason 是机器可读的暂停原因(如 key_revoked); 普通暂停为空。
+	PauseReason string `json:"pause_reason,omitempty"`
 	// Mode 为任务类型：auto(自主) 或 scheduled(定时)。
 	Mode string `json:"mode"`
 	// IntervalMinutes 仅 scheduled 任务使用：每隔多少分钟创建一批。
@@ -127,6 +134,32 @@ const (
 	taskOutcomeWindowFailLimit = 2
 )
 
+// 创建者秘钥权限失效的暂停原因(机器可读): 与 purge 任务同一套取值, 供
+// 前端区分「权限失效」与普通暂停, 也便于审计与告警。
+const (
+	aliasTaskPauseReasonKeyRevoked           = "key_revoked"
+	aliasTaskPauseReasonKeyPermissionRevoked = "key_permission_revoked"
+	aliasTaskPauseReasonKeyScopeRevoked      = "key_scope_revoked"
+)
+
+// aliasTaskKeyPermission 是任务生命周期所需的秘钥权限: 与创建/管理任务
+// 的接口(tasks.write)一致。执行期只要该权限被收回就停止创建, 否则等于
+// 「创建时校验一次、之后永久放行」。
+const aliasTaskKeyPermission = "tasks.write"
+
+// aliasTaskPauseReasonMessage 把机器可读的暂停原因翻译为用户可读文案。
+func aliasTaskPauseReasonMessage(reason string) string {
+	switch reason {
+	case aliasTaskPauseReasonKeyRevoked:
+		return "创建该任务的 API 秘钥已被删除或停用"
+	case aliasTaskPauseReasonKeyPermissionRevoked:
+		return "创建该任务的 API 秘钥已失去 tasks.write 权限"
+	case aliasTaskPauseReasonKeyScopeRevoked:
+		return "账号已不在创建该任务的 API 秘钥账号范围内"
+	}
+	return "创建该任务的 API 秘钥权限已失效"
+}
+
 // recordTaskOutcome 把一次创建结果追加到容错历史并裁剪到窗口大小。
 func (t AliasTask) recordTaskOutcome(ok bool) []string {
 	outcome := "fail"
@@ -187,6 +220,9 @@ type aliasTaskInput struct {
 	LabelMode       string `json:"label_mode"`
 	LabelPrefix     string `json:"label_prefix"`
 	HashLength      int    `json:"hash_length"`
+	// CreatedByKeyID 由 handler 从鉴权上下文写入(不来自请求体): 记录任务
+	// 的创建者秘钥, 供执行期/重启武装前重校权限。
+	CreatedByKeyID string `json:"-"`
 }
 type aliasTaskFile struct {
 	Tasks          []AliasTask                     `json:"tasks"`
@@ -247,8 +283,17 @@ type autoTaskManager struct {
 	now        func() time.Time
 	rand       func() float64
 	// backfilledCreatedAt 标记加载时为旧任务补写了合成创建时刻;
-	// 首次 list() 惰性落盘, 使展示顺序不再依赖文件数组位置。
+	// start() 启动时落盘一次(不放在 list(): 只读的 GET 不得写盘)。
 	backfilledCreatedAt bool
+	// keysFile 是与任务文件同目录的秘钥文件(api_keys.json); 空表示未知。
+	keysFile string
+	// keyGuard 在执行期/武装前重校任务创建者秘钥的当前权限。返回 !ok 时
+	// reason 为暂停原因(key_revoked/key_permission_revoked/key_scope_revoked)。
+	// nil = 不校验(向后兼容: 纯内存模式或未接线部署)。
+	keyGuard func(keyID, accountID string) (ok bool, reason string)
+	// keyGuardExplicit 标记 keyGuard 已由 SetKeyGuard 显式注入(含 nil):
+	// 此时 ensureKeyGuard 不再用秘钥管理器覆盖调用方的选择。
+	keyGuardExplicit bool
 }
 
 // normalizeAliasTask 以当前时间归一化任务输入(测试与旧调用方入口)。
@@ -272,6 +317,8 @@ func normalizeAliasTaskAt(in aliasTaskInput, now time.Time) (AliasTask, error) {
 		AccountID:  strings.TrimSpace(in.AccountID),
 		MaxTotal:   in.TargetCount,
 		NextNumber: 1,
+		// 记录创建者秘钥(handler 从鉴权上下文写入); 执行期据此重校权限。
+		CreatedByKeyID: in.CreatedByKeyID,
 		// 为名称库抽取分配独立随机种子，使不同任务的序列彼此错开。
 		LabelSeed: newLabelSeed(),
 	}
@@ -468,6 +515,15 @@ func (m *autoTaskManager) nowFunc() time.Time {
 
 func newAutoTaskManager(file string, backend Backend) *autoTaskManager {
 	m := &autoTaskManager{file: file, logFile: filepath.Join(filepath.Dir(file), "alias_task_logs.json"), backend: backend, tasks: map[string]AliasTask{}, stops: map[string]chan struct{}{}, done: map[string]chan struct{}{}, creating: map[string]bool{}, manualDaily: map[string]dailyCreationCounter{}, autoDaily: map[string]dailyCreationCounter{}, creationGuards: map[string]creationGuard{}, closed: make(chan struct{}), batchDelay: 3 * time.Second, writeState: writeJSONAtomic, writeLogs: writeJSONAtomic, now: time.Now}
+	// 生产兜底: 秘钥文件默认与任务文件同目录(见 server.go 的 keyFile 推导)。
+	// 先装上基于文件的校验器, 保证「服务重启后 start() 自动武装」这一路径
+	// 无需任何 handler 请求也能重校创建者秘钥; 后续 ensureKeyGuard(keys)
+	// 会用进程内的秘钥管理器覆盖它(更准确, 且无需每次读盘)。
+	// 纯内存模式(file 为空)没有秘钥文件可读 → 保持 nil(不校验)。
+	if file != "" {
+		m.keysFile = filepath.Join(filepath.Dir(file), "api_keys.json")
+		m.keyGuard = m.aliasTaskFileKeyGuard
+	}
 	m.load()
 	m.loadLogs()
 	return m
@@ -509,8 +565,8 @@ func (m *autoTaskManager) load() {
 			}
 			// 兼容旧任务：created_at 字段引入前的记录没有创建时刻, 按文件
 			// 数组位置补写合成时间戳——展示顺序在字段引入后保持稳定, 且
-			// 新任务(真实时刻)自然排在旧任务之后。首次 list() 惰性落盘,
-			// 此后顺序不再依赖文件数组位置。
+			// 新任务(真实时刻)自然排在旧任务之后。补写结果由 start() 在
+			// 启动时落盘一次(不放 list(): GET 只读不得写盘)。
 			if t.CreatedAt == "" {
 				t.CreatedAt = taskLegacyCreatedAt(i)
 				m.backfilledCreatedAt = true
@@ -556,45 +612,190 @@ func (m *autoTaskManager) taskListLocked() []AliasTask {
 	// 展示顺序必须跨调用稳定: Go map 的迭代顺序是随机的, 直接返回会让前端
 	// 每 2 秒轮询都拿到不同顺序、卡片「闪现换位」(用户实测反馈)。按创建
 	// 时间排序(新任务追加末尾、已有任务位置不动), ID 仅作同时刻的稳定兜底。
+	sortTasksForDisplay(out)
+	return out
+}
+
+// list 返回任务列表(只读)。
+//
+// 纯读契约: GET /api/alias-tasks 只需 tasks.list 权限, 不得产生任何写入——
+// 既不能改动范围外任务, 也不能改 tasks.json 的 mtime/内容(审计 A2)。因此
+// 每日计数重置与配额口径迁移只在**返回值**上做展示口径的惰性刷新(与调度
+// 同口径, 列表不会显示旧周期的计数), 真正的状态推进与落盘由执行路径
+// (runOnce / ensureRunning 的调度 tick / start)完成。
+func (m *autoTaskManager) list() []AliasTask {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := m.nowFunc()
+	out := make([]AliasTask, 0, len(m.tasks))
+	for _, t := range m.tasks {
+		// 复制后再刷新: 不触碰 m.tasks, 不写盘。
+		t = resetDailyCount(t, now)
+		t, _ = migrateQuotaTimezone(t, now)
+		out = append(out, t)
+	}
+	sortTasksForDisplay(out)
+	return out
+}
+
+// sortTasksForDisplay 按创建时间排序(新任务追加末尾、已有任务位置不动),
+// ID 仅作同时刻的稳定兜底——保证前端轮询拿到的顺序稳定(禁止闪现换位)。
+func sortTasksForDisplay(out []AliasTask) {
 	slices.SortFunc(out, func(a, b AliasTask) int {
 		if c := strings.Compare(a.CreatedAt, b.CreatedAt); c != 0 {
 			return c
 		}
 		return strings.Compare(a.ID, b.ID)
 	})
-	return out
-}
-func (m *autoTaskManager) list() []AliasTask {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	// 展示与调度同口径: 「今日已生成 / 今日总数」按任务(代理 IP)时区的作息
-	// 周期惰性刷新——跨周期后即使尚未触发 runOnce(任务暂停、睡眠期), 列表
-	// 也必须显示新周期的计数与配额, 否则显示与计划安排对不上; 尚未按任务
-	// 时区折算的配额(旧版本数据)也在读取时一次性迁移。
-	now := m.nowFunc()
-	changed := false
-	for id, t := range m.tasks {
-		if updated := resetDailyCount(t, now); dailyResetChanged(t, updated) {
-			m.tasks[id] = updated
-			changed = true
-		}
-		if migrated, ok := migrateQuotaTimezone(m.tasks[id], now); ok {
-			m.tasks[id] = migrated
-			changed = true
-		}
-	}
-	if changed || m.backfilledCreatedAt {
-		if err := m.saveLocked(); err == nil {
-			m.backfilledCreatedAt = false
-		}
-	}
-	return m.taskListLocked()
 }
 func (m *autoTaskManager) get(id string) (AliasTask, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	t, ok := m.tasks[id]
 	return t, ok
+}
+
+// ====================================================================
+// 创建者秘钥的执行期重校(延迟权限修复)
+// ====================================================================
+
+// SetKeyGuard 注入执行期秘钥校验器。
+//
+// fn 在每次创建别名前、任务武装前(ensureRunning/start)被调用; 返回 !ok 时
+// 任务立即停用并记录 reason, 不再调用上游 CreateAlias。传 nil 关闭校验
+// (向后兼容: 纯内存模式或未接线部署)。
+func (m *autoTaskManager) SetKeyGuard(fn func(keyID, accountID string) (ok bool, reason string)) {
+	m.mu.Lock()
+	m.keyGuard = fn
+	m.keyGuardExplicit = true
+	m.mu.Unlock()
+}
+
+// ensureKeyGuard 在尚未显式注入校验器时用秘钥管理器接线。
+//
+// server.go 的组装代码由其它车道持有, 因此由任务 handler 在入口处保证
+// 生产路径装上执行期校验; 已显式 SetKeyGuard(含 nil)则尊重调用方选择。
+func (m *autoTaskManager) ensureKeyGuard(keys *apikey.Manager) {
+	if keys == nil {
+		return
+	}
+	m.mu.Lock()
+	if !m.keyGuardExplicit {
+		m.keyGuard = aliasTaskKeyGuard(keys)
+	}
+	m.mu.Unlock()
+}
+
+// keyGuardFn 快照当前校验器(避免与 SetKeyGuard 竞态)。
+func (m *autoTaskManager) keyGuardFn() func(keyID, accountID string) (ok bool, reason string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.keyGuard
+}
+
+// aliasTaskKeyGuard 基于秘钥管理器构造执行期校验函数。
+//
+// 判定顺序(失败关闭): 秘钥不存在/已停用 → key_revoked; 缺 tasks.write →
+// key_permission_revoked; 账号不在秘钥范围内 → key_scope_revoked。
+func aliasTaskKeyGuard(keys *apikey.Manager) func(keyID, accountID string) (ok bool, reason string) {
+	return func(keyID, accountID string) (bool, string) {
+		return aliasTaskKeyGuardCheck(keys, keyID, accountID)
+	}
+}
+
+func aliasTaskKeyGuardCheck(keys *apikey.Manager, keyID, accountID string) (bool, string) {
+	if keys == nil {
+		return true, ""
+	}
+	k, ok := keys.Get(keyID)
+	if !ok || !k.Enabled {
+		return false, aliasTaskPauseReasonKeyRevoked
+	}
+	if !k.HasPermission(aliasTaskKeyPermission) {
+		return false, aliasTaskPauseReasonKeyPermissionRevoked
+	}
+	if !k.AllowsAccount(accountID) {
+		return false, aliasTaskPauseReasonKeyScopeRevoked
+	}
+	return true, ""
+}
+
+// aliasTaskFileKeyGuard 是未注入秘钥管理器时的兜底校验器: 从与任务文件
+// 同目录的 api_keys.json 读取秘钥现状(每次校验重新加载, 能看到删除/停用/
+// 缩权/缩范围的即时结果)。
+//
+// 读盘失败(文件损坏/权限)时不据此停用任务——启动路径已拒绝损坏的秘钥
+// 文件, 运行期瞬时 IO 错误不应把全部任务误停。
+func (m *autoTaskManager) aliasTaskFileKeyGuard(keyID, accountID string) (bool, string) {
+	mgr, err := apikey.NewManager(m.keysFile)
+	if err != nil {
+		return true, ""
+	}
+	return aliasTaskKeyGuardCheck(mgr, keyID, accountID)
+}
+
+// checkKeyForTask 校验任务创建者秘钥当前是否仍有权对该账号执行创建。
+//
+// 会话创建的任务(CreatedByKeyID 为空)或未注入 keyGuard 时视为通过
+// (向后兼容)。返回 !ok 时 reason 已归一化为约定的三种取值之一。
+func (m *autoTaskManager) checkKeyForTask(t AliasTask) (bool, string) {
+	if t.CreatedByKeyID == "" {
+		return true, ""
+	}
+	guard := m.keyGuardFn()
+	if guard == nil {
+		return true, ""
+	}
+	ok, reason := guard(t.CreatedByKeyID, t.AccountID)
+	if ok {
+		return true, ""
+	}
+	if reason == "" {
+		reason = aliasTaskPauseReasonKeyRevoked
+	}
+	return false, reason
+}
+
+// pauseForRevokedKey 因创建者秘钥权限失效而停用任务: 置 Enabled=false、
+// PauseReason、落盘, 并写一条 warn 级任务日志(category auto_task)。
+//
+// 返回 true 表示任务已被停用(调用方必须停止执行); 任务不存在时返回 false。
+// 落盘失败时内存仍保持停用(安全侧), 错误记入 LastError。
+func (m *autoTaskManager) pauseForRevokedKey(id, reason string) bool {
+	m.mu.Lock()
+	t, ok := m.tasks[id]
+	if !ok {
+		m.mu.Unlock()
+		return false
+	}
+	t.Enabled = false
+	t.PauseReason = reason
+	t.NextRun = ""
+	m.tasks[id] = t
+	if err := m.saveLocked(); err != nil {
+		t.LastError = "暂停状态保存失败：" + err.Error()
+		m.tasks[id] = t
+	}
+	_ = m.logLockedWithCategory("auto_task", id, "warn",
+		"%s（%s），任务已暂停", aliasTaskPauseReasonMessage(reason), reason)
+	m.mu.Unlock()
+	m.requestStop(id)
+	return true
+}
+
+// pauseIfKeyRevoked 在任务处于启用状态且创建者秘钥已失效时停用它。
+//
+// 返回 true 表示任务已因权限失效被停用, 调用方不得再武装/执行该任务。
+func (m *autoTaskManager) pauseIfKeyRevoked(id string) bool {
+	t, ok := m.get(id)
+	if !ok || !t.Enabled {
+		return false
+	}
+	ok, reason := m.checkKeyForTask(t)
+	if ok {
+		return false
+	}
+	return m.pauseForRevokedKey(id, reason)
 }
 func (m *autoTaskManager) create(in aliasTaskInput) (AliasTask, error) {
 	t, e := normalizeAliasTaskAt(in, m.nowFunc())
@@ -669,6 +870,11 @@ func (m *autoTaskManager) update(id string, in aliasTaskInput) (AliasTask, error
 	// 编辑保存会重新启用任务: 清空失败历史, 给用户显式干预后的任务干净预算
 	// (与 toggle 启用同口径)。normalize 新建的 n 本就不带历史, 此处显式声明契约。
 	n.RecentOutcomes = nil
+	// 创建者秘钥不可通过编辑转移/清空: 否则「用有效秘钥编辑一下」就能洗白
+	// 因秘钥吊销而停用的任务。清理 PauseReason: 若秘钥仍无效, ensureRunning
+	// 会重新校验并再次停用(带新原因)。
+	n.CreatedByKeyID = old.CreatedByKeyID
+	n.PauseReason = ""
 	n.NextNumber = old.NextNumber
 	// 保留创建时刻: 编辑不得改变展示位置(禁止闪现换位)。
 	n.CreatedAt = old.CreatedAt
@@ -727,6 +933,11 @@ func (m *autoTaskManager) update(id string, in aliasTaskInput) (AliasTask, error
 			e = aliasTaskPersistenceError(runErr)
 		}
 	}
+	// ensureRunning 可能因创建者秘钥失效而立即把任务重新停用: 返回最终状态,
+	// 避免响应里显示 enabled=true 而实际已暂停。
+	if cur, ok := m.get(id); ok {
+		n = cur
+	}
 	return n, e
 }
 func (m *autoTaskManager) remove(id string) error {
@@ -768,6 +979,8 @@ func (m *autoTaskManager) toggle(id string) (AliasTask, error) {
 		// 手动启用: 清空失败历史, 让用户显式恢复后的任务从干净的容错预算开始
 		// (否则上次触发暂停的失败记录会立刻再次把它停掉)。
 		t.RecentOutcomes = nil
+		// 清空暂停原因; 若创建者秘钥仍失效, ensureRunning 会重校并再次停用。
+		t.PauseReason = ""
 	} else {
 		// 暂停:清空下次执行时刻,避免界面残留暂停前的旧时刻。
 		t.NextRun = ""
@@ -794,6 +1007,11 @@ func (m *autoTaskManager) toggle(id string) (AliasTask, error) {
 		}
 	} else {
 		m.stop(id)
+	}
+	// ensureRunning 可能因创建者秘钥失效而立即把任务重新停用: 返回最终状态,
+	// 避免响应里显示 enabled=true 而实际已暂停。
+	if cur, ok := m.get(id); ok {
+		t = cur
 	}
 	return t, e
 }
@@ -827,12 +1045,22 @@ func (m *autoTaskManager) close() {
 	}
 }
 func (m *autoTaskManager) ensureRunning(id string) error {
+	// 武装前重校创建者秘钥: 权限已失效的任务不得重新进入调度循环
+	// (创建后延迟启动、编辑/手动启用、服务重启后的 start() 都经过这里)。
+	if m.pauseIfKeyRevoked(id) {
+		return nil
+	}
 	m.mu.Lock()
 	t, ok := m.tasks[id]
 	if !ok || !t.Enabled || t.CreatedCount >= t.MaxTotal || m.stops[id] != nil {
 		m.mu.Unlock()
 		return nil
 	}
+	// 调度 tick 的惰性刷新: 展示读路径(list)已纯读, 跨周期的每日计数重置与
+	// 配额口径迁移在真正要排下一轮时推进并随本次落盘持久化。
+	now := m.nowFunc()
+	t = resetDailyCount(t, now)
+	t, _ = migrateQuotaTimezone(t, now)
 	old := t
 	stop := make(chan struct{})
 	done := make(chan struct{})
@@ -842,12 +1070,12 @@ func (m *autoTaskManager) ensureRunning(id string) error {
 	auto := t.Mode == taskModeAuto
 	var firstDelay time.Duration
 	if auto {
-		firstDelay = m.nextAutoDelay(t, m.nowFunc())
+		firstDelay = m.nextAutoDelay(t, now)
 	} else {
 		firstDelay = time.Duration(t.IntervalMinutes) * time.Minute
 	}
 	// 从「启用时刻 + 间隔」推算下次执行,而不是沿用暂停前的绝对时刻。
-	t.NextRun = m.nowFunc().Add(firstDelay).Format(time.RFC3339)
+	t.NextRun = now.Add(firstDelay).Format(time.RFC3339)
 	m.tasks[id] = t
 	saveErr := m.saveLocked()
 	if saveErr != nil {
@@ -995,6 +1223,13 @@ func (m *autoTaskManager) refreshTimezone(id string) {
 }
 
 func (m *autoTaskManager) runOnce(id string) AliasTask {
+	// 延迟权限校验: 创建者秘钥若已被删除/停用/缩权/缩范围, 立即停用任务并
+	// 写审计日志, 不得再调用上游 CreateAlias——秘钥吊销必须马上生效, 而不是
+	// 「等任务自己跑完」。
+	if m.pauseIfKeyRevoked(id) {
+		t, _ := m.get(id)
+		return t
+	}
 	// 先刷新调度时区(代理出口 IP 变化后自动跟随), 再进入创建流程。
 	m.refreshTimezone(id)
 	m.mu.Lock()
@@ -1005,7 +1240,11 @@ func (m *autoTaskManager) runOnce(id string) AliasTask {
 	}
 	t, ok := m.tasks[id]
 	if ok {
-		t = resetDailyCount(t, m.nowFunc())
+		// 执行路径的惰性刷新(展示读路径 list 已纯读): 跨周期计数重置与配额
+		// 口径迁移在此推进; 随本轮后续的状态落盘(预留/创建结果)一起持久化。
+		now := m.nowFunc()
+		t = resetDailyCount(t, now)
+		t, _ = migrateQuotaTimezone(t, now)
 		m.tasks[id] = t
 	}
 	if !ok || !t.Enabled || t.CreatedCount >= t.MaxTotal {
@@ -1073,6 +1312,14 @@ func (m *autoTaskManager) runOnce(id string) AliasTask {
 	// 或上游失败达到容错预算)。上游偶发失败不设置它, 任务保持启用并自动重试。
 	pauseReason := ""
 	for i := 0; i < count; i++ {
+		// 批内逐次重校创建者秘钥(每次 CreateAlias 前): 批处理可能持续数十秒,
+		// 秘钥在批内被吊销时立即停用任务, 不再创建后续别名。
+		if cur, ok := m.get(id); !ok || !cur.Enabled {
+			break
+		}
+		if m.pauseIfKeyRevoked(id) {
+			break
+		}
 		// 同一周期内连续创建时留出间隔，避免瞬时高频触发上游风控。
 		if i > 0 {
 			time.Sleep(m.batchDelay)
@@ -1489,8 +1736,26 @@ func (m *autoTaskManager) start() {
 			ids = append(ids, id)
 		}
 	}
+	backfilled := m.backfilledCreatedAt
 	m.mu.Unlock()
+	// 重启武装前重校创建者秘钥: 服务重启不携带任何请求凭据, 不能因此把
+	// 「创建者秘钥已被删除/停用/缩权/缩范围」的任务自动续跑(延迟权限漏洞)。
+	// 不通过的任务直接停用(带 PauseReason + warn 日志), 不武装。
 	for _, id := range ids {
-		m.ensureRunning(id)
+		if m.pauseIfKeyRevoked(id) {
+			continue
+		}
+		_ = m.ensureRunning(id)
+	}
+	// 旧任务 created_at 的补写落盘放在启动路径(不在只读的 list() 里):
+	// 展示顺序不再依赖文件数组位置, 且 GET 请求永远不会改文件。
+	if backfilled {
+		m.mu.Lock()
+		if m.backfilledCreatedAt {
+			if err := m.saveLocked(); err == nil {
+				m.backfilledCreatedAt = false
+			}
+		}
+		m.mu.Unlock()
 	}
 }

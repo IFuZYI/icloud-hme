@@ -162,6 +162,15 @@ func (s *Server) requirePermission() gin.HandlerFunc {
 				return
 			}
 		}
+		// 全局动作(/reload)不接受范围受限秘钥: 它重载全部账号配置, 与
+		// 「仅限白名单账号」的授权语义冲突; 且 Reload 会把已删除账号复活。
+		if c.Request.Method == http.MethodPost && c.FullPath() == "/api/reload" {
+			if _, restricted := keyScopeFromContext(c); restricted {
+				slog.Debug("范围受限秘钥被拒执行全局重载", "key_id", key.ID)
+				failCode(c, http.StatusForbidden, "ACCOUNT_NOT_ALLOWED", "API 秘钥无权执行全局操作")
+				return
+			}
+		}
 		// 账号使用范围: 校验请求声明的「每个」账号来源, 任一越界即拒。
 		//
 		// 失败关闭(质量审查 Important): body 读取失败(如 chunked 超大 body
@@ -298,6 +307,22 @@ func keyScopeFromContext(c *gin.Context) ([]string, bool) {
 		return nil, false
 	}
 	return key.AccountIDs, true
+}
+
+// apiKeyFromContext 返回当前请求使用的 API 秘钥。
+//
+// 第二个返回值 false 表示当前请求走的是管理员会话(没有秘钥身份)。
+// 供需要记录「创建者」或做所有权判断的 handler/后台任务使用。
+func apiKeyFromContext(c *gin.Context) (apikey.Key, bool) {
+	if c.GetString(ctxAuthKind) != authKindAPIKey {
+		return apikey.Key{}, false
+	}
+	v, ok := c.Get(ctxAPIKey)
+	if !ok {
+		return apikey.Key{}, false
+	}
+	key, ok := v.(apikey.Key)
+	return key, ok
 }
 
 // filterTasksByKeyScope 按秘钥账号范围过滤任务列表(会话或空范围返回原列表)。

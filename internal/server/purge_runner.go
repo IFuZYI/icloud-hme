@@ -119,6 +119,12 @@ func (m *purgeManager) runSync(taskID string) {
 				return
 			}
 
+			// 权限检查点(进入节流等待前先快速失败): 创建者秘钥若已被删除/
+			// 停用/降权/缩范围, 立即暂停并停止, 不再删除任何邮件。
+			if !m.authorizeChunk(taskID) {
+				return
+			}
+
 			// 节流窗口: 滚动 1 小时块数封顶。
 			if wait := m.throttleWait(taskID); wait > 0 {
 				m.setStatus(taskID, "throttled", fmt.Sprintf("风控节流中, 约 %s 后继续", wait.Round(time.Second)))
@@ -131,6 +137,12 @@ func (m *purgeManager) runSync(taskID string) {
 					return
 				}
 				m.setStatus(taskID, "running", "")
+			}
+
+			// 权限检查点(删除前重校): 节流可能睡了很久, 期间秘钥可能已失效。
+			// 这是「延迟权限」漏洞的关键闸门——每块删除前都必须重新确认。
+			if !m.authorizeChunk(taskID) {
+				return
 			}
 
 			// 执行一块(失败重试 1 次; 每次调用带操作预算防 IMAP 卡死)。

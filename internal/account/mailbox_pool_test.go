@@ -64,10 +64,13 @@ func TestExternalMailboxConnectionReusedAcrossReads(t *testing.T) {
 	}
 }
 
-// TestExternalMailboxConnectionSharedAcrossAccounts 验证同一收件邮箱(服务器+邮箱
-// 相同)跨账号共享一条连接——池键必须落在「邮箱」而非「账号」上, 否则同一邮箱
-// 会被多个账号反复建连(封禁风险)。
-func TestExternalMailboxConnectionSharedAcrossAccounts(t *testing.T) {
+// TestExternalMailboxPoolKeyedByMailbox 验证连接池的键落在「邮箱」而非「账号」上。
+//
+// 背景变更(审计 B1): 同一个外部收件邮箱不再允许绑定到两个账号——共享物理邮箱
+// 会让一个账号的受限 API 秘钥读到/删除另一个账号别名的邮件。绑定阶段已拒绝
+// 重复(TestSetMailboxRejectsDuplicateEmail), 但池本身仍必须按邮箱键复用连接,
+// 否则同一邮箱在重连/多客户端场景下会被反复建连(服务商风控信号)。
+func TestExternalMailboxPoolKeyedByMailbox(t *testing.T) {
 	srv := mailtest.NewServer(t, mailtest.Options{})
 	t.Cleanup(mail.OverrideDialForTest(mailtest.DialInsecure))
 
@@ -78,21 +81,19 @@ func TestExternalMailboxConnectionSharedAcrossAccounts(t *testing.T) {
 	}
 	defer m.Close()
 
-	idA := newMailboxAccount(t, m, "号A", "same@163.com", srv)
-	idB := newMailboxAccount(t, m, "号B", "same@163.com", srv)
 	srv.AddMessage(t, "INBOX", "a@example.com", "same@163.com", "邮件", time.Now())
-
 	before := srv.ConnCount()
-	for _, id := range []string{idA, idB} {
-		if err := m.WithMailClient(id, func(mc *mail.Client) error {
+	for i := 0; i < 2; i++ {
+		err := m.imapPool.DoWithServer("same@163.com", "same@163.com", "auth-code", srv.Host, srv.Port, func(mc *mail.Client) error {
 			_, _, e := mc.ListInboxPageRange(10, 0, mail.DateRange{})
 			return e
-		}); err != nil {
-			t.Fatalf("读信失败: %v", err)
+		})
+		if err != nil {
+			t.Fatalf("第 %d 次读信失败: %v", i+1, err)
 		}
 	}
 	if delta := srv.ConnCount() - before; delta != 1 {
-		t.Fatalf("同一收件邮箱跨账号应共享 1 个连接, 实际新建 %d 个", delta)
+		t.Fatalf("同一收件邮箱应共享 1 个连接, 实际新建 %d 个", delta)
 	}
 }
 

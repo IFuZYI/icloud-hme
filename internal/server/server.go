@@ -639,6 +639,15 @@ func (s *Server) batchAliasHandler(c *gin.Context) {
 		}
 	}
 
+	// 归属校验: 范围受限秘钥不得用范围内账号搭配范围外别名 ID。
+	batchIDs := make([]string, 0, len(req.Aliases))
+	for _, item := range req.Aliases {
+		batchIDs = append(batchIDs, item.AnonymousID)
+	}
+	if !s.aliasOwnershipOK(c, req.AccountID, batchIDs) {
+		return
+	}
+
 	logID := "batch_alias_" + req.Action
 	// 日志策略: 开始 1 条 + 失败逐条 + 结束 1 条(成功项在结束条聚合计数)。
 	// 逐项写日志会让 200 项批量产生 202 次全文件重写; 聚合后通常 2-3 次。
@@ -694,8 +703,37 @@ func (s *Server) batchAliasHandler(c *gin.Context) {
 	ok(c, data)
 }
 
-// validateAliasAction 校验别名操作的匿名 ID 与请求体。
-func validateAliasAction(c *gin.Context) (accountID, anonymousID string, valid bool) {
+// aliasOwnershipOK 校验别名 ID 确实属于该账号(仅对范围受限秘钥强制)。
+//
+// 别名 ID 不携带账号信息, 而 HME 的停用/删除接口以「账号会话 + 别名 ID」定位。
+// 若不校验归属, 范围受限秘钥可用范围内的 account_id 搭配范围外的别名 ID
+// (审计 B2/A4)。会话用户是管理员, 不做额外的上游调用。
+//
+// 不在列表内时返回与「别名不存在」相同的 404, 避免范围外资源变成存在性探针。
+func (s *Server) aliasOwnershipOK(c *gin.Context, accountID string, anonymousIDs []string) bool {
+	if _, restricted := keyScopeFromContext(c); !restricted {
+		return true
+	}
+	aliases, err := s.be.ListAliases(accountID)
+	if err != nil {
+		backendFail(c, err)
+		return false
+	}
+	owned := make(map[string]struct{}, len(aliases))
+	for _, a := range aliases {
+		owned[a.AnonymousID] = struct{}{}
+	}
+	for _, id := range anonymousIDs {
+		if _, ok := owned[id]; !ok {
+			failCode(c, http.StatusNotFound, "ALIAS_NOT_FOUND", "别名不存在")
+			return false
+		}
+	}
+	return true
+}
+
+// validateAliasAction 校验别名操作的匿名 ID、请求体与归属。
+func (s *Server) validateAliasAction(c *gin.Context) (accountID, anonymousID string, valid bool) {
 	anonymousID = c.Param("id")
 	var req aliasActionReq
 	if err := c.ShouldBindJSON(&req); err != nil || req.AccountID == "" {
@@ -706,11 +744,14 @@ func validateAliasAction(c *gin.Context) (accountID, anonymousID string, valid b
 		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "参数错误: anonymous id 无效")
 		return "", "", false
 	}
+	if !s.aliasOwnershipOK(c, req.AccountID, []string{anonymousID}) {
+		return "", "", false
+	}
 	return req.AccountID, anonymousID, true
 }
 
 func (s *Server) deactivateAliasHandler(c *gin.Context) {
-	accountID, anonymousID, valid := validateAliasAction(c)
+	accountID, anonymousID, valid := s.validateAliasAction(c)
 	if !valid {
 		return
 	}
@@ -723,7 +764,7 @@ func (s *Server) deactivateAliasHandler(c *gin.Context) {
 }
 
 func (s *Server) reactivateAliasHandler(c *gin.Context) {
-	accountID, anonymousID, valid := validateAliasAction(c)
+	accountID, anonymousID, valid := s.validateAliasAction(c)
 	if !valid {
 		return
 	}
@@ -736,7 +777,7 @@ func (s *Server) reactivateAliasHandler(c *gin.Context) {
 }
 
 func (s *Server) deleteAliasHandler(c *gin.Context) {
-	accountID, anonymousID, valid := validateAliasAction(c)
+	accountID, anonymousID, valid := s.validateAliasAction(c)
 	if !valid {
 		return
 	}
