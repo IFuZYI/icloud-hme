@@ -438,7 +438,9 @@ describe('InboxPage', () => {
           data: {
             ...inboxResult,
             messages: [
-              { ...inboxResult.messages[0], date: new Date(Date.now() - 3600_000).toISOString() },
+              // 用 now 本身: Date.now()-1h 在本地 00:00-01:00 窗口会落到昨天,
+              // 渲染为「昨天」使下方 /^今天 / 断言必失败(既存时区 flake)。
+              { ...inboxResult.messages[0], date: new Date(Date.now()).toISOString() },
             ],
           },
         }),
