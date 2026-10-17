@@ -307,12 +307,3 @@ func (m *purgeManager) log(taskID, level, format string, args ...any) {
 	}
 	m.logFn(taskID, level, format, args...)
 }
-
-// validStatus 校验任务状态字符串(防御性)。
-func validStatus(s string) bool {
-	switch s {
-	case "running", "throttled", "paused", "done", "failed", "cancelled", "interrupted":
-		return true
-	}
-	return false
-}

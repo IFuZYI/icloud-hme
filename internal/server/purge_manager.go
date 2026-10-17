@@ -19,7 +19,6 @@ import (
 	"sync"
 	"time"
 
-	"icloud-hme/internal/account"
 	"icloud-hme/internal/mail"
 )
 
@@ -111,8 +110,6 @@ type purgeManager struct {
 	invalidateReads func(accountID string)
 	// logFn 写审计日志(可空)。
 	logFn func(taskID, level, format string, args ...any)
-	// stopped 标记管理器已关闭(测试清理)。
-	stopped bool
 }
 
 // newPurgeManager 建管理器; file 为空 = 纯内存。
@@ -419,20 +416,4 @@ func randomHexToken(n int) string {
 		out[i*2+1] = hexdigits[v&0x0f]
 	}
 	return string(out)
-}
-
-// accountNames 解析账号显示名(供列表展示)。
-func (m *purgeManager) accountNames(accounts []account.Summary) map[string]string {
-	names := map[string]string{}
-	for _, a := range accounts {
-		names[a.ID] = a.Name
-	}
-	return names
-}
-
-// sortTasksByTime 供测试与列表稳定排序(新→旧)。
-func sortTasksByTime(tasks []PurgeTask) {
-	sort.SliceStable(tasks, func(i, j int) bool {
-		return tasks[i].StartedAt > tasks[j].StartedAt
-	})
 }

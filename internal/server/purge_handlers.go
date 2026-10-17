@@ -72,7 +72,6 @@ func (s *Server) purgePreviewHandler(c *gin.Context) {
 	}
 	counts := make([]folderCount, 0, len(purgeFolders))
 	total := 0
-	var earliest, latest time.Time
 	// IMAP 操作预算: 卡死的上游不再让 HTTP 无限挂起。
 	err := withIMAPTimeout(purgeOpTimeout, func() error {
 		return s.purge.withClient(req.AccountID, func(mc *mail.Client) error {
@@ -98,8 +97,6 @@ func (s *Server) purgePreviewHandler(c *gin.Context) {
 		backendFail(c, err)
 		return
 	}
-	_ = earliest
-	_ = latest
 	// 估算耗时: 每块 (purgeChunkDelay + 抖动均值) 秒, 块数 = ceil(total/chunk)。
 	chunk := purgeChunkSize
 	if chunk <= 0 {
