@@ -834,7 +834,7 @@ vision 模型报告「查询按钮高度略低于输入框，底部没有和输�
 
 | # | 标题 | 严重度 | 说明 |
 |---|------|--------|------|
-| O1 | `/favicon.ico` 返回 404 | 🔵 Low | `web/public/` 无 favicon、`index.html` 无 `<link rel="icon">`；`git log -S favicon -- web/` 无记录（从未存在）。建议后续单独提交补齐。 |
+| O1 | `/favicon.ico` 返回 404 | 🔵 Low → ✅ **已修复** | `web/public/` 无 favicon、`index.html` 无 `<link rel="icon">`；`git log -S favicon -- web/` 无记录（从未存在）。**后续提交已补齐**：新增 `favicon.svg` + `favicon.ico`（32×32 PNG-in-ICO），`index.html` 加 `<link rel="icon">`，新增 `TestFaviconServed` 防回归（webui 层 200 + Content-Type 断言）；实测 `/favicon.ico` → 200 `image/x-icon`。 |
 | O2 | 移动端导航横向滚动（6 项 423px > 390px） | 🔵 Low | 既有设计（`AppShell` 注释明确），可滚动且激活项自动居中；仅溢出 33px。 |
 | O3 | 窗口尺寸证明：秘钥表格 @390px 宽 920px | ✅ 一致 | 与 `/logs` 实测同宽（920px），属既有表格模式，非回归。 |
 

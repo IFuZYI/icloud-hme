@@ -278,6 +278,63 @@ func TestEmbedded(t *testing.T) {
 	}
 }
 
+// TestFaviconServed 验证 favicon 可被服务(dogfood 第七轮 O1: /favicon.ico 曾 404)。
+// 回归: 若 public/ 下 favicon 缺失或未进 dist, 浏览器每次访问都打 404。
+//
+// fresh clone(未 npm run build)下 dist 只有 placeholder.txt, 此时跳过而非失败:
+// 该场景由 build.sh 的前端构建步骤覆盖, 本测试不重复承担构建职责。
+func TestFaviconServed(t *testing.T) {
+	fsys, err := Embedded()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fsys.Open("index.html"); err != nil {
+		t.Skip("dist 未构建(无 index.html), 跳过 favicon 断言; 构建后本测试生效")
+	}
+	for _, name := range []string{"favicon.ico", "favicon.svg"} {
+		f, err := fsys.Open(name)
+		if err != nil {
+			t.Fatalf("dist 应包含 %s: %v", name, err)
+		}
+		info, _ := f.Stat()
+		f.Close()
+		if info.Size() == 0 {
+			t.Fatalf("%s 不应为空文件", name)
+		}
+	}
+
+	// index.html 必须声明 icon 链接(否则浏览器仍会盲请求 /favicon.ico)。
+	f, err := fsys.Open("index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	data, err := io.ReadAll(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsStr(string(data), `rel="icon"`) {
+		t.Fatal("index.html 应包含 <link rel=\"icon\"> 引用")
+	}
+
+	// 走 Handler: /favicon.ico 与 /favicon.svg 必须 200 且 Content-Type 正确。
+	h := Handler(fsys)
+	for path, wantType := range map[string]string{
+		"/favicon.ico": "image/x-icon",
+		"/favicon.svg": "image/svg+xml",
+	} {
+		req := httptest.NewRequest("GET", path, nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s 期望 200, 得到 %d", path, rec.Code)
+		}
+		if ct := rec.Header().Get("Content-Type"); ct != wantType {
+			t.Fatalf("GET %s Content-Type = %q, want %q", path, ct, wantType)
+		}
+	}
+}
+
 // TestEmbeddedNoDist 验证 dist 不存在时返回清晰错误。
 func TestEmbeddedNoDist(t *testing.T) {
 	if _, err := Embedded(); err != nil {
