@@ -580,3 +580,13 @@
     animation: none;
   }
 }
+
+/* antd 日期选择器的「清除」图标实测仅 14×40px, 手指难以命中;
+   放大到 28×28 的居中命中区(图标本身尺寸不变)。 */
+.inbox-page .ant-picker-clear {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}

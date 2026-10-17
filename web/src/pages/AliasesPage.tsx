@@ -361,7 +361,7 @@ export default function AliasesPage() {
                       onChange={() => toggleSelected(alias.anonymousId)}
                     />
                   </td>
-                  <td>
+                  <td data-label="邮箱">
                     <div className="aliases-email-cell">
                       <button type="button" className="aliases-email" onClick={() => void copyEmail(alias.email)} title="复制邮箱">
                         {alias.email}
@@ -377,15 +377,15 @@ export default function AliasesPage() {
                       </button>
                     </div>
                   </td>
-                  <td><span className="aliases-label">{alias.label || '—'}</span></td>
-                  <td>
+                  <td data-label="标签"><span className="aliases-label">{alias.label || '—'}</span></td>
+                  <td data-label="状态">
                     <span className={`aliases-badge ${alias.active ? 'aliases-badge-active' : 'aliases-badge-inactive'}`}>
                       <span className="aliases-dot" />
                       {alias.active ? '已启用' : '已停用'}
                     </span>
                   </td>
-                  <td><span className="aliases-date">{formatDate(alias.createdAt)}</span></td>
-                  <td>
+                  <td data-label="创建时间"><span className="aliases-date">{formatDate(alias.createdAt)}</span></td>
+                  <td data-label="操作" className="cell-actions">
                     <div className="aliases-actions">
                       <Link
                         to={`/inbox?account_id=${encodeURIComponent(accountId)}&alias=${encodeURIComponent(alias.email)}`}

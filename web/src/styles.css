@@ -1622,3 +1622,123 @@ tbody tr:nth-child(n + 6) { animation-delay: 150ms; }
 .logs-filter .select-trigger {
   min-width: 132px;
 }
+
+/* ==========================================================================
+   响应式: 窄屏表格转为「卡片」布局
+   --------------------------------------------------------------------------
+   表格 min-width 为 920px(7 列的最小可读宽度)。在 1023px 以下, 侧栏占用后
+   容器宽度不足, 只能靠 .table-wrap 横向滚动才能看到最右侧的「操作」列——手机上
+   要横滑 2.4 屏, 且没有任何滚动提示。这里在 ≤1023px 把每行改成一张卡片:
+     - 隐藏 thead, tbody/tr/td 改为块级;
+     - 每个 td 变成「标签(:before, 取自 data-label) + 值」的两栏行;
+     - 操作列单独竖排, 按钮换行不溢出。
+   断点取 1023px: 实测 941~1023 区间侧栏已恢复(232px), 内容区仅 ~700px,
+   表格(920px)必然溢出; 1024px 起容器 946px 恰好容纳表格(946/946)。
+   ========================================================================== */
+@media (max-width: 1023px) {
+  .table-wrap {
+    overflow-x: visible;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+  }
+
+  .table-wrap table {
+    display: block;
+    width: 100%;
+    min-width: 0;
+  }
+
+  .table-wrap thead {
+    display: none;
+  }
+
+  .table-wrap tbody {
+    display: block;
+  }
+
+  .table-wrap tbody tr {
+    display: block;
+    position: relative;
+    margin-bottom: var(--space-3);
+    padding: var(--space-3) var(--space-4);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    background: var(--color-bg-raised);
+    box-shadow: var(--shadow-xs);
+    animation: none;
+  }
+
+  .table-wrap tbody td {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: var(--space-3);
+    width: auto;
+    padding: 5px 0;
+    border-bottom: 0;
+    text-align: right;
+    min-width: 0;
+  }
+
+  .table-wrap tbody td::before {
+    content: attr(data-label);
+    flex: 0 0 auto;
+    color: var(--color-text-tertiary);
+    font-size: var(--text-xs);
+    line-height: 1.7;
+  }
+
+  /* 无 data-label 的单元格(如选择列)不渲染标签 */
+  .table-wrap tbody td:not([data-label])::before {
+    content: none;
+  }
+
+  /* 值区可换行、可截断: 表格里的 cell-truncate 依赖固定列宽, 卡片里要放开 */
+  .table-wrap tbody td > * {
+    min-width: 0;
+  }
+
+  .table-wrap .cell-truncate,
+  .table-wrap .cell-nowrap {
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+  }
+
+  /* 操作列: 标签独占一行, 按钮组在其下横向排列(竖排会把 3 个按钮拉成 3 行,
+     卡片高度翻倍)。 */
+  .table-wrap tbody td.cell-actions {
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px 8px;
+  }
+
+  .table-wrap tbody td.cell-actions::before {
+    flex: 0 0 100%;
+    line-height: 1.4;
+  }
+
+  .table-wrap tbody td.cell-actions > div {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+
+  /* 选择列(别名表): 复选框浮到卡片右上角, 不占一行 */
+  .table-wrap tbody tr:has(.aliases-select-column) {
+    padding-right: calc(var(--space-4) + 26px);
+  }
+
+  .table-wrap tbody td.aliases-select-column {
+    position: absolute;
+    top: var(--space-3);
+    right: var(--space-3);
+    padding: 0;
+  }
+
+  .table-wrap tbody td.aliases-select-column input {
+    width: 18px;
+    height: 18px;
+  }
+}

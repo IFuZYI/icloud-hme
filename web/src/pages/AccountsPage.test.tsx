@@ -282,4 +282,19 @@ describe('AccountsPage', () => {
     await user.click(screen.getByRole('button', { name: /取消/ }))
     expect(deleted).toBe(false)
   })
+  // 窄屏(≤1023px)表格转为卡片布局: td 的标签来自 data-label。
+  it('每个表格单元格都带 data-label(窄屏卡片布局依赖)', async () => {
+    server.use(
+      http.get('/api/accounts', () => HttpResponse.json({ success: true, data: accounts })),
+    )
+    renderPage()
+    await screen.findByText('活跃号')
+    const cells = Array.from(document.querySelectorAll('tbody td'))
+    expect(cells.length).toBeGreaterThan(0)
+    expect(cells.filter((td) => !td.getAttribute('data-label')).map((td) => td.className)).toEqual([])
+    const actions = cells.filter((td) => td.getAttribute('data-label') === '操作')
+    expect(actions.length).toBeGreaterThan(0)
+    actions.forEach((td) => expect(td.className).toContain('cell-actions'))
+  })
+
 })

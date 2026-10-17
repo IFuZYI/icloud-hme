@@ -86,11 +86,11 @@
 
 /* 操作列 */
 .aliases-page .aliases-actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
-.aliases-page .aliases-ghost-icon-btn { display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 11px; border: 1px solid transparent; border-radius: 8px; background: transparent; color: var(--color-text-secondary); font: inherit; font-size: var(--text-sm); font-weight: 500; text-decoration: none; cursor: pointer; white-space: nowrap; transition: background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out); }
+.aliases-page .aliases-ghost-icon-btn { display: inline-flex; align-items: center; gap: 6px; height: 40px; padding: 0 11px; border: 1px solid transparent; border-radius: 8px; background: transparent; color: var(--color-text-secondary); font: inherit; font-size: var(--text-sm); font-weight: 500; text-decoration: none; cursor: pointer; white-space: nowrap; transition: background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out); }
 .aliases-page .aliases-ghost-icon-btn:hover { background: var(--color-bg-subtle); color: var(--color-primary); }
 
 /* 行内更多弹出菜单(与 select-menu-popover 同一视觉体系) */
-.aliases-page .row-action-button { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; min-height: 32px; padding: 0; border: 0; border-radius: 8px; background: transparent; color: var(--color-text-tertiary); font-size: 0; cursor: pointer; transition: background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out); }
+.aliases-page .row-action-button { display: inline-flex; align-items: center; justify-content: center; width: 40px; height: 40px; min-height: 40px; padding: 0; border: 0; border-radius: 8px; background: transparent; color: var(--color-text-tertiary); font-size: 0; cursor: pointer; transition: background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out); }
 .aliases-page .row-action-button::before { content: '⋯'; font-size: 20px; line-height: 1; letter-spacing: 1px; }
 .aliases-page .row-action-button:hover:not(:disabled) { background: var(--color-bg-subtle); color: var(--color-text); }
 .aliases-page .row-action-button:focus-visible, .row-action-popover button:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }

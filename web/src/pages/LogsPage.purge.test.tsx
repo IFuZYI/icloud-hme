@@ -170,6 +170,18 @@ describe('LogsPage 清理任务与类别', () => {
     expect(within(table).getAllByText('邮件清理').length).toBeGreaterThanOrEqual(1)
   })
 
+  // 窄屏(≤1023px)表格转为卡片布局: td 的标签来自 data-label。
+  it('每个表格单元格都带 data-label(窄屏卡片布局依赖)', async () => {
+    renderPage()
+    await screen.findByText('自动任务日志')
+    const cells = Array.from(document.querySelectorAll('tbody td'))
+    expect(cells.length).toBeGreaterThan(0)
+    expect(cells.filter((td) => !td.getAttribute('data-label')).map((td) => td.className)).toEqual([])
+    const actions = cells.filter((td) => td.getAttribute('data-label') === '操作')
+    expect(actions.length).toBeGreaterThan(0)
+    actions.forEach((td) => expect(td.className).toContain('cell-actions'))
+  })
+
   it('类别筛选: 选「邮件清理」只显示清理日志', async () => {
     renderPage()
     await screen.findByText('自动任务日志')

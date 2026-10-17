@@ -323,4 +323,19 @@ describe('KeysPage', () => {
     expect(screen.getByText('全部账号')).toBeInTheDocument()
     expect(screen.getByText('2 个账号')).toBeInTheDocument()
   })
+
+  // 窄屏(≤1023px)表格转为卡片布局: 每个 td 的标签来自 data-label,
+  // 缺一个就会在手机上显示成没有标题的一行值。
+  it('每个表格单元格都带 data-label(窄屏卡片布局依赖)', async () => {
+    renderPage()
+    await screen.findByText('脚本A')
+    const cells = Array.from(document.querySelectorAll('tbody td'))
+    expect(cells.length).toBeGreaterThan(0)
+    const missing = cells.filter((td) => !td.getAttribute('data-label'))
+    expect(missing.map((td) => td.className)).toEqual([])
+    // 操作列必须有 cell-actions, 否则窄屏下按钮会与标签挤在同一行。
+    const actionCells = cells.filter((td) => td.getAttribute('data-label') === '操作')
+    expect(actionCells.length).toBeGreaterThan(0)
+    actionCells.forEach((td) => expect(td.className).toContain('cell-actions'))
+  })
 })

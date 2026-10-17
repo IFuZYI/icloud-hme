@@ -285,18 +285,18 @@ export default function LogsPage() {
           <tbody>
             {visibleLogs.map((log) => (
               <tr key={log.id}>
-                <td>{formatLogTime(log.time)}</td>
-                <td>{log.task_id}</td>
-                <td>
+                <td data-label="时间">{formatLogTime(log.time)}</td>
+                <td data-label="任务">{log.task_id}</td>
+                <td data-label="类别">
                   <span className="badge badge-neutral">{categoryLabel(log.category)}</span>
                 </td>
-                <td>
+                <td data-label="级别">
                   <span className={log.level === 'error' ? 'badge badge-error' : 'badge badge-active'}>
                     {log.level}
                   </span>
                 </td>
-                <td className={log.level === 'error' ? 'log-message-error' : undefined}>{log.message}</td>
-                <td>
+                <td data-label="内容" className={log.level === 'error' ? 'log-message-error' : undefined}>{log.message}</td>
+                <td data-label="操作" className="cell-actions">
                   <button
                     type="button"
                     className="link-button"

@@ -1,10 +1,10 @@
 /* 账号管理：常驻操作精简、可折叠高级配置与分组菜单 */
 .account-row-actions { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
-.account-edit-button, .account-delete-button { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; padding: 5px 9px; border: 1px solid transparent; border-radius: 8px; background: transparent; color: var(--color-text-secondary); font: inherit; font-size: var(--text-sm); cursor: pointer; }
+.account-edit-button, .account-delete-button { display: inline-flex; align-items: center; gap: 6px; min-height: 40px; padding: 5px 9px; border: 1px solid transparent; border-radius: 8px; background: transparent; color: var(--color-text-secondary); font: inherit; font-size: var(--text-sm); cursor: pointer; }
 .account-edit-button:hover { background: var(--color-bg-subtle); color: var(--color-primary); }
 .account-delete-button { color: var(--color-danger); }
 .account-delete-button:hover { background: var(--color-danger-soft); }
-.account-more-button { display: inline-flex; align-items: center; justify-content: center; width: 32px; min-width: 32px; min-height: 32px; padding: 0; border: 0; border-radius: 8px; background: transparent; color: var(--color-text-tertiary); cursor: pointer; font-size: 0; }
+.account-more-button { display: inline-flex; align-items: center; justify-content: center; width: 40px; min-width: 40px; min-height: 40px; padding: 0; border: 0; border-radius: 8px; background: transparent; color: var(--color-text-tertiary); cursor: pointer; font-size: 0; }
 .account-more-button::before { content: '⋯'; font-size: 20px; line-height: 1; letter-spacing: 1px; }
 .account-more-button:hover:not(:disabled) { background: var(--color-bg-subtle); color: var(--color-text); }
 .account-more-button:focus-visible, .account-more-popover button:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }

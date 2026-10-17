@@ -213,7 +213,7 @@ export default function AccountsPage() {
             <tbody>
               {accounts.map((acc) => (
                 <tr key={acc.id}>
-                  <td>
+                  <td data-label="名称">
                     <span className="cell-truncate" title={acc.name}>
                       {acc.name}
                     </span>
@@ -223,21 +223,21 @@ export default function AccountsPage() {
                       </span>
                     )}
                   </td>
-                  <td>
+                  <td data-label="邮箱">
                     <span className="cell-truncate" title={acc.icloud_email || acc.real_email || ''}>
                       {acc.icloud_email || acc.real_email || '—'}
                     </span>
                     <span className="cell-secondary">{acc.id}</span>
                   </td>
-                  <td>
+                  <td data-label="状态">
                     <StatusBadge status={acc.status} />
                   </td>
-                  <td>
+                  <td data-label="别名">
                     <span className="cell-strong alias-count">
                       {acc.alias_active} / {acc.alias_total}
                     </span>
                   </td>
-                  <td>
+                  <td data-label="凭据">
                     <span className="cred-chips">
                       {(() => {
                         const chips = credChips(acc)
@@ -251,8 +251,8 @@ export default function AccountsPage() {
                       })()}
                     </span>
                   </td>
-                  <td><span className="cell-nowrap">{formatValidated(acc.last_validated)}</span></td>
-                  <td>
+                  <td data-label="最近验证"><span className="cell-nowrap">{formatValidated(acc.last_validated)}</span></td>
+                  <td data-label="操作" className="cell-actions">
                     <div className="account-row-actions">
                       <button className="account-edit-button" onClick={() => { setEditing(acc); setFormSession((session) => session + 1); setFormOpen(true) }}>
                         <IconEdit size={14} />
