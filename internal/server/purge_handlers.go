@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -49,6 +50,11 @@ func parsePurgeRange(start, end string) (time.Time, time.Time, string) {
 //	POST /api/inbox/purge/preview
 //	{"account_id":"acc_x","range_start":"...","range_end":"..."}
 func (s *Server) purgePreviewHandler(c *gin.Context) {
+	// 非 managerBackend 时执行器未注入: 干净报错, 不要靠 Recovery 兜 500。
+	if s.purge.withClient == nil {
+		failCode(c, http.StatusInternalServerError, "INTERNAL_ERROR", "清理执行器未配置 IMAP 客户端")
+		return
+	}
 	var req purgePreviewReq
 	if err := c.ShouldBindJSON(&req); err != nil || strings.TrimSpace(req.AccountID) == "" {
 		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "参数错误: account_id 必填")
@@ -67,21 +73,28 @@ func (s *Server) purgePreviewHandler(c *gin.Context) {
 	counts := make([]folderCount, 0, len(purgeFolders))
 	total := 0
 	var earliest, latest time.Time
-	err := s.purge.withClient(req.AccountID, func(mc *mail.Client) error {
-		for _, folder := range purgeFolders {
-			uids, missing, err := mc.SearchRange(folder, mail.DateRange{Start: st, End: en})
-			if err != nil {
-				return err
+	// IMAP 操作预算: 卡死的上游不再让 HTTP 无限挂起。
+	err := withIMAPTimeout(purgeOpTimeout, func() error {
+		return s.purge.withClient(req.AccountID, func(mc *mail.Client) error {
+			for _, folder := range purgeFolders {
+				uids, missing, err := mc.SearchRange(folder, mail.DateRange{Start: st, End: en})
+				if err != nil {
+					return err
+				}
+				if missing {
+					continue
+				}
+				counts = append(counts, folderCount{Folder: folder, Count: len(uids)})
+				total += len(uids)
 			}
-			if missing {
-				continue
-			}
-			counts = append(counts, folderCount{Folder: folder, Count: len(uids)})
-			total += len(uids)
-		}
-		return nil
+			return nil
+		})
 	})
 	if err != nil {
+		if errors.Is(err, errIMAPTimeout) {
+			failCode(c, http.StatusBadGateway, "UPSTREAM_FAILURE", "读取超时，请稍后重试")
+			return
+		}
 		backendFail(c, err)
 		return
 	}
@@ -174,6 +187,11 @@ func (s *Server) purgeTaskActionHandler(action string) gin.HandlerFunc {
 		if err != nil {
 			if strings.Contains(err.Error(), "不存在") {
 				failCode(c, http.StatusNotFound, "PURGE_NOT_FOUND", "清理任务不存在")
+				return
+			}
+			// 同账号互斥: resume 时账号已被别的任务占用 → 409(与 create 一致)。
+			if strings.Contains(err.Error(), "已有清理任务") {
+				failCode(c, http.StatusConflict, "PURGE_IN_PROGRESS", err.Error())
 				return
 			}
 			failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())

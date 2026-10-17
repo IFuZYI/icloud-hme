@@ -130,6 +130,8 @@ func newWithBackendE(be Backend, cfg Config) (*Server, error) {
 	}
 	if mb, ok := be.(*managerBackend); ok {
 		purgeMgr.withClient = mb.mgr.WithMailClient
+		// 每块删除后失效账号读缓存(与单封删除一致, 避免列表展示已删邮件)。
+		purgeMgr.invalidateReads = mb.invalidateAccountReads
 	}
 	s.purge = purgeMgr
 	// 清理任务的审计日志接入任务日志(来源标注 purge)。

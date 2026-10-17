@@ -2,10 +2,12 @@
 //
 // 一次清理 = 一条 PurgeTask(无论多少封邮件), 异步执行:
 //   - 按账号并发: 同账号同时最多 1 个任务, 不同账号可并行;
+//   - 每个任务同时最多 1 个 runner(run 单飞; 双 runner 会让 IMAP 命令数
+//     近乎翻倍, 击穿分块节流的风控设计);
 //   - 分块执行(每块 chunkSize 封), 块间节流 + 抖动, 每小时块数封顶;
-//   - 断点续传: 记录 (folder, uid 偏移), 暂停/失败后可继续;
-//   - 持久化 purge_tasks.json(原子写, 保留最近 50 条), 重启后运行中任务
-//     标记 interrupted(可 resume)。
+//   - 断点续传: 恢复时重新 SEARCH(已删 UID 不再返回), ChunkCursor 仅作展示;
+//   - 持久化 purge_tasks.json(原子写; 活跃任务无条件保留且不计入上限,
+//     终态任务保留最近 50 条), 重启后运行中任务标记 interrupted(可 resume)。
 package server
 
 import (
@@ -34,8 +36,12 @@ var (
 	purgeChunkJitter = 2 * time.Second
 	// purgeHourlyChunkCap 是滚动 1 小时内最多执行的块数; 达到后转 throttled。
 	purgeHourlyChunkCap = 20
-	// purgeKeepTasks 是保留的任务记录条数。
+	// purgeKeepTasks 是保留的终态任务记录条数(活跃任务不占额度)。
 	purgeKeepTasks = 50
+	// purgeOpTimeout 是 purge 的 IMAP 操作预算(单次 SEARCH/删除块的等待上限);
+	// 没有它时卡死的 IMAP 会让任务永停 running(账号锁不释放)、预览 HTTP 挂死。
+	// 测试可缩短。
+	purgeOpTimeout = 60 * time.Second
 	// purgeFolders 是清理覆盖的文件夹(与读信口径一致)。
 	purgeFolders = []string{"INBOX", "Junk", "垃圾邮件"}
 )
@@ -91,6 +97,8 @@ type purgeManager struct {
 	order  []string // 创建顺序(用于保留策略)
 	file   string
 	active map[string]string // accountID → 活跃任务 ID
+	// running 标记任务 ID → 是否有 runner 正在跑(单飞守卫: 防同任务双 runner)。
+	running map[string]bool
 	// now 可注入(测试确定化)。
 	now func() time.Time
 	// sleep 可注入(测试跳过块间等待)。
@@ -98,6 +106,9 @@ type purgeManager struct {
 	// withClient 提供账号的 IMAP 客户端(生产 = account.Manager.WithMailClient)。
 	// 为 nil 时执行器报错(测试须注入)。
 	withClient func(accountID string, fn func(*mail.Client) error) error
+	// invalidateReads 让账号的读缓存失效(收件箱/摘要); nil 时空操作。
+	// 每块删除成功后调用——否则 30s 收件箱缓存仍展示已删邮件。
+	invalidateReads func(accountID string)
 	// logFn 写审计日志(可空)。
 	logFn func(taskID, level, format string, args ...any)
 	// stopped 标记管理器已关闭(测试清理)。
@@ -110,6 +121,7 @@ func newPurgeManager(file string, withClient func(string, func(*mail.Client) err
 		tasks:      map[string]*PurgeTask{},
 		file:       file,
 		active:     map[string]string{},
+		running:    map[string]bool{},
 		now:        time.Now,
 		sleep:      time.Sleep,
 		withClient: withClient,
@@ -203,24 +215,39 @@ func (m *purgeManager) create(accountID, accountName string, start, end time.Tim
 	return *tk, nil
 }
 
-// trimLocked 保留最近 purgeKeepTasks 条(活跃任务永不裁剪)。
+// trimLocked 保留策略: 活跃任务无条件保留且不计入上限; 仅对终态任务按
+// 新→旧保留 purgeKeepTasks 条。order 保持旧→新顺序。
 func (m *purgeManager) trimLocked() {
 	if len(m.order) <= purgeKeepTasks {
 		return
 	}
-	keep := make([]string, 0, purgeKeepTasks)
-	// 从新到旧保留; 活跃任务无条件保留。
-	for i := len(m.order) - 1; i >= 0 && len(keep) < purgeKeepTasks; i-- {
-		id := m.order[i]
-		if t, ok := m.tasks[id]; ok {
+	keep := make([]string, 0, purgeKeepTasks+len(m.order))
+	// 先无条件收活跃任务(不占额度)。
+	for _, id := range m.order {
+		if t, ok := m.tasks[id]; ok && t.IsActive() {
 			keep = append(keep, id)
-			_ = t
 		}
 	}
-	// 反转为旧→新顺序。
-	for i, j := 0, len(keep)-1; i < j; i, j = i+1, j-1 {
-		keep[i], keep[j] = keep[j], keep[i]
+	// 终态任务从新到旧补足额度。
+	finished := 0
+	for i := len(m.order) - 1; i >= 0; i-- {
+		if finished >= purgeKeepTasks {
+			break
+		}
+		id := m.order[i]
+		t, ok := m.tasks[id]
+		if !ok || t.IsActive() {
+			continue
+		}
+		keep = append(keep, id)
+		finished++
 	}
+	// 恢复为旧→新顺序(与 order 语义一致)。
+	pos := make(map[string]int, len(m.order))
+	for i, id := range m.order {
+		pos[id] = i
+	}
+	sort.Slice(keep, func(i, j int) bool { return pos[keep[i]] < pos[keep[j]] })
 	kept := map[string]bool{}
 	for _, id := range keep {
 		kept[id] = true
@@ -269,7 +296,7 @@ func (m *purgeManager) update(id string, fn func(*PurgeTask)) error {
 	return m.saveLocked()
 }
 
-// finish 结束任务并释放账号锁。
+// finish 结束任务并释放账号锁(仅释放属于自己的锁, 防误放他人)。
 func (m *purgeManager) finish(id, status, errMsg string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -283,7 +310,12 @@ func (m *purgeManager) finish(id, status, errMsg string) {
 	}
 	if status == "done" || status == "failed" || status == "cancelled" {
 		t.FinishedAt = m.now().Format(time.RFC3339)
-		delete(m.active, t.AccountID)
+		// 双 runner 场景: 先完成者不得放掉后来者的账号锁。
+		if m.active[t.AccountID] == t.ID {
+			delete(m.active, t.AccountID)
+		}
+		// 任务转入终态后应用保留策略(活跃任务仍无条件保留)。
+		m.trimLocked()
 	}
 	_ = m.saveLocked()
 }
@@ -298,12 +330,19 @@ func (m *purgeManager) pause(id string) error {
 }
 
 // resume 继续暂停/中断的任务。
+//
+// 同账号互斥: 若账号已有其它活跃任务(active 映射指向别的任务 ID),
+// 拒绝 resume——否则同账号会并发两个 runner, IMAP 命令数翻倍。
 func (m *purgeManager) resume(id string) error {
 	m.mu.Lock()
 	t, ok := m.tasks[id]
 	if !ok {
 		m.mu.Unlock()
 		return fmt.Errorf("任务不存在")
+	}
+	if cur, busy := m.active[t.AccountID]; busy && cur != id {
+		m.mu.Unlock()
+		return fmt.Errorf("该账号已有清理任务在运行")
 	}
 	switch t.Status {
 	case "paused", "interrupted":
@@ -336,7 +375,7 @@ func (m *purgeManager) cancel(id string) error {
 }
 
 // setTotalFromPreview 用一次 SEARCH 统计待删总数, 写入 Total(进度条分母)。
-// 失败时不阻塞任务(Total 保持 0, 前端显示不确定进度)。
+// 失败/超时都不阻塞任务(Total 保持 0, 前端显示不确定进度)。
 func (m *purgeManager) setTotalFromPreview(taskID string, start, end time.Time) {
 	if m.withClient == nil {
 		return
@@ -346,18 +385,20 @@ func (m *purgeManager) setTotalFromPreview(taskID string, start, end time.Time) 
 		return
 	}
 	total := 0
-	err := m.withClient(tk.AccountID, func(c *mail.Client) error {
-		for _, folder := range purgeFolders {
-			uids, missing, e := c.SearchRange(folder, mail.DateRange{Start: start, End: end})
-			if e != nil {
-				return e
+	err := withIMAPTimeout(purgeOpTimeout, func() error {
+		return m.withClient(tk.AccountID, func(c *mail.Client) error {
+			for _, folder := range purgeFolders {
+				uids, missing, e := c.SearchRange(folder, mail.DateRange{Start: start, End: end})
+				if e != nil {
+					return e
+				}
+				if missing {
+					continue
+				}
+				total += len(uids)
 			}
-			if missing {
-				continue
-			}
-			total += len(uids)
-		}
-		return nil
+			return nil
+		})
 	})
 	if err != nil {
 		return

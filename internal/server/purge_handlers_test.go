@@ -162,3 +162,95 @@ func TestPurgeConflict409(t *testing.T) {
 		t.Fatalf("同账号并发应 409, got %d %s", code, raw)
 	}
 }
+
+// resume 时账号已被其它活跃任务占用 → 409 PURGE_IN_PROGRESS(不是 400)。
+func TestPurgeResumeBusyConflict409(t *testing.T) {
+	s, hts, _ := newPurgeHTTPHarness(t, 3)
+	// 活跃任务占用 acc_1。
+	if _, err := s.purge.create("acc_1", "主账号", time.Now(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	// 同账号的「旧」暂停任务(模拟重启遗留)。
+	stale, err := s.purge.create("acc_2", "备账号", time.Now(), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.purge.pause(stale.ID); err != nil {
+		t.Fatal(err)
+	}
+	s.purge.mu.Lock()
+	s.purge.tasks[stale.ID].AccountID = "acc_1"
+	delete(s.purge.active, "acc_2")
+	s.purge.mu.Unlock()
+
+	key := createTestKeyScoped(t, s, []string{"acc_1"}, "inbox.purge")
+	req, _ := http.NewRequest("POST", hts.ts.URL+"/api/purge-tasks/"+stale.ID+"/resume", nil)
+	req.Header.Set("X-API-Key", key.Key)
+	code, raw, _ := do(t, req)
+	if code != 409 || !strings.Contains(raw, "PURGE_IN_PROGRESS") {
+		t.Fatalf("resume 冲突应 409 PURGE_IN_PROGRESS, got %d %s", code, raw)
+	}
+}
+
+// 执行器未注入(非 managerBackend): preview 返回干净 JSON 错误, 不 panic。
+func TestPurgePreviewWithoutExecutorFailsCleanly(t *testing.T) {
+	s, hts, _ := newPurgeHTTPHarness(t, 3)
+	s.purge.withClient = nil // 模拟非 managerBackend 部署
+	key := createTestKeyScoped(t, s, []string{"acc_1"}, "inbox.purge")
+
+	body := `{"account_id":"acc_1","range_start":"2020-01-01T00:00:00Z","range_end":"2030-01-01T00:00:00Z"}`
+	req, _ := http.NewRequest("POST", hts.ts.URL+"/api/inbox/purge/preview", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", key.Key)
+	code, raw, _ := do(t, req)
+	if code != 500 || !strings.Contains(raw, "INTERNAL_ERROR") {
+		t.Fatalf("未配置执行器应 500 INTERNAL_ERROR, got %d %s", code, raw)
+	}
+	if !strings.Contains(raw, "清理执行器未配置") {
+		t.Fatalf("错误消息应说明执行器未配置: %s", raw)
+	}
+	// 必须是结构化 JSON(非 gin Recovery 的裸 500)。
+	if !strings.Contains(raw, `"success":false`) {
+		t.Fatalf("响应应为统一 JSON 错误体: %s", raw)
+	}
+}
+
+// preview 超时: IMAP 卡死超预算 → 502 UPSTREAM_FAILURE(不无限挂起)。
+func TestPurgePreviewTimeoutReturnsError(t *testing.T) {
+	s, hts, _ := newPurgeHTTPHarness(t, 3)
+	old := purgeOpTimeout
+	purgeOpTimeout = 30 * time.Millisecond
+	t.Cleanup(func() { purgeOpTimeout = old })
+
+	block := make(chan struct{})
+	t.Cleanup(func() { close(block) })
+	s.purge.withClient = func(accountID string, fn func(*mail.Client) error) error {
+		<-block // 模拟 IMAP 卡死
+		return nil
+	}
+
+	key := createTestKeyScoped(t, s, []string{"acc_1"}, "inbox.purge")
+	body := `{"account_id":"acc_1","range_start":"2020-01-01T00:00:00Z","range_end":"2030-01-01T00:00:00Z"}`
+	req, _ := http.NewRequest("POST", hts.ts.URL+"/api/inbox/purge/preview", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", key.Key)
+
+	done := make(chan struct{})
+	var code int
+	var raw string
+	go func() {
+		defer close(done)
+		code, raw, _ = do(t, req)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("preview 应超时返回, 不得无限挂起")
+	}
+	if code != 502 || !strings.Contains(raw, "UPSTREAM_FAILURE") {
+		t.Fatalf("超时应 502 UPSTREAM_FAILURE, got %d %s", code, raw)
+	}
+	if !strings.Contains(raw, "超时") {
+		t.Fatalf("超时消息应可读: %s", raw)
+	}
+}

@@ -17,20 +17,42 @@ import (
 //   - 每个文件夹: 先 SEARCH 取全量 UID(一次往返), 再逐块删除;
 //   - 每块 = 1×SELECT + 1×STORE + 1×EXPUNGE; 块间 sleep(purgeChunkDelay + 抖动);
 //   - 滚动 1 小时块数超过 purgeHourlyChunkCap → throttled, 睡到窗口滚动后继续;
-//   - 每块完成后更新任务计数(前端轮询可见);
+//   - 每块完成后更新任务计数(前端轮询可见), 并失效账号读缓存;
 //   - 失败: 单块重试 1 次, 仍失败 → paused(记录错误), resume 从块断点继续;
 //   - cancel 检查点: 每块开始前检查任务状态, cancelled 即停止。
+//
+// 断点续传实现: 恢复时重新 SEARCH——已删 UID 不再返回, 天然续传;
+// ChunkCursor 仅作展示(记录进度用), 不参与跳过逻辑。
 
-// run 异步执行任务。立即返回; 执行在后台 goroutine。
+// run 异步执行任务(单飞: 同一任务同时只允许 1 个 runner)。
+//
+// 双 runner 会让同账号的 IMAP 命令数近乎翻倍, 击穿分块节流的风控设计,
+// 因此持锁检查 + 置位 running 标记, 已在跑则直接返回; goroutine 退出时清位。
 func (m *purgeManager) run(taskID string) {
 	if m.withClient == nil {
 		m.finish(taskID, "failed", "清理执行器未配置 IMAP 客户端")
 		return
 	}
-	go m.runSync(taskID)
+	m.mu.Lock()
+	if m.running[taskID] {
+		m.mu.Unlock()
+		return
+	}
+	m.running[taskID] = true
+	m.mu.Unlock()
+
+	go func() {
+		defer func() {
+			m.mu.Lock()
+			delete(m.running, taskID)
+			m.mu.Unlock()
+		}()
+		m.runSync(taskID)
+	}()
 }
 
 // runSync 同步执行(测试直接调用; 生产由 run 起 goroutine)。
+// 注意: 不经单飞守卫——测试需要直接驱动执行体; 生产路径一律走 run。
 func (m *purgeManager) runSync(taskID string) {
 	tk, ok := m.get(taskID)
 	if !ok {
@@ -60,13 +82,15 @@ func (m *purgeManager) runSync(taskID string) {
 
 	for fi := startFolder; fi < len(folders); fi++ {
 		folder := folders[fi]
-		// 每文件夹: 取全量 UID(一次 SEARCH)。
+		// 每文件夹: 取全量 UID(一次 SEARCH; 带操作预算防 IMAP 卡死)。
 		var uids []uint32
 		var missing bool
-		err := m.withClient(tk.AccountID, func(c *mail.Client) error {
-			var e error
-			uids, missing, e = c.SearchRange(folder, r)
-			return e
+		err := withIMAPTimeout(purgeOpTimeout, func() error {
+			return m.withClient(tk.AccountID, func(c *mail.Client) error {
+				var e error
+				uids, missing, e = c.SearchRange(folder, r)
+				return e
+			})
 		})
 		if err != nil {
 			m.pauseWithError(taskID, fmt.Sprintf("搜索 %s 失败: %v", folder, err))
@@ -82,12 +106,6 @@ func (m *purgeManager) runSync(taskID string) {
 		if chunkSize <= 0 {
 			chunkSize = mail.DefaultPurgeChunkSize
 		}
-		// 从断点块继续(仅起始文件夹需要跳过已完成块)。
-		skip := 0
-		if fi == startFolder && chunkIdx > 0 {
-			skip = chunkIdx
-		}
-		_ = skip
 
 		for start := 0; start < len(uids); start += chunkSize {
 			endIdx := start + chunkSize
@@ -105,17 +123,23 @@ func (m *purgeManager) runSync(taskID string) {
 			if wait := m.throttleWait(taskID); wait > 0 {
 				m.setStatus(taskID, "throttled", fmt.Sprintf("风控节流中, 约 %s 后继续", wait.Round(time.Second)))
 				m.sleep(wait)
-				if cur, ok := m.get(taskID); !ok || cur.Status == "cancelled" {
+				// 等待期间用户可能暂停/取消: 两者都不得被覆盖为 running,
+				// 否则「暂停」被吞、删除继续(风控节流失效)。
+				// 只有仍处于 throttled/running 时才恢复 running。
+				cur, ok := m.get(taskID)
+				if !ok || (cur.Status != "throttled" && cur.Status != "running") {
 					return
 				}
 				m.setStatus(taskID, "running", "")
 			}
 
-			// 执行一块(失败重试 1 次)。
+			// 执行一块(失败重试 1 次; 每次调用带操作预算防 IMAP 卡死)。
 			var chunkErr error
 			for attempt := 0; attempt < 2; attempt++ {
-				chunkErr = m.withClient(tk.AccountID, func(c *mail.Client) error {
-					return c.DeleteUIDChunk(folder, chunk)
+				chunkErr = withIMAPTimeout(purgeOpTimeout, func() error {
+					return m.withClient(tk.AccountID, func(c *mail.Client) error {
+						return c.DeleteUIDChunk(folder, chunk)
+					})
 				})
 				if chunkErr == nil {
 					break
@@ -126,6 +150,10 @@ func (m *purgeManager) runSync(taskID string) {
 			}
 			m.recordChunk(taskID)
 			if chunkErr != nil {
+				// 重试后仍失败: 计入失败数(前端展示「失败 N」), 再暂停。
+				failed += len(chunk)
+				m.progress(taskID, folder, chunkIdx, processed, deleted, failed, 0,
+					fmt.Sprintf("%s: 删除失败 %d 封", folder, len(chunk)))
 				m.pauseWithError(taskID, fmt.Sprintf("删除 %s 块失败: %v", folder, chunkErr))
 				return
 			}
@@ -134,6 +162,10 @@ func (m *purgeManager) runSync(taskID string) {
 			deleted += len(chunk)
 			m.progress(taskID, folder, chunkIdx, processed, deleted, failed, len(chunk),
 				fmt.Sprintf("%s: 删除 %d 封", folder, len(chunk)))
+			// 删除后读缓存立即失效(否则 30s 收件箱/5min 摘要缓存仍展示已删邮件)。
+			if m.invalidateReads != nil {
+				m.invalidateReads(tk.AccountID)
+			}
 
 			// 块间节流(最后一块不睡)。
 			if endIdx < len(uids) {
@@ -143,7 +175,7 @@ func (m *purgeManager) runSync(taskID string) {
 				}
 				m.sleep(delay)
 			}
-			chunkIdx = 0 // 后续块不再需要断点跳过
+			chunkIdx = 0 // 断点游标仅作展示; 续传靠重新 SEARCH
 		}
 		chunkIdx = 0
 	}
