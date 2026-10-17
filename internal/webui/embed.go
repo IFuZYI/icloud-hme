@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 //go:embed dist/*
@@ -48,6 +49,14 @@ type gzipCache struct {
 	items map[string][]byte
 }
 
+// compressedCallsTotal 记录进程内所有 gzipCache 实际执行 gzip 的累计次数
+// (缓存命中不计)。仅测试观测用: 断言「一次压缩多次复用」在生产路径成立
+// (server 包经 CompressedCallsForTest 按差值断言两次请求只压缩一次)。
+var compressedCallsTotal atomic.Int64
+
+// CompressedCallsForTest 返回累计实际压缩次数(仅测试观测, 生产无读取方)。
+func CompressedCallsForTest() int64 { return compressedCallsTotal.Load() }
+
 // compressed 返回 name 对应内容的 gzip 结果(首次压缩后缓存)。
 func (g *gzipCache) compressed(name string, data []byte) []byte {
 	g.mu.Lock()
@@ -55,6 +64,7 @@ func (g *gzipCache) compressed(name string, data []byte) []byte {
 	if b, ok := g.items[name]; ok {
 		return b
 	}
+	compressedCallsTotal.Add(1)
 	var buf bytes.Buffer
 	zw := gzip.NewWriter(&buf)
 	_, _ = zw.Write(data)
@@ -177,6 +187,13 @@ func Handler(fsys fs.FS) http.Handler {
 				}
 				ctype := mimeByExt(name)
 				w.Header().Set("Content-Type", ctype)
+				// Vary 必须覆盖可压缩类型的所有分支(压缩/未压缩/q=0 拒绝/
+				// 读失败回退), 不能只设在压缩分支: 否则共享缓存会把「未压缩
+				// 响应」提供给声明 gzip 的客户端(或反之)。非可压缩类型(图片/
+				// 字体等)永远不压缩, 无变体, 无需 Vary。
+				if compressibleType(ctype) {
+					w.Header().Set("Vary", "Accept-Encoding")
+				}
 				// 文本资源: 客户端接受 gzip 且体积足够时压缩传输。
 				// 压缩结果按文件名缓存(嵌入资源不可变, 一次压缩多次复用)。
 				// HEAD 走同一路径计算头部(响应头须与 GET 一致), 只是不写响应体。
@@ -185,7 +202,6 @@ func Handler(fsys fs.FS) http.Handler {
 					if readErr == nil {
 						compressed := gz.compressed(name, data)
 						w.Header().Set("Content-Encoding", "gzip")
-						w.Header().Set("Vary", "Accept-Encoding")
 						w.Header().Set("Content-Length", strconv.Itoa(len(compressed)))
 						// 显式写状态,避免继承外层(如 gin NoRoute)预设的状态码
 						w.WriteHeader(http.StatusOK)

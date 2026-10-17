@@ -263,7 +263,17 @@ func (s *Server) register() {
 			authed.POST("/reload", csrfCheck(s.auth), s.reloadConfigHandler)
 		}
 	}
-	// API 404 返回 JSON,绝不让 NoRoute 把拼错的 API 路径变成 HTML
+	// API 404 返回 JSON,绝不让 NoRoute 把拼错的 API 路径变成 HTML。
+	//
+	// webui 静态资源 handler 在构造期创建一次, 由 NoRoute 闭包捕获复用:
+	// Handler 内部持有 gzip 预压缩缓存(嵌入资源不可变, 一次压缩多次复用)。
+	// 修复前闭包体内每次请求都调用 webui.Handler(webuiFS)——每请求新建空
+	// 缓存, 压缩结果从不复用, 注释承诺的「一次压缩多次复用」在生产路径不
+	// 成立, 每个请求都重新 gzip 整个 bundle(实测 674KB→211KB 的重压缩)。
+	//
+	// 注意: 捕获发生在构造期, 测试替换 webuiFS 需在 newWithBackend 之前
+	// 赋值(或替换后重建 Server), 见 server_test.go 的 SPA 用例。
+	webuiHandler := newWebuiHandler(webuiFS)
 	s.r.NoRoute(func(c *gin.Context) {
 		if strings.HasPrefix(c.Request.URL.Path, "/api/") {
 			failCode(c, http.StatusNotFound, "VALIDATION_ERROR", "接口不存在")
@@ -274,9 +284,13 @@ func (s *Server) register() {
 			c.String(http.StatusMethodNotAllowed, "方法不允许")
 			return
 		}
-		webui.Handler(webuiFS).ServeHTTP(c.Writer, c.Request)
+		webuiHandler.ServeHTTP(c.Writer, c.Request)
 	})
 }
+
+// newWebuiHandler 构造 webui 静态资源 handler(包级变量供测试替换计数:
+// 断言「构造期只创建一次、请求期不再重建」)。生产恒为 webui.Handler。
+var newWebuiHandler = webui.Handler
 
 // webuiFS 是内嵌前端资源(可被测试替换)。
 var webuiFS = func() fs.FS {

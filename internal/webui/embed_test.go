@@ -142,6 +142,101 @@ func TestSPAAssetNoGzipWithoutAcceptEncoding(t *testing.T) {
 	if rec.Body.String() != testAssetJS {
 		t.Fatal("未压缩响应体应与源文件一致")
 	}
+	// LE-5: 未压缩分支同样必须带 Vary: Accept-Encoding——否则共享缓存会把
+	// 这条未压缩响应提供给声明 gzip 的客户端。
+	if v := rec.Header().Get("Vary"); !strings.Contains(v, "Accept-Encoding") {
+		t.Fatalf("未压缩分支也应带 Vary: Accept-Encoding,得到 %q", v)
+	}
+}
+
+// TestSPAAssetVaryOnGzipRefusalAndNonCompressible (LE-5) 验证:
+//  1. 显式拒绝 gzip(q=0)的未压缩响应仍带 Vary: Accept-Encoding;
+//  2. 非可压缩类型(图片)无需 Vary(永远不压缩, 无变体)。
+func TestSPAAssetVaryOnGzipRefusalAndNonCompressible(t *testing.T) {
+	fsys := testFS()
+	fsys["assets/logo-abc123.png"] = &fstest.MapFile{Data: []byte("\x89PNG\r\n\x1a\n")}
+	h := Handler(fsys)
+
+	// 1) q=0 显式拒绝: 未压缩, 但 Vary 必须在(共享缓存不得把未压缩响应
+	// 给接受 gzip 的客户端)。
+	req := httptest.NewRequest("GET", "/assets/app-abc123.js", nil)
+	req.Header.Set("Accept-Encoding", "gzip;q=0")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("期望 200,得到 %d", rec.Code)
+	}
+	if ce := rec.Header().Get("Content-Encoding"); ce != "" {
+		t.Fatalf("q=0 拒绝时不应压缩,得到 Content-Encoding=%q", ce)
+	}
+	if v := rec.Header().Get("Vary"); !strings.Contains(v, "Accept-Encoding") {
+		t.Fatalf("q=0 拒绝分支也应带 Vary: Accept-Encoding,得到 %q", v)
+	}
+
+	// 2) 非可压缩类型(图片): 永远不压缩, 无需 Vary。
+	pngReq := httptest.NewRequest("GET", "/assets/logo-abc123.png", nil)
+	pngReq.Header.Set("Accept-Encoding", "gzip")
+	pngRec := httptest.NewRecorder()
+	h.ServeHTTP(pngRec, pngReq)
+	if ce := pngRec.Header().Get("Content-Encoding"); ce != "" {
+		t.Fatalf("图片不应压缩,得到 Content-Encoding=%q", ce)
+	}
+	if v := pngRec.Header().Get("Vary"); v != "" {
+		t.Fatalf("非可压缩类型无需 Vary,得到 %q", v)
+	}
+}
+
+// TestSPAAssetGzipCompressedOncePerHandler (LE-4) 验证「一次压缩多次复用」:
+// 同一 Handler 上的两次 gzip 请求只执行一次实际压缩(第二次命中缓存)。
+//
+// 回归背景(独立审查确认的缺陷): server.go 的 NoRoute 曾在请求体内每次调用
+// webui.Handler(webuiFS)——每请求新建空缓存, 压缩结果从不复用, 生产路径上
+// 每个静态资源请求都重新 gzip 整个 bundle。本测试在 webui 包内锁定 Handler
+// 实例级的缓存复用; server 包另有 TestNoRouteReusesSingleWebuiHandler 锁定
+// 「构造期只创建一次」的接线。
+func TestSPAAssetGzipCompressedOncePerHandler(t *testing.T) {
+	h := Handler(testFS())
+
+	get := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest("GET", "/assets/app-abc123.js", nil)
+		req.Header.Set("Accept-Encoding", "gzip")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+
+	before := CompressedCallsForTest()
+	rec1 := get()
+	after1 := CompressedCallsForTest()
+	if rec1.Header().Get("Content-Encoding") != "gzip" {
+		t.Fatalf("第一次请求应为 gzip,得到 %q", rec1.Header().Get("Content-Encoding"))
+	}
+	if after1-before != 1 {
+		t.Fatalf("第一次 gzip 请求应执行 1 次压缩, 实际 %d", after1-before)
+	}
+
+	rec2 := get()
+	after2 := CompressedCallsForTest()
+	if rec2.Header().Get("Content-Encoding") != "gzip" {
+		t.Fatalf("第二次请求应为 gzip,得到 %q", rec2.Header().Get("Content-Encoding"))
+	}
+	if after2-after1 != 0 {
+		t.Fatalf("第二次请求应命中压缩缓存(0 次新压缩), 实际新增 %d 次——缓存未复用", after2-after1)
+	}
+	if rec1.Body.String() != rec2.Body.String() {
+		t.Fatal("两次请求的 gzip 体应一致")
+	}
+
+	// 独立 Handler(如每请求重建)必须重新压缩: 反证「缓存实例级复用」语义。
+	beforeNew := CompressedCallsForTest()
+	h3 := Handler(testFS())
+	req3 := httptest.NewRequest("GET", "/assets/app-abc123.js", nil)
+	req3.Header.Set("Accept-Encoding", "gzip")
+	rec3 := httptest.NewRecorder()
+	h3.ServeHTTP(rec3, req3)
+	if got := CompressedCallsForTest() - beforeNew; got != 1 {
+		t.Fatalf("新 Handler 的首次请求应重新压缩(1 次), 实际 %d", got)
+	}
 }
 
 // TestSPAAssetHeadMatchesGet 验证 HEAD 响应头与 GET 一致(含压缩协商):
