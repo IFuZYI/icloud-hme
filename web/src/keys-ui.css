@@ -70,6 +70,16 @@
   overflow-y: auto;
 }
 
+/* 「账号使用范围」与权限分组同框(复用 .permission-group 的边框/圆角/legend),
+   只调整框内提示与列表的垂直间距, 避免提示紧贴边框。 */
+.account-scope-group .hint {
+  margin: 0 0 var(--space-2);
+}
+
+.account-scope-group .account-scope-list {
+  margin-top: var(--space-1);
+}
+
 /* 行内操作是纯文字链式按钮: 补足触控命中区(移动端手指可达)。
    与项目移动端约定一致(aliases-ui.css 的 min-height: 44px)。 */
 .key-row-actions .link-button,

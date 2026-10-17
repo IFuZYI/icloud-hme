@@ -345,11 +345,9 @@ export default function KeysPage() {
             <p className="hint">留空将自动生成 sk- 开头的 24 位随机秘钥；也可手动指定（8-128 位）。</p>
           </div>
         )}
-        <div className="form-field">
-          <span className="field-label">账号使用范围</span>
-          <p className="hint">
-            不选 = 全部账号；勾选后仅限选定的账号可用。
-          </p>
+        <fieldset className="permission-group account-scope-group">
+          <legend>账号使用范围</legend>
+          <p className="hint">不选 = 全部账号；勾选后仅限选定的账号可用。</p>
           {accounts.length === 0 && <p className="hint">暂无账号或加载中…</p>}
           <div className="account-scope-list">
             {accounts.map((acc) => (
@@ -363,7 +361,7 @@ export default function KeysPage() {
               </label>
             ))}
           </div>
-        </div>
+        </fieldset>
         <div className="form-field">
           <span className="field-label">权限</span>
           {grouped.length === 0 && <p className="hint">权限目录加载中…</p>}
