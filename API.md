@@ -193,6 +193,25 @@ X-CSRF-Token: <token>
 
 服务端会用 IMAP 连接验证凭据。成功返回 `Summary`；IMAP 验证失败返回 `502 UPSTREAM_FAILURE`。
 
+### 9b. 设置外部 IMAP 收件邮箱
+
+```http
+PUT /api/accounts/:id/mailbox
+X-CSRF-Token: <token>
+
+{
+  "provider": "qq",
+  "email": "you@example.com",
+  "imap_host": "imap.example.com",
+  "imap_port": 993,
+  "authorization_code": "授权码"
+}
+```
+
+把一个外部 IMAP 邮箱绑定到该 iCloud 账号：读取邮件时优先走该邮箱（IMAP），未配置时回退 iCloud 自身通道。四个字段（`email`、`imap_host`、`imap_port`、`authorization_code`）必填，`provider` 仅作展示/兼容用途。服务端会立即用 IMAP 连接验证；成功返回脱敏后的 `Summary`（不含授权码），验证失败返回 `502 UPSTREAM_FAILURE`；账号不存在返回 `404 ACCOUNT_NOT_FOUND`；该邮箱已被其他账号绑定时返回 `409 MAILBOX_IN_USE`（一个外部邮箱只能绑定一个账号）。
+
+**权限：** `accounts.write`；**账号范围：** 路径 `:id` 必须在该秘钥的白名单内（否则 `403 ACCOUNT_NOT_ALLOWED`）。
+
 ### 10. iCloud 密码登录（获取 Cookie）
 
 ```http

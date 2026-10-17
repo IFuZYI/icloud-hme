@@ -30,3 +30,7 @@ accounts.json
 build/
 /icloud-hme
 
+# 本地资料与 QA 证据(体积大, 不入库)
+/reference/
+/IDEA.md
+/dogfood-output/screenshots/

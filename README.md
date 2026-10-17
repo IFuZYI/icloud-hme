@@ -18,7 +18,7 @@
 - ✅ **多账号管理** — 支持多个 iCloud 账号并行管理
 - ✅ **API 秘钥** — 为脚本创建独立秘钥（`sk-` 开头，可手动指定），按接口粒度勾选权限，并按账号设定使用范围，免 Cookie/CSRF 调用
 - ✅ **双认证模式** — Cookie (创建别名 + 读邮件回退) 和 App Password (IMAP 优先)
-- ✅ **安全模型** — 单管理员会话、CSRF 校验、登录限流、响应脱敏
+- ✅ **安全模型** — 单管理员会话（只存内存，进程重启即失效）、CSRF 校验、登录限流、响应脱敏；API 秘钥按「接口权限 + 账号范围」双重校验，范围同时作用于读与写，范围外资源与不存在资源返回同响应（不泄露存在性），秘钥管理/权限目录等接口仅限会话（秘钥访问一律 403）
 - ✅ **Apple 风格响应式 UI** — 深色模式、减少动态效果、移动端布局与键盘无障碍操作；静态资源 gzip 压缩 + 路由级代码分割（首屏传输约 147KB）
 
 ## 快速开始
@@ -137,10 +137,19 @@ docker compose down
 - **HTTPS 反代部署**：置于 TLS 反向代理后时，将 `ICLOUD_HME_SECURE_COOKIE` 设为 `true`。
 - **构建门禁**：Docker 镜像构建只产出前端资源并编译二进制；lint、单元测试与 `go vet` 属于 CI 与本地 `./build.sh` 环节，不在镜像构建内执行，以缩短构建耗时。
 - **运行时加固**：Compose 默认启用只读根文件系统、`no-new-privileges` 和独立临时目录；只有 `/app/data` 持久化目录可写。
+- **非 root 运行**：镜像内以 `app`（UID/GID **10001**）运行，不是 root。Compose 内置一次性 `init-data` 服务：应用启动前自动把 `./data` 授权给运行用户（`condition: service_completed_successfully`），**全新部署无需手工 chown**；已有数据目录内容不受影响。
+  若希望沿用当前宿主用户（例如 `id -u` = 1000），在 `.env` 中设置 `ICLOUD_HME_UID=1000`、`ICLOUD_HME_GID=1000`，`init-data` 与主容器都会使用该 UID。
+- **环境变量模板**：仓库根目录提供 [`.env.example`](.env.example)，复制为 `.env` 后按需修改（`.env` 已被 git 忽略）。
 - **镜像大小**：构建采用多阶段（前端 Node 构建 → Go 编译 → 精简 Alpine 运行时），最终镜像仅含二进制与 `ca-certificates`、`tzdata`。
 - **健康检查**：容器内置 `wget` 探活 `/`，约 30 秒检测一次，失败 3 次标记 unhealthy（`docker compose ps` 可见）。
 
 ### 2. 安全配置（必读）
+
+仓库根目录的 [`.env.example`](.env.example) 列出了全部环境变量（含默认值与取值范围）；本地运行时复制为 `.env`：
+
+```bash
+cp .env.example .env      # 然后修改 ICLOUD_HME_ADMIN_PASSWORD
+```
 
 管理界面与 API 均需要管理员登录，升级后所有 API 都必须先通过 `POST /api/auth/login` 获取会话：
 
@@ -190,6 +199,10 @@ docker compose down
 # 二进制方式（默认 data 目录）
 export ICLOUD_HME_ADMIN_PASSWORD='your-strong-password'
 ./icloud-hme_linux_amd64
+
+# 源码方式：run.sh 自动加载 .env（需先 ./build.sh 或 go build -o build/icloud-hme .）
+./run.sh
+./run.sh -addr :9090          # 额外参数透传给二进制
 
 # 指定端口和数据目录
 ./icloud-hme_linux_amd64 -addr :9090 -data ./my_data

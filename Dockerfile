@@ -13,7 +13,7 @@ COPY web/ ./
 RUN npm run build
 
 # ── 第二阶段:编译 Go 二进制(含内嵌前端) ──
-FROM golang:1.26-alpine AS builder
+FROM golang:1.27-alpine AS builder
 RUN apk add --no-cache git ca-certificates
 WORKDIR /build
 COPY go.mod go.sum ./
@@ -31,9 +31,15 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 
 # ── 第三阶段:运行时(仅二进制,无 Node) ──
 FROM alpine:3.21
-RUN apk add --no-cache ca-certificates tzdata
+RUN apk add --no-cache ca-certificates tzdata \
+ && addgroup -g 10001 -S app \
+ && adduser -u 10001 -S -G app -h /app app
 WORKDIR /app
 COPY --from=builder /build/icloud-hme .
+# 数据目录预创建并授权给运行用户: 容器以非 root(10001)运行,
+# 宿主机挂载的 ./data 必须可被该 UID 写入(见 docker-compose.yml 注释)。
+RUN mkdir -p /app/data && chown -R app:app /app/data
+USER app
 EXPOSE 8081
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD wget -q -O /dev/null http://127.0.0.1:8081/ || exit 1

@@ -1,4 +1,19 @@
 services:
+  # 一次性初始化: 全新部署时 docker 会把 ./data 建成 root 所有, 而应用以
+  # 非 root(10001) 运行。该服务在应用启动前把数据目录授权给运行用户,
+  # 之后即退出(重启策略 no)。已有目录不会丢数据。
+  init-data:
+    image: alpine:3.21
+    container_name: icloud-hme-init
+    command:
+      - sh
+      - -c
+      - mkdir -p /data && chown -R ${ICLOUD_HME_UID:-10001}:${ICLOUD_HME_GID:-10001} /data
+    volumes:
+      - ./data:/data
+    user: "0:0"
+    restart: "no"
+
   icloud-hme:
     build:
       context: .
@@ -7,6 +22,9 @@ services:
     container_name: icloud-hme
     restart: unless-stopped
     init: true
+    depends_on:
+      init-data:
+        condition: service_completed_successfully
     ports:
       - "${ICLOUD_HME_PORT:-8081}:8081"
     environment:
@@ -23,7 +41,12 @@ services:
       TZ: "${TZ:-Asia/Shanghai}"
     volumes:
       # 账号配置 (accounts.json)、自动任务配置与日志持久化
+      # 注意: 容器以非 root(UID 10001)运行, 宿主机目录需对该 UID 可写:
+      #   sudo chown -R 10001:10001 ./data      (或设置 ICLOUD_HME_UID 为宿主用户 UID)
       - ./data:/app/data
+    # 运行用户: 默认镜像内的 app(10001)。若宿主机 ./data 属于其他用户,
+    # 在 .env 里设置 ICLOUD_HME_UID/ICLOUD_HME_GID 为 `id -u`/`id -g` 即可。
+    user: "${ICLOUD_HME_UID:-10001}:${ICLOUD_HME_GID:-10001}"
     read_only: true
     tmpfs:
       - /tmp:size=16m,mode=1777

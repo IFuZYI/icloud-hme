@@ -34,19 +34,23 @@ Gin Server /api ─────────────────────�
 │   ├── auth/                       管理员密码派生、内存会话、CSRF、登录限流
 │   ├── hme/                        iCloud HME Cookie/SRP 客户端
 │   ├── mail/                       IMAP、Web Mail、MIME 解析与连接池
-│   ├── server/                     Gin 路由、handler、Backend、自动任务
+│   ├── server/                     Gin 路由、handler、Backend、自动任务、邮件清理任务（purge_*.go）
 │   ├── srp/                        Apple 登录使用的 SRP 协议实现
-│   └── webui/                      通过 go:embed 分发前端产物与 SPA fallback
+│   └── webui/                      通过 go:embed 分发前端产物与 SPA fallback（gzip 协商）
 ├── web/
 │   ├── src/api/                    唯一 fetch 封装和 API DTO
 │   ├── src/auth/                   会话探测、登录状态和 CSRF token 内存管理
 │   ├── src/components/             可复用弹窗、菜单、通知和表单组件
 │   ├── src/pages/                  账号、别名、任务、日志、收件箱、秘钥页面
+│   ├── src/*-ui.css                各页面样式（styles.css 为全局设计系统）
 │   └── src/test/                   MSW、Vitest 共享测试设施
 ├── data/                           运行期数据，包含敏感凭据；不应提交
-├── API.md                          对外 API 文档（部分内容落后于当前实现，见第 5 节）
-├── Dockerfile                      前端检查/构建 + Go 检查/编译的多阶段镜像
-├── docker-compose.yml              生产运行参数、挂载、安全限制与健康检查
+├── API.md                          对外 API 文档
+├── ARCHITECTURE.md                 本文件：目录、边界、路由与测试基线
+├── .env.example                    环境变量模板（不含密钥，可安全入库）
+├── run.sh                          本地启动脚本：加载 .env 后执行二进制
+├── Dockerfile                      前端构建 + Go 编译 + 非 root Alpine 运行时的多阶段镜像
+├── docker-compose.yml              生产运行参数、挂载、非 root UID、安全限制与健康检查
 └── build.sh                        本地全量检查及 Linux amd64 构建
 ```
 
@@ -60,6 +64,7 @@ Gin Server /api ─────────────────────�
 | 修改读信/分页/摘要 | `internal/server/backend.go`、`internal/mail/client.go` | `InboxResult`、`web/src/pages/InboxPage.tsx`、IMAP/Web API 降级语义 |
 | 修改邮件 HTML/MIME 解析 | `internal/mail/preview.go`、`internal/mail/client.go` | `attachment_test.go`、`mime_edge_test.go`、preview 系列测试 |
 | 修改自动创建任务 | `internal/server/auto_task.go`、`auto_task_logs.go`、`alias_task_handlers.go` | 原子持久化、停止通道、任务/日志测试、任务页 |
+| 修改邮件批量清理 | `internal/server/purge_manager.go`、`purge_runner.go`、`purge_handlers.go` | 任务状态机（running/throttled/paused/interrupted）、同账号互斥、断点续传、读缓存失效、`purge_tasks.json` 持久化与 30+ 项 purge 测试 |
 | 修改登录/会话安全 | `internal/auth/`、`internal/server/auth.go`、`middleware.go` | CSRF、Cookie 属性、限流、前端 `AuthProvider` |
 | 新增/修改受保护接口 | 对应 handler + `permission_catalog.go` 的 `protectedRouteList` | 权限表完整性测试（`TestRoutePermissionTableComplete`）；仅会话接口须列入 `sessionOnlyRoutes`；秘钥管理面见 `apikey/`、`apikey_auth.go`、`keys_handlers.go` |
 | 修改前端 API 行为 | `web/src/api/client.ts`、`web/src/api/types.ts` | MSW handlers、相应页面测试；不要绕过 `request()` 直接 `fetch()` |
@@ -72,6 +77,9 @@ Gin Server /api ─────────────────────�
 - **所有 iCloud Cookie 刷新后必须持久化**：HME 业务调用后通过 `Manager.SaveCookies` 保存客户端持有的最新 Cookie。
 - **自动任务状态写入必须原子化**：任务状态和日志分别由 `writeJSONAtomic` 写入，避免中断后产生半个 JSON 文件；任务分自主（每天 1–50 个，按拟人模型分摊：用户画像 + 日/周周期 + 会话自激 + 对数正态间隔，作息时区跟随账号代理出口 IP，配额按作息周期重置）与定时（每 20–1440 分钟创建 1–20 个）两类，同账号任意连续 60 分钟内创建尝试最多 5 次（滚动窗口，人工+自动共享），两次人工创建至少间隔 20 分钟，且每天最多 50 个。
 - **收件箱列表是两阶段加载**：先取 IMAP 信封，再由 `POST /api/inbox/previews` 分批补正文摘要；不要把正文抓取重新放回首屏列表路径。
+- **清理任务必须单实例推进**：同一账号同一时刻只允许一个 runner（`resume` 与创建走同账号互斥），每个 chunk 之间检查暂停/取消；任务与进度原子落盘，服务重启把运行中任务标记 `interrupted`，可 `resume` 断点续传。
+- **清理任务必须失效读缓存**：每批删除后调用 `invalidateAccountReads`，否则收件箱列表/信封快照会继续返回已删除邮件（UIDVALIDITY 变化同样要清快照）。
+- **清理任务按账号隔离**：`purge-tasks/:id` 的暂停/继续/取消以任务真实归属账号做秘钥范围校验；范围外与不存在返回同一个 404，避免存在性探测。
 - **账号页面局部状态优先**：列表刷新、弹窗目标与异步提交状态都位于 `AccountsPage` 及其弹窗内；当前规模无需引入 Redux 等全局状态库。
 
 ## 4. 认证与响应约定
@@ -132,6 +140,11 @@ Gin Server /api ─────────────────────�
 | POST | `/api/accounts/:id/password` | 设置并验证 iCloud App Password（写） |
 | PUT | `/api/accounts/:id/mailbox` | 设置并验证外部 IMAP 收件邮箱（写） |
 | POST | `/api/accounts/:id/login` | 使用 iCloud 密码与可选 OTP 获取 Cookie（写） |
+| POST | `/api/accounts/:id/login/begin` | 发起 SRP 登录（返回 session_id 与需要的验证方式）（写） |
+| POST | `/api/accounts/:id/login/otp` | 提交 2FA 验证码（写） |
+| POST | `/api/accounts/:id/login/sms` | 选择短信接收手机号并触发发送（写） |
+| GET | `/api/accounts/:id/login/phones` | 列出可接收短信的手机号（`accounts.list`） |
+| POST | `/api/accounts/:id/login/resend` | 重新发送验证码（写） |
 | POST | `/api/accounts/:id/check` | 检测登录态: 对现有 Cookie 做 validate 探活并落库状态（写） |
 | DELETE | `/api/accounts/:id` | 删除账号（写） |
 
@@ -162,6 +175,12 @@ Gin Server /api ─────────────────────�
 | POST | `/api/inbox/previews?account_id=…` | 批量补摘要，body 为 `{"ids":[…]}`，最多 20 个 ID（写） |
 | GET | `/api/inbox/:message_id?account_id=…` | 读取完整正文，仅走 IMAP；`message_id` 为 `1042`（INBOX）或 `Junk:88`（其它文件夹） |
 | DELETE | `/api/inbox/:message_id?account_id=…` | 删除邮件，仅走 IMAP（写） |
+| POST | `/api/inbox/purge/preview` | 清理预览：返回该时间范围内将删除的邮件数与样本，不执行删除（写） |
+| POST | `/api/inbox/purge` | 创建异步清理任务（写）；同账号互斥，分块节流执行，可暂停/继续/取消 |
+| GET | `/api/purge-tasks` | 列出清理任务（权限 `inbox.purge`；按秘钥账号范围过滤） |
+| POST | `/api/purge-tasks/:id/pause` | 暂停清理任务（写；以任务归属账号做范围校验） |
+| POST | `/api/purge-tasks/:id/resume` | 继续/断点续传（写；同账号互斥） |
+| POST | `/api/purge-tasks/:id/cancel` | 取消清理任务（写） |
 | POST | `/api/reload` | 从磁盘重新加载 `accounts.json`（写） |
 
 ### 重要 DTO
@@ -176,7 +195,7 @@ Gin Server /api ─────────────────────�
 
 ### 现有文档差异
 
-`API.md` 尚未覆盖当前已实现的外部邮箱、邮件详情/删除、预览批量接口和收件箱分页字段；其旧版 `limit`/`days` 约束也与当前实现不同。后续以本节和路由实现为准；任何接口改动应同步更新 `API.md`，避免再次分叉。
+`API.md` 覆盖全部对外接口（含邮件清理、预览批量、iCloud 分步登录与外部 IMAP 邮箱）；本节表格与 `permission_catalog.go` 的 `protectedRouteList` 是路由的权威清单。新增或修改接口时，handler、权限表、`API.md` 与本节的表格必须同步——漏声明权限会被 `TestRoutePermissionTableComplete` 直接判红。
 
 ## 6. 外部调用与降级链路
 
@@ -240,7 +259,14 @@ CI 分为 web 与 go 两个 job：web job 上传构建产物，go job 下载该�
 
 ## 9. 当前规模与测试基线
 
-- 源码、测试、配置与文档（排除锁文件及内嵌前端产物）：约 **19,222 行**。
-- 前端非测试源码：约 **5,610 行**。
-- 测试文件：**35 个**。
-- 最近验证：`go test ./...`、`go vet ./...`、`npm --prefix web run check` 均通过；前端 ESLint 有 2 个 `react-refresh/only-export-components` 警告，无错误。
+| 指标 | 数值 |
+|---|---|
+| 纳入版本控制的文件 | **243** |
+| 源码 + 测试 + 配置 + 文档行数（排除 `package-lock.json` 与内嵌 `dist`） | 约 **50,100 行** |
+| 前端非测试源码 | 约 **8,400 行** |
+| 测试文件 | **116** 个（Go `*_test.go` + 前端 `*.test.tsx`） |
+| Go 测试函数 | **532** 个 |
+| 前端测试 | 33 个文件 / **194** 个用例（Vitest + MSW） |
+| Go 包 | **11** 个包有测试（`go test ./...` 全绿；`-race` 覆盖 server/mail/apikey/webui） |
+
+最近验证：`go test ./...`、`go test -race`（关键包）、`go vet ./...`、`gofmt`、`npm --prefix web run check`（lint + 测试 + 构建）均通过；ESLint 仅剩 2 个既有 `react-refresh/only-export-components` 警告，0 error。

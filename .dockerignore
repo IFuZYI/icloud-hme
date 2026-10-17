@@ -18,3 +18,9 @@ internal/webui/dist
 *.exe
 icloud-hme
 accounts.json
+# 构建无关的大体积目录(减少上下文传输)
+reference
+dogfood-output
+docs
+IDEA.md
+*.tmp
