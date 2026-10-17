@@ -362,6 +362,9 @@ func (m *Manager) Update(id string, in UpdateInput) (Key, error) {
 	if !ok {
 		return Key{}, ErrKeyNotFound
 	}
+	// 先快照再原地修改: 写盘失败时回滚, 维持「报错 = 未生效」契约,
+	// 避免内存态与磁盘态发散(重启后旧态静默覆盖新值)。
+	orig := *k
 	if in.Name != nil {
 		name := strings.TrimSpace(*in.Name)
 		if len([]rune(name)) > nameMaxLen {
@@ -379,6 +382,7 @@ func (m *Manager) Update(id string, in UpdateInput) (Key, error) {
 		k.Enabled = *in.Enabled
 	}
 	if err := m.saveLocked(); err != nil {
+		*k = orig
 		return Key{}, err
 	}
 	return *k, nil
@@ -388,11 +392,17 @@ func (m *Manager) Update(id string, in UpdateInput) (Key, error) {
 func (m *Manager) Delete(id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if _, ok := m.keys[id]; !ok {
+	rec, ok := m.keys[id]
+	if !ok {
 		return ErrKeyNotFound
 	}
 	delete(m.keys, id)
-	return m.saveLocked()
+	if err := m.saveLocked(); err != nil {
+		// 写盘失败恢复记录: 内存态不得先于持久态生效。
+		m.keys[id] = rec
+		return err
+	}
+	return nil
 }
 
 // Validate 校验秘钥: 命中且启用时返回记录并记录 last_used(节流写盘)。

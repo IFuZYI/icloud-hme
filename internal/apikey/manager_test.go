@@ -224,6 +224,87 @@ func TestUpdateChangesFields(t *testing.T) {
 	}
 }
 
+// Update 写盘失败必须回滚内存变更: 内存态与持久态不得发散。
+//
+// 背景(独立审查发现): Update() 先原地修改 *Key 再 saveLocked(), 写盘失败
+// 时只返回错误、内存已被改——API 契约「报错 = 未生效」被违反, 且重启后
+// 磁盘旧态静默覆盖。Create 有回滚(delete), Update 没有。
+//
+// 注入: 把文件路径指到不可写位置(已存在同名目录), 强制 saveLocked 失败。
+func TestUpdateRollbackOnPersistFailure(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "api_keys.json")
+	m, err := NewManager(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, err := m.Create(CreateInput{Name: "原名", Permissions: []string{"inbox.list"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 让后续写盘必然失败: 把文件替换为同名目录(atomic write 无法覆盖目录)。
+	if err := os.Remove(file); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(file, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	name := "改名"
+	enabled := false
+	if _, err := m.Update(rec.ID, UpdateInput{Name: &name, Enabled: &enabled}); err == nil {
+		t.Fatal("写盘失败应返回错误")
+	}
+
+	// 内存态必须回滚到原值(报错 = 未生效)。
+	got, ok := m.Get(rec.ID)
+	if !ok {
+		t.Fatal("秘钥不应消失")
+	}
+	if got.Name != "原名" || !got.Enabled {
+		t.Fatalf("写盘失败后内存应回滚: name=%q enabled=%v", got.Name, got.Enabled)
+	}
+}
+
+// Delete 写盘失败必须回滚内存变更: 与 Update 同一契约「报错 = 未生效」。
+//
+// 注入手法与 TestUpdateRollbackOnPersistFailure 相同: 把 api_keys.json 替换为
+// 同名目录, 使原子写(Rename 到目录)必然失败。
+func TestDeleteRollbackOnPersistFailure(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "api_keys.json")
+	m, err := NewManager(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, err := m.Create(CreateInput{Name: "原名", Permissions: []string{"inbox.list"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 让后续写盘必然失败: 把文件替换为同名目录(atomic write 无法覆盖目录)。
+	if err := os.Remove(file); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(file, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := m.Delete(rec.ID); err == nil {
+		t.Fatal("写盘失败应返回错误")
+	}
+
+	// 内存态必须回滚: 键仍在, 字段原样(报错 = 未生效)。
+	got, ok := m.Get(rec.ID)
+	if !ok {
+		t.Fatal("秘钥不应消失")
+	}
+	if got.Name != "原名" || !got.Enabled {
+		t.Fatalf("写盘失败后内存应回滚: name=%q enabled=%v", got.Name, got.Enabled)
+	}
+}
+
 // 删除后秘钥立即失效, 且列表不再包含。
 func TestDeleteRemovesKey(t *testing.T) {
 	m, _ := newTestManager(t)

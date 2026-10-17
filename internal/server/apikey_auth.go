@@ -231,25 +231,33 @@ func (s *Server) resourceAccountFor(c *gin.Context) []string {
 // 顺序: query account_id → JSON body account_id → 账号路由路径 :id。
 // 返回切片而非单值: 调用方必须逐一校验(任一越界即拒), 避免多来源不一致
 // 造成的旁路。
+//
+// 去重用 map(而非线性扫描): body 可达中间件上限(1 MiB), 线性去重会退化为
+// O(n²)——3.6 万个不同 account_id 实测单请求 3.27s 纯 CPU(鉴权中间件内同步
+// 执行, 低成本即可用满 CPU)。map 去重保持 O(n)。
 func accountScopeTargets(c *gin.Context) []string {
 	var out []string
+	seen := make(map[string]struct{}, 4)
 	add := func(v string) {
 		v = strings.TrimSpace(v)
 		if v == "" {
 			return
 		}
-		for _, x := range out {
-			if x == v {
-				return
-			}
+		if _, dup := seen[v]; dup {
+			return
 		}
+		seen[v] = struct{}{}
 		out = append(out, v)
 	}
 	add(c.Query("account_id"))
 	if accountRouteHasPathID(c.FullPath()) {
 		add(c.Param("id"))
 	}
-	add(accountIDFromBody(c))
+	// body 中的 account_id: 收集全部 JSON 值声明的账号(尾随值同样纳入),
+	// 任一越界即拒。
+	for _, id := range accountIDsFromBody(c) {
+		add(id)
+	}
 	return out
 }
 
@@ -318,23 +326,53 @@ func containsString(list []string, want string) bool {
 // JSON, 若此处按 Content-Type 跳过提取, 攻击者可用 text/plain 携带 JSON
 // body 绕过账号范围校验(实测 403->200 越权)。只要 body 能被解析出
 // account_id 就必须校验。
+//
+// 解析语义必须与 handler 完全一致: handler 的 ShouldBindJSON 内部是
+// json.Decoder.Decode——只读**第一个** JSON 值, 忽略尾随数据; 而本函数
+// 若用 json.Unmarshal(要求整个 body 是单一 JSON 值), 攻击者发送
+// `{"account_id":"acc_2"}{"account_id":"acc_1"}` 时 Unmarshal 失败返回
+// 空串(等于「没有声明账号」跳过校验), handler 却读到 acc_2 并执行——
+// 范围受限秘钥可越权操作范围外账号(实测 6+ 端点, 修复前 201/200)。
+// 因此这里用 Decoder 逐值解析, 与 handler 语义一致。
 func accountIDFromBody(c *gin.Context) string {
-	if c.Request.Body == nil {
+	ids := accountIDsFromBody(c)
+	if len(ids) == 0 {
 		return ""
+	}
+	return ids[0]
+}
+
+// accountIDsFromBody 收集 body 中出现的**全部** account_id(按 JSON 值顺序)。
+//
+// 逐值解析(Decoder 循环)而非整体 Unmarshal:
+//   - 与 handler 的 Decoder.Decode 语义一致(尾随数据不导致漏检);
+//   - 尾随值声明的越界账号同样被收集——校验覆盖「所有声明来源」的既有契约
+//     (任一越界即拒)在尾随场景下同样成立。
+func accountIDsFromBody(c *gin.Context) []string {
+	if c.Request.Body == nil {
+		return nil
 	}
 	raw, err := io.ReadAll(c.Request.Body)
 	if err != nil {
-		return ""
+		return nil
 	}
 	// 无论解析结果如何都还原 body, 避免影响 handler 的 ShouldBindJSON。
 	c.Request.Body = io.NopCloser(bytes.NewReader(raw))
-	var probe struct {
-		AccountID string `json:"account_id"`
+
+	var out []string
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	for {
+		var probe struct {
+			AccountID string `json:"account_id"`
+		}
+		if err := dec.Decode(&probe); err != nil {
+			break // EOF 或尾随垃圾: 停止收集, 已有结果仍有效
+		}
+		if id := strings.TrimSpace(probe.AccountID); id != "" {
+			out = append(out, id)
+		}
 	}
-	if err := json.Unmarshal(raw, &probe); err != nil {
-		return ""
-	}
-	return strings.TrimSpace(probe.AccountID)
+	return out
 }
 
 // accountRouteHasPathID 判断路由模板的 :id 是否是账号 ID。
