@@ -74,7 +74,7 @@ function PurgeTaskCard({
           {purgeStatusText(task.status)}
         </span>
         <strong>{task.account_name || task.account_id}</strong>
-        <span className="hint">{task.range_start.slice(0, 10)} 之前的邮件</span>
+        <span className="hint">{task.range_end.slice(0, 10)} 及更早的邮件</span>
         <button
           type="button"
           className="link-button"
@@ -361,7 +361,7 @@ export default function LogsPage() {
                 </dd>
               </div>
               <div><dt>账号</dt><dd>{detailTask.account_name || detailTask.account_id}</dd></div>
-              <div><dt>清理范围</dt><dd>{detailTask.range_start.slice(0, 10)} 之前的邮件</dd></div>
+              <div><dt>清理范围</dt><dd>{detailTask.range_end.slice(0, 10)} 及更早的邮件</dd></div>
               <div>
                 <dt>删除</dt>
                 <dd>

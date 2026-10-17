@@ -18,7 +18,8 @@ import { IconAlert, IconCopy, IconKey, IconMail, IconRefresh, IconTrash } from '
 
 dayjs.locale('zh-cn')
 
-/** 清理预设: 标签 → 天数(从今天往前推)。 */
+/** 清理预设: 标签 → 截止天数。
+ *  「N 天前」当天 00:00 是截止日——删除该日及更早的旧邮件, 保留较新的邮件。 */
 const PURGE_PRESETS: { label: string; days: number }[] = [
   { label: '3 天前', days: 3 },
   { label: '7 天前', days: 7 },
@@ -245,19 +246,24 @@ export default function InboxPage() {
   // ── 批量清理 ──────────────────────────────────────────────
   // 流程: 打开对话框 → 选预设(3天/7天/1月/半年) → 预览统计 →
   //       确认清理 → 二次确认(不可恢复警示) → 创建任务。
+  // 语义: 预设是「截止日」(N 天前当天 00:00), 删除截止日及更早的旧邮件,
+  //       保留较新的邮件; 发送区间 = [哨兵起点, 截止日]。
   async function runPurgePreview(days: number) {
     setPurgeDays(days)
     setPurgePreview(null)
     setPurgeError('')
     setPurgePreviewing(true)
     try {
-      const end = dayjs()
-      const start = dayjs().subtract(days, 'day').startOf('day')
+      // 起点用固定哨兵(2000-01-01), 早于任何真实邮件 → 覆盖全部历史。
+      // 后端按日粒度以 range_end 的次日零点为排他上界(BEFORE 语义),
+      // 故 range_end 取「N 天前」当天 00:00 → 命中该日及更早的全部邮件。
+      const start = '2000-01-01T00:00:00Z'
+      const end = dayjs().subtract(days, 'day').startOf('day')
       const data = await request<PurgePreview>('/api/inbox/purge/preview', {
         method: 'POST',
         body: {
           account_id: accountId,
-          range_start: start.format('YYYY-MM-DDTHH:mm:ssZ'),
+          range_start: start,
           range_end: end.format('YYYY-MM-DDTHH:mm:ssZ'),
         },
       })
@@ -664,7 +670,7 @@ export default function InboxPage() {
         }}
       >
         {purgeError && <div className="alert-error" role="alert">{purgeError}</div>}
-        <p className="hint">选择时间范围，删除该范围之前的所有邮件（含垃圾文件夹）。操作不可恢复。</p>
+        <p className="hint">选择截止日期，永久删除该日期及更早的全部邮件（含垃圾文件夹）。操作不可恢复。</p>
         <div className="purge-presets">
           {PURGE_PRESETS.map((p) => (
             <button
@@ -682,7 +688,7 @@ export default function InboxPage() {
         {purgePreview && (
           <div className="purge-preview">
             <p>
-              将删除 <strong>{purgePreview.total}</strong> 封邮件
+              将删除 {purgePreview.range_end.slice(0, 10)} 及更早的邮件，共 <strong>{purgePreview.total}</strong> 封
               {purgePreview.estimated_seconds > 0 && `（预计约 ${purgePreview.estimated_seconds} 秒）`}
             </p>
             {purgePreview.folders.length > 0 && (
@@ -715,7 +721,7 @@ export default function InboxPage() {
       {purgeConfirm && (
         <ConfirmDialog
           title="确认清理"
-          message={`将永久删除 ${purgePreview?.total ?? 0} 封邮件，操作不可恢复。确认继续？`}
+          message={`将永久删除 ${purgePreview?.range_end.slice(0, 10) ?? ''} 及更早的 ${purgePreview?.total ?? 0} 封邮件，操作不可恢复。确认继续？`}
           confirmLabel="确认删除"
           open
           busy={purgeCreating}

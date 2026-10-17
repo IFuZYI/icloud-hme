@@ -74,6 +74,8 @@ describe('LogsPage 清理任务与类别', () => {
     expect(screen.getByText(/300\s*\/\s*1000/)).toBeInTheDocument()
     expect(screen.getByText(/INBOX: 删除 500 封/)).toBeInTheDocument()
     expect(screen.getAllByText('主账号').length).toBeGreaterThan(0)
+    // 清理范围按截止日(range_end)表述: 删除该日及更早。
+    expect(screen.getByText('2026-10-16 及更早的邮件')).toBeInTheDocument()
   })
 
   it('运行中任务卡片也有查看详情', async () => {
@@ -108,7 +110,7 @@ describe('LogsPage 清理任务与类别', () => {
     // 任务级信息(原卡片摘要内容: 状态/账号/范围/已删除数)。
     expect(within(dialog).getByText('已完成')).toBeInTheDocument()
     expect(within(dialog).getByText('主账号')).toBeInTheDocument()
-    expect(within(dialog).getByText('2026-01-01 之前的邮件')).toBeInTheDocument()
+    expect(within(dialog).getByText('2026-10-16 及更早的邮件')).toBeInTheDocument()
     expect(within(dialog).getByText(/已删除 1000 封/)).toBeInTheDocument()
     // 该任务的运行日志: 只含 purge_2 的条目, 不含其它任务的。
     expect(within(dialog).getByText('清理完成: 删除 1000 封')).toBeInTheDocument()
