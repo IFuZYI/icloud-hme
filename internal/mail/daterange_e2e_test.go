@@ -14,7 +14,10 @@ func TestDateRangeEndIncludesEndDayE2E(t *testing.T) {
 	c, be := newE2EServerWithBackend(t)
 	now := time.Now()
 	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.Local)
-	addMessageTo(t, be, "INBOX", "a@example.com", "alias@icloud.com", "今天的邮件", now.Add(-2*time.Hour))
+	// 用 now 本身构造「今天的邮件」: now.Add(-2h) 在本地 00:00-02:00 窗口会
+	// 落到昨天, 导致下方「End=昨天应排除今天邮件」的断言前提失效(既存时区
+	// flake, 凌晨窗口内全量测试必红)。now 在任何时刻运行都保证落在今天。
+	addMessageTo(t, be, "INBOX", "a@example.com", "alias@icloud.com", "今天的邮件", now)
 	addMessageTo(t, be, "INBOX", "b@example.com", "alias@icloud.com", "两天前的邮件", now.AddDate(0, 0, -2))
 
 	// 区间 [两天前, 今天]: 今天的邮件必须在内(未修复时会被整日排除)。

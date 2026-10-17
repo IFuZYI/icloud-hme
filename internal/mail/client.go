@@ -11,6 +11,7 @@ import (
 	"io"
 	"log/slog"
 	"mime"
+	"net"
 	"sort"
 	"strconv"
 	"strings"
@@ -90,9 +91,35 @@ func NewClientWithServer(username, password, server string, port int) *Client {
 
 // dialIMAP 拨号 TLS IMAP 服务器。抽成变量供测试注入进程内服务器
 // (自签证书无法通过默认校验), 生产路径行为不变。
+//
+// SC-2: 与 DialTLS(addr, nil) 等价, 但拨号/TLS 握手/服务器问候阶段同样受
+// imapSocketTimeout 约束。go-imap v1.2.1 的 DialTLS(addr, tlsConfig) 不接受
+// 自定义 Client, 且问候响应在 DialTLS 返回前读取(无法事后设置 deadline);
+// 带 Timeout 的 dialer 让 go-imap 在问候前设置连接 deadline, 覆盖该阶段。
 var dialIMAP = func(addr string) (*client.Client, error) {
-	return client.DialTLS(addr, nil)
+	return client.DialWithDialerTLS(&net.Dialer{Timeout: imapSocketTimeout}, addr, nil)
 }
+
+// imapSocketTimeout 是单次 IMAP 读写操作的 socket deadline(0=禁用)。
+//
+// 目的(SC-2): 上层 withIMAPTimeout 超时只是「放弃等待」, 后台 goroutine 仍
+// 可能阻塞在无 deadline 的 socket 读上, 长期持有连接池锁(pc.mu), 阻塞同账号
+// 所有读。设置后, 卡死的读/写至多在 imapSocketTimeout 后以 i/o timeout
+// 失败, 连接被池判为坏连接丢弃, 下一次借用探测重建——锁持有时间从「无界」
+// 变为「有界」。
+//
+// 取值约束(勿单独调整): go-imap 的 deadline 在每条命令开始时设为「命令开始
+// + Timeout」, 命令结束后不重置, 因此它同时是「空闲连接的存活上限」: 只要
+// 两条命令(含池的保活 NOOP)的间隔小于该值, 连接就存活。池的保活周期
+// PoolKeepaliveInterval(默认 5min)必须显著小于本值, 否则空闲连接会在保活
+// 到达前被读超时判死——每个超过本值的用户空档都触发一次 TLS+LOGIN(外部
+// 收件邮箱风控的第一触发信号, 池设计明确要避免的)。10min 相对保活周期有
+// 2x 余量; 调整保活周期时必须同步保持该不变式
+// (见 TestImapSocketTimeoutExceedsKeepalive)。
+//
+// 注: go-imap v1.2.1 的 DialTLS(addr, tlsConfig) 不接受自定义 Client,
+// 因此 Timeout 在 Connect 拨号成功后设置(Login 前), 语义等价。
+var imapSocketTimeout = 10 * time.Minute
 
 // OverrideDialForTest 替换 IMAP 拨号函数(仅测试使用), 返回恢复函数。
 func OverrideDialForTest(fn func(addr string) (*client.Client, error)) func() {
@@ -113,6 +140,11 @@ func (c *Client) Connect() error {
 	cli, err := dialIMAP(addr)
 	if err != nil {
 		return fmt.Errorf("IMAP 连接失败: %w", err)
+	}
+	// SC-2: 设置单次读写操作的 socket deadline(见 imapSocketTimeout 注释)。
+	// 在 Login 前设置, 覆盖本次连接的全部命令(含登录与后续读写)。
+	if imapSocketTimeout > 0 {
+		cli.Timeout = imapSocketTimeout
 	}
 	if err := cli.Login(c.username, c.password); err != nil {
 		_ = cli.Logout()
