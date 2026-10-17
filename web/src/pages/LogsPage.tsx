@@ -3,6 +3,7 @@ import { ApiError, request } from '../api/client'
 import { formatDateTime } from '../utils/datetime'
 import type { AliasTaskLog, PurgeTask } from '../api/types'
 import Dialog from '../components/Dialog'
+import SelectMenu from '../components/SelectMenu'
 import { useToast } from '../components/ToastProvider'
 
 /** 服务端 RFC3339 → 项目统一的中文时间格式; 解析失败时回退原文。 */
@@ -259,19 +260,14 @@ export default function LogsPage() {
       )}
 
       <div className="logs-filter">
-        <label htmlFor="log-category-filter">日志类别</label>
-        <select
-          id="log-category-filter"
+        <span className="logs-filter-label" aria-hidden="true">日志类别</span>
+        <SelectMenu
+          ariaLabel={`日志类别：${categoryFilter ? categoryLabel(categoryFilter) : '全部'}`}
+          className="logs-category-select"
           value={categoryFilter}
-          onChange={(e) => setCategoryFilter(e.target.value)}
-        >
-          <option value="">全部</option>
-          {LOG_CATEGORIES.map((c) => (
-            <option key={c.value} value={c.value}>
-              {c.label}
-            </option>
-          ))}
-        </select>
+          options={[{ value: '', label: '全部' }, ...LOG_CATEGORIES]}
+          onChange={setCategoryFilter}
+        />
       </div>
 
       <div className="table-wrap">

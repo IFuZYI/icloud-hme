@@ -1608,11 +1608,17 @@ tbody tr:nth-child(n + 6) { animation-delay: 150ms; }
   font-size: var(--text-sm);
 }
 
-.logs-filter select {
-  min-height: 36px;
-  padding: 0 var(--space-2);
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--color-border);
-  background: var(--color-bg-raised);
-  color: var(--color-text);
+/* 筛选器标签: 与下拉触发按钮同一行, 视觉上与表单 label 一致但不可点击
+   (触发按钮自带 aria-label, 已包含类别名与当前值)。 */
+.logs-filter-label {
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+}
+
+/* 类别下拉: 固定宽度胶囊按钮, 不再占满整行。
+   原实现用原生 <select>: 全局 input/select 的 width:100% 在 flex 容器里把它
+   拉成整行(实测 1039/1096px), 且 appearance:none 后视觉上像一条空输入框,
+   与全站其它筛选器(SelectMenu 胶囊 + 箭头 + 毛玻璃弹层)不一致。 */
+.logs-filter .select-trigger {
+  min-width: 132px;
 }

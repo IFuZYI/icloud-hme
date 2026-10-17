@@ -174,12 +174,16 @@ describe('LogsPage 清理任务与类别', () => {
     renderPage()
     await screen.findByText('自动任务日志')
     const user = userEvent.setup()
-    // 找到筛选下拉并选择「邮件清理」。
+    // 筛选器是 SelectMenu(胶囊触发 + listbox 弹层), 不再是原生 select:
+    // 点触发按钮 → 点弹层里的「邮件清理」选项。
     const filter = screen.getByLabelText(/日志类别/)
-    await user.selectOptions(filter, 'purge')
+    await user.click(filter)
+    await user.click(await screen.findByRole('option', { name: '邮件清理' }))
     await waitFor(() => {
       expect(screen.queryByText('自动任务日志')).not.toBeInTheDocument()
     })
     expect(screen.getByText('清理任务开始')).toBeInTheDocument()
+    // 触发按钮回显当前选中类别(替代原生 select 的选中态)。
+    expect(screen.getByLabelText(/日志类别：邮件清理/)).toBeInTheDocument()
   })
 })
