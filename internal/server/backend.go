@@ -515,6 +515,12 @@ const imapPerMessageBudget = 3 * time.Second
 // imapEnvelopePerMessageBudget 是信封阶段(无正文, 单封 ~500B)每封的预算。
 const imapEnvelopePerMessageBudget = 300 * time.Millisecond
 
+// imapEnvelopeBudgetFloor 是信封阶段总预算的下限: 生产为 15s。
+// 用 var 而非 const(对齐 ListSnapshotTTL / inboxCacheTTL 等可覆盖配置):
+// 测试可缩短下限, 制造「预算 < 上游延迟」的确定性超时, 覆盖超时弃等路径
+// (外层已返回、后台读取仍完成并观测 UIDVALIDITY, 见 uidvalidity_timeout_test.go)。
+var imapEnvelopeBudgetFloor = 15 * time.Second
+
 // imapBudget 返回正文阶段的总时间预算: 每封 3s, 下限 30s, 上限 60s。
 func imapBudget(limit int) time.Duration {
 	if limit <= 0 {
@@ -530,15 +536,16 @@ func imapBudget(limit int) time.Duration {
 	return d
 }
 
-// imapEnvelopeBudget 返回信封阶段的总时间预算: 每封 0.3s, 下限 15s, 上限 45s。
+// imapEnvelopeBudget 返回信封阶段的总时间预算: 每封 0.3s, 下限 15s(生产,
+// 可覆盖: imapEnvelopeBudgetFloor), 上限 45s。
 // 信封小而快, 预算比正文阶段紧, 快速失败尽快降级。
 func imapEnvelopeBudget(limit int) time.Duration {
 	if limit <= 0 {
-		return 15 * time.Second
+		return imapEnvelopeBudgetFloor
 	}
 	d := time.Duration(limit) * imapEnvelopePerMessageBudget
-	if d < 15*time.Second {
-		d = 15 * time.Second
+	if d < imapEnvelopeBudgetFloor {
+		d = imapEnvelopeBudgetFloor
 	}
 	if d > 45*time.Second {
 		d = 45 * time.Second
@@ -583,7 +590,16 @@ func (b *managerBackend) ListInbox(q InboxQuery) (InboxResult, error) {
 	// 并发合并: 同键并发请求共享一次回源; 回源结果由 fn 内部写缓存,
 	// 等待者从缓存或返回值拿到同一结果。
 	result, err := b.flight.do(flightKey, func() (InboxResult, error) {
-		// 二次检查: 等待期间可能已有别的调用把结果写入缓存。
+		// 测试钩子: flight 条目已注册、二次缓存检查尚未执行(且未占用连接池
+		// 锁)。用于确定性构造「在飞普通读取 vs 并发强制刷新」(M2)与「等待
+		// 期间缓存被他人写入」(M8)两个窗口, 见 inbox_efficiency_test.go。
+		// 生产为 nil。
+		if !explicit && inboxInsideFlightForTest != nil {
+			inboxInsideFlightForTest()
+		}
+		// 二次检查: 预检未命中后、本次注册 flight 前, 可能有别的调用
+		// (含并发显式刷新)已完成并写入缓存——此时必须直接复用, 不得再
+		// 做一次多余的完整回源(对外部收件邮箱是白扫一次箱)。
 		if !explicit {
 			if result, ok := b.cachedInbox(cacheKey); ok {
 				return result, nil
@@ -651,6 +667,12 @@ func (b *managerBackend) throttledRefreshResult(key string) (InboxResult, bool) 
 // 用于确定性地构造「旧读取晚于刷新完成」的竞态场景。生产为 nil。
 var inboxBeforeCacheWriteForTest func()
 
+// inboxInsideFlightForTest 是测试钩子: 非刷新读取在 flight 条目已注册、
+// 二次缓存检查尚未执行时调用(未持有连接池锁)。用于确定性构造两个窗口:
+// 「在飞普通读取 vs 并发强制刷新」(M2)与「等待期间缓存被他人写入」(M8),
+// 见 inbox_efficiency_test.go。生产为 nil。
+var inboxInsideFlightForTest func()
+
 // cachedInbox 读收件箱缓存(未命中/类型不符返回 false)。
 func (b *managerBackend) cachedInbox(key string) (InboxResult, bool) {
 	cached, ok := b.respCache().get(key)
@@ -668,7 +690,6 @@ func (b *managerBackend) listInboxUncached(q InboxQuery) (InboxResult, error) {
 	// 信封阶段单封 ~500B, 预算按信封量级收紧(每封 0.3s, 仍保底 15s)。
 	var imapMessages []mail.Message
 	imapTotal := 0
-	validityChanged := false
 	poolErr := withIMAPTimeout(imapEnvelopeBudget(q.Limit), func() error {
 		return b.mgr.WithMailClient(q.AccountID, func(mc *mail.Client) error {
 			// 显式刷新(查询/刷新): 作废 IMAP 层列表快照, 强制全量 SEARCH
@@ -685,15 +706,20 @@ func (b *managerBackend) listInboxUncached(q InboxQuery) (InboxResult, error) {
 			}
 			// UIDVALIDITY 变化(邮箱被服务端重建): 旧 UID 不再指向同一邮件,
 			// 该账号的读缓存(preview 以 folder:uid 为键)必须整体失效。
+			//
+			// 失效必须在回调内(即后台 goroutine 内)执行, 不能把标记带回外层:
+			// withIMAPTimeout 超时只是「放弃等待」, 后台读取仍会跑完并消费
+			// TakeUidValidityChange 的一次性标记; 若失效留给外层, 超时路径上
+			// 外层早已读过标记(false)并跳过失效——标记被后台消费而失效永不
+			// 执行(preview 缓存继续命中旧 UID, 展示/操作错误邮件), 且该标记
+			// 跨 goroutine 共享本身就是数据竞态。invalidateAccountReads 线程
+			// 安全且幂等, 在后台执行无副作用。
 			if mc.TakeUidValidityChange() {
-				validityChanged = true
+				b.invalidateAccountReads(q.AccountID)
 			}
 			return e
 		})
 	})
-	if validityChanged {
-		b.invalidateAccountReads(q.AccountID)
-	}
 	if poolErr == nil {
 		return InboxResult{
 			AccountID: q.AccountID,
@@ -872,8 +898,11 @@ func (b *managerBackend) DeleteMessage(accountID, id string) error {
 		}
 		return &BackendError{Status: http.StatusBadGateway, Code: "UPSTREAM_FAILURE", Message: "删除邮件失败"}
 	}
-	// 邮件已删除: 该账号的收件箱缓存立即失效, 下一次读取回源(不残留已删邮件)。
-	b.respCache().invalidate("inbox:" + accountID + ":")
+	// 邮件已删除: 该账号的收件箱与摘要缓存立即失效, 下一次读取回源(不残留
+	// 已删邮件)。与其它影响读取内容的写操作(SetMailbox/凭据变更)同语义,
+	// 统一走 invalidateAccountReads(inbox + preview): 只清 inbox 会让
+	// preview 缓存(preview:<账号>:<邮件ID>)继续命中已删邮件的摘要。
+	b.invalidateAccountReads(accountID)
 	return nil
 }
 

@@ -442,3 +442,209 @@ func TestUidValidityChangeInvalidatesServerReadCaches(t *testing.T) {
 		t.Fatal("UIDVALIDITY 变化后摘要缓存应失效并回源")
 	}
 }
+
+// ====================================================================
+// M2 反证: 强制刷新的 flight 键必须与普通读取分离
+// ====================================================================
+//
+// 背景(独立审查存活变异): 把 ListInbox 的 flightKey 后缀分离去掉(force/
+// refresh 与普通读取共用同一键)后, 全部既有测试仍通过。后果: 普通读取在飞
+// 时点击「刷新」, 刷新请求被并入普通读取的 flight——它等待的是一次「可能
+// 命中 IMAP 快照的旧读取」, 拿到的不是自己回源的最新结果, 「强制刷新每次
+// 都真实回源」的语义被破坏。
+//
+// 契约: force 请求不等待在飞普通读取, 自己完成一次真实回源。
+// 观测点: (1) force 在普通读取仍被阻塞时返回; (2) force 期间 SELECT 增加。
+func TestInboxForceDoesNotShareFlightWithNormalRead(t *testing.T) {
+	b, srv, accountID := newCacheTestBackend(t)
+	srv.AddMessage(t, "INBOX", "a@example.com", "u@163.com", "第一封", time.Now())
+
+	q := InboxQuery{AccountID: accountID, Limit: 20}
+	// 预热: 建立连接与缓存。
+	if _, err := b.ListInbox(q); err != nil {
+		t.Fatal(err)
+	}
+	// 清缓存: 普通读取必须回源。
+	b.respCache().reset()
+	srv.AddMessage(t, "INBOX", "b@example.com", "u@163.com", "第二封", time.Now().Add(time.Second))
+
+	// 普通读取: 进入 fn 后阻塞(flight 条目已注册, 未占用连接池锁)。
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	inboxInsideFlightForTest = func() {
+		once.Do(func() {
+			close(entered)
+			<-release
+		})
+	}
+	t.Cleanup(func() { inboxInsideFlightForTest = nil })
+
+	var normalRes InboxResult
+	var normalErr error
+	normalDone := make(chan struct{})
+	go func() {
+		defer close(normalDone)
+		normalRes, normalErr = b.ListInbox(q)
+	}()
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("普通读取未进入 fn 钩子")
+	}
+
+	// 在普通读取仍阻塞时发起强制刷新: 必须不等待、自己回源。
+	base := srv.SelectCount()
+	qForce := q
+	qForce.Force = true
+	var forceRes InboxResult
+	var forceErr error
+	forceDone := make(chan struct{})
+	go func() {
+		defer close(forceDone)
+		forceRes, forceErr = b.ListInbox(qForce)
+	}()
+	select {
+	case <-forceDone:
+	case <-time.After(2 * time.Second):
+		// 变异路径: force 被并入普通读取的 flight, 等其完成才返回。
+		close(release)
+		select {
+		case <-forceDone:
+		case <-time.After(3 * time.Second):
+		}
+		t.Fatal("强制刷新被并入在飞普通读取的 flight(等待其完成)——flight 键未分离")
+	}
+	if forceErr != nil {
+		t.Fatalf("强制刷新失败: %v", forceErr)
+	}
+	if got := srv.SelectCount() - base; got <= 0 {
+		t.Fatal("强制刷新应自己回源(SELECT 增加), 实际未访问 IMAP——结果来自在飞普通读取")
+	}
+	if len(forceRes.Messages) != 2 {
+		t.Fatalf("强制刷新应看到 2 封(含第二封), got %d", len(forceRes.Messages))
+	}
+
+	// 放行普通读取: 它必须复用刷新写入的缓存(不回源), 不得把旧数据当新结果。
+	srv.AddMessage(t, "INBOX", "c@example.com", "u@163.com", "第三封", time.Now().Add(2*time.Second))
+	afterForce := srv.SelectCount()
+	close(release)
+	select {
+	case <-normalDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("放行后普通读取未返回")
+	}
+	if normalErr != nil {
+		t.Fatalf("普通读取失败: %v", normalErr)
+	}
+	if got := srv.SelectCount(); got != afterForce {
+		t.Fatalf("普通读取应命中刷新写入的缓存(不回源), SELECT %d → %d", afterForce, got)
+	}
+	if len(normalRes.Messages) != 2 {
+		t.Fatalf("普通读取应返回缓存(2 封: 含第二封、不含第三封), got %d", len(normalRes.Messages))
+	}
+}
+
+// ====================================================================
+// M8 反证: singleflight 内的二次缓存检查
+// ====================================================================
+//
+// 背景(独立审查存活变异): 删掉 ListInbox 的 fn 内「二次缓存检查」后, 全部
+// 既有测试仍通过。该检查覆盖的场景: 请求通过 TTL 预检(未命中)后、回源前,
+// 并发的显式刷新(或其它写入方)已完成并把结果写入缓存——此时必须直接复用
+// 缓存, 不得再做一次多余回源(对外部收件邮箱是白扫一次箱)。
+//
+// 契约: 等待期间他人写入的缓存结果必须被本次读取复用(返回缓存值), 且不
+// 触发额外回源。观测点: 返回值 = 手工写入的标记; SELECT 计数不变。
+func TestInboxWaiterRecheckServesConcurrentlyWrittenCache(t *testing.T) {
+	b, srv, accountID := newCacheTestBackend(t)
+	srv.AddMessage(t, "INBOX", "a@example.com", "u@163.com", "邮件", time.Now())
+
+	q := InboxQuery{AccountID: accountID, Limit: 20}
+	if _, err := b.ListInbox(q); err != nil { // 预热连接
+		t.Fatal(err)
+	}
+	b.respCache().reset()
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	inboxInsideFlightForTest = func() {
+		once.Do(func() {
+			close(entered)
+			<-release
+		})
+	}
+	t.Cleanup(func() { inboxInsideFlightForTest = nil })
+
+	// A: 领读者, 阻塞在 fn 内(二次缓存检查尚未执行)。
+	var resA InboxResult
+	var errA error
+	doneA := make(chan struct{})
+	go func() {
+		defer close(doneA)
+		resA, errA = b.ListInbox(q)
+	}()
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("请求 A 未进入 fn 钩子")
+	}
+
+	// B: 同键请求, 作为等待者加入 A 的 flight(不得提前返回)。
+	var resB InboxResult
+	var errB error
+	doneB := make(chan struct{})
+	go func() {
+		defer close(doneB)
+		resB, errB = b.ListInbox(q)
+	}()
+	select {
+	case <-doneB:
+		t.Fatal("请求 B 不应在 A 完成前返回(应作为等待者阻塞)")
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	// 「等待期间他人写缓存」: 手工写入标记值(模拟并发显式刷新已完成)。
+	cacheKey := inboxCacheKey(q)
+	marker := InboxResult{
+		AccountID: accountID,
+		Count:     1,
+		Total:     42,
+		Messages:  []mail.Message{{ID: "999", Subject: "来自并发的显式刷新"}},
+		Method:    "imap",
+	}
+	b.respCache().set(cacheKey, marker, inboxCacheTTL)
+
+	base := srv.SelectCount()
+	close(release)
+
+	// A 的二次检查必须命中缓存: 返回标记值, 不回源。
+	select {
+	case <-doneA:
+	case <-time.After(3 * time.Second):
+		t.Fatal("放行后请求 A 未返回")
+	}
+	if errA != nil {
+		t.Fatalf("请求 A 失败: %v", errA)
+	}
+	if len(resA.Messages) != 1 || resA.Total != 42 || resA.Messages[0].ID != "999" {
+		t.Fatalf("请求 A 应复用等待期间写入的缓存(Total=42/ID=999), got total=%d msgs=%+v", resA.Total, resA.Messages)
+	}
+
+	// B(等待者)共享 A 的结果。
+	select {
+	case <-doneB:
+	case <-time.After(3 * time.Second):
+		t.Fatal("请求 B 未返回")
+	}
+	if errB != nil {
+		t.Fatalf("请求 B 失败: %v", errB)
+	}
+	if resB.Total != 42 {
+		t.Fatalf("请求 B 应共享缓存结果(Total=42), got %d", resB.Total)
+	}
+	if got := srv.SelectCount(); got != base {
+		t.Fatalf("二次缓存检查命中后不应回源, SELECT %d → %d", base, got)
+	}
+}

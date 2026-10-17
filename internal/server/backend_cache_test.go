@@ -136,6 +136,53 @@ func TestDeleteMessageInvalidatesInboxCache(t *testing.T) {
 	}
 }
 
+// TestDeleteMessageInvalidatesPreviewCache (LE-3) 验证单封删除后摘要缓存同样
+// 失效: preview 以 (账号, 邮件ID) 为键; 只清 inbox 前缀会让已删邮件的摘要
+// 继续命中缓存(返回幽灵数据), 与 invalidateAccountReads 的语义不一致。
+//
+// 观测点: 删除后对同一 ID 的 FetchPreviews 必须回源(IMAP SELECT 增加),
+// 而不是命中旧缓存直接返回。
+func TestDeleteMessageInvalidatesPreviewCache(t *testing.T) {
+	b, srv, accountID := newCacheTestBackend(t)
+	srv.AddMessage(t, "INBOX", "a@example.com", "u@163.com", "验证码 123456", time.Now())
+
+	q := InboxQuery{AccountID: accountID, Limit: 20}
+	r1, err := b.ListInbox(q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r1.Messages) != 1 {
+		t.Fatalf("预热应读到 1 封, got %d", len(r1.Messages))
+	}
+	id := r1.Messages[0].ID
+
+	// 预热摘要缓存, 并确认第二次命中缓存(不回源)。
+	if _, err := b.FetchPreviews(accountID, []string{id}); err != nil {
+		t.Fatal(err)
+	}
+	afterPreview1 := srv.SelectCount()
+	if _, err := b.FetchPreviews(accountID, []string{id}); err != nil {
+		t.Fatal(err)
+	}
+	if got := srv.SelectCount(); got != afterPreview1 {
+		t.Fatalf("前提不成立: 摘要第二次应命中缓存, SELECT %d → %d", afterPreview1, got)
+	}
+
+	// 删除该邮件: preview 缓存必须一并失效。
+	if err := b.DeleteMessage(accountID, id); err != nil {
+		t.Fatalf("删除邮件失败: %v", err)
+	}
+	// 基线取在删除之后: 删除自身会 SELECT(selectFolder + STORE + EXPUNGE),
+	// 若取在删除前, 该增量会掩盖「摘要读取是否回源」的判定。
+	afterDelete := srv.SelectCount()
+	if _, err := b.FetchPreviews(accountID, []string{id}); err != nil {
+		t.Fatal(err)
+	}
+	if got := srv.SelectCount(); got == afterDelete {
+		t.Fatal("删除后 preview 缓存未失效: 摘要读取仍命中已删邮件的旧缓存(LE-3)")
+	}
+}
+
 // TestListAliasesCacheAndWriteInvalidation 验证别名列表 TTL 缓存与写操作失效:
 // 读取命中缓存不回源; 删除别名(写操作)后缓存失效, 下次读取回源。
 func TestListAliasesCacheAndWriteInvalidation(t *testing.T) {
