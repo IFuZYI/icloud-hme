@@ -13,6 +13,7 @@ package server
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -162,7 +163,24 @@ func (s *Server) requirePermission() gin.HandlerFunc {
 			}
 		}
 		// 账号使用范围: 校验请求声明的「每个」账号来源, 任一越界即拒。
-		for _, accountID := range s.resourceAccountFor(c) {
+		//
+		// 失败关闭(质量审查 Important): body 读取失败(如 chunked 超大 body
+		// 触发 MaxBytesReader)时直接拒绝——原实现读失败返回 nil 等于跳过
+		// body 范围校验(失败开放), 与包内其余校验刻意失败关闭的约定不一致。
+		targets, err := s.resourceAccountFor(c)
+		if err != nil {
+			var maxErr *http.MaxBytesError
+			if errors.As(err, &maxErr) {
+				failCode(c, http.StatusRequestEntityTooLarge, "VALIDATION_ERROR", "请求体过大")
+				return
+			}
+			slog.Debug("秘钥请求 body 读取失败, 拒绝(失败关闭)",
+				"path", c.Request.URL.Path, "method", c.Request.Method,
+				"key_id", key.ID, "error", err)
+			failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "请求体读取失败")
+			return
+		}
+		for _, accountID := range targets {
 			if key.AllowsAccount(accountID) {
 				continue
 			}
@@ -202,26 +220,26 @@ func (s *Server) requirePermission() gin.HandlerFunc {
 //
 // 返回切片为空: 该请求不针对特定账号(如 /reload), 或资源不存在; 不做范围
 // 校验。
-func (s *Server) resourceAccountFor(c *gin.Context) []string {
+func (s *Server) resourceAccountFor(c *gin.Context) ([]string, error) {
 	// 任务路由: 无条件以任务真实归属为准(不接受请求声明的 account_id)。
 	if strings.HasPrefix(c.FullPath(), "/api/alias-tasks/") {
 		if taskID := strings.TrimSpace(c.Param("id")); taskID != "" {
 			if tk, ok := s.task.get(taskID); ok {
-				return []string{tk.AccountID}
+				return []string{tk.AccountID}, nil
 			}
 		}
 		// 任务不存在: 返回空交给 handler 404, 不落回 query/body 的
 		// 自述账号(否则又给了越权面)。
-		return nil
+		return nil, nil
 	}
 	// 清理任务路由: 同上, 以清理任务真实归属为准。
 	if strings.HasPrefix(c.FullPath(), "/api/purge-tasks/") {
 		if id := strings.TrimSpace(c.Param("id")); id != "" {
 			if tk, ok := s.purge.get(id); ok {
-				return []string{tk.AccountID}
+				return []string{tk.AccountID}, nil
 			}
 		}
-		return nil
+		return nil, nil
 	}
 	return accountScopeTargets(c)
 }
@@ -235,7 +253,10 @@ func (s *Server) resourceAccountFor(c *gin.Context) []string {
 // 去重用 map(而非线性扫描): body 可达中间件上限(1 MiB), 线性去重会退化为
 // O(n²)——3.6 万个不同 account_id 实测单请求 3.27s 纯 CPU(鉴权中间件内同步
 // 执行, 低成本即可用满 CPU)。map 去重保持 O(n)。
-func accountScopeTargets(c *gin.Context) []string {
+//
+// 第二个返回值为 body 读取错误(失败关闭: 调用方必须拒绝请求, 不得当作
+// 「没有声明账号」放行)。
+func accountScopeTargets(c *gin.Context) ([]string, error) {
 	var out []string
 	seen := make(map[string]struct{}, 4)
 	add := func(v string) {
@@ -255,10 +276,14 @@ func accountScopeTargets(c *gin.Context) []string {
 	}
 	// body 中的 account_id: 收集全部 JSON 值声明的账号(尾随值同样纳入),
 	// 任一越界即拒。
-	for _, id := range accountIDsFromBody(c) {
+	bodyIDs, err := accountIDsFromBodyChecked(c)
+	if err != nil {
+		return nil, err
+	}
+	for _, id := range bodyIDs {
 		add(id)
 	}
-	return out
+	return out, nil
 }
 
 // keyScopeFromContext 返回当前秘钥的账号范围(白名单)。
@@ -349,12 +374,22 @@ func accountIDFromBody(c *gin.Context) string {
 //   - 尾随值声明的越界账号同样被收集——校验覆盖「所有声明来源」的既有契约
 //     (任一越界即拒)在尾随场景下同样成立。
 func accountIDsFromBody(c *gin.Context) []string {
+	ids, _ := accountIDsFromBodyChecked(c)
+	return ids
+}
+
+// accountIDsFromBodyChecked 同 accountIDsFromBody, 但显式暴露读失败。
+//
+// 失败关闭: 读取 body 失败(如超过 MaxBytesReader 上限、连接中断)时
+// 返回 err, 调用方必须拒绝请求——否则「读失败 → 跳过 body 范围校验」
+// 形成失败开放面(与包内其余校验刻意失败关闭的约定不一致)。
+func accountIDsFromBodyChecked(c *gin.Context) ([]string, error) {
 	if c.Request.Body == nil {
-		return nil
+		return nil, nil
 	}
 	raw, err := io.ReadAll(c.Request.Body)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	// 无论解析结果如何都还原 body, 避免影响 handler 的 ShouldBindJSON。
 	c.Request.Body = io.NopCloser(bytes.NewReader(raw))
@@ -372,7 +407,7 @@ func accountIDsFromBody(c *gin.Context) []string {
 			out = append(out, id)
 		}
 	}
-	return out
+	return out, nil
 }
 
 // accountRouteHasPathID 判断路由模板的 :id 是否是账号 ID。

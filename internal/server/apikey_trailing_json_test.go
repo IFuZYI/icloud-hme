@@ -1,7 +1,10 @@
 package server
 
 import (
+	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -174,12 +177,74 @@ func TestAccountScopeTargetsDedupIsLinear(t *testing.T) {
 	c.Request = httptest.NewRequest("POST", "/api/alias-tasks", strings.NewReader(sb.String()))
 
 	start := time.Now()
-	got := accountScopeTargets(c)
+	got, err := accountScopeTargets(c)
 	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("accountScopeTargets 读取 body 失败: %v", err)
+	}
 	if len(got) != n {
 		t.Fatalf("应收集 %d 个不同账号, got %d", n, len(got))
 	}
 	if elapsed > 2*time.Second {
 		t.Fatalf("去重耗时 %v 超过 2s——疑似退化为 O(n²)(线性扫描去重)", elapsed)
+	}
+}
+
+// ====================================================================
+// 失败关闭: body 读取失败不得跳过账号范围校验
+// ====================================================================
+//
+// 背景(独立质量审查 Important): 修复初版在 io.ReadAll 失败时返回 nil,
+// 等于「没有声明账号」跳过 body 范围校验(失败开放), 与包内其余校验刻意
+// 失败关闭的约定不一致。修复后读取失败必须向上传播, 中间件直接拒绝。
+
+// errReader 是恒失败的请求体 reader(模拟读错误/连接中断)。
+type errReader struct{}
+
+func (errReader) Read([]byte) (int, error) { return 0, errors.New("simulated read failure") }
+
+// 单元: 读取失败必须传播错误, 不得静默返回空集。
+func TestAccountIDsFromBodyReadFailurePropagates(t *testing.T) {
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest("POST", "/api/alias-tasks", nil)
+	c.Request.Body = io.NopCloser(errReader{})
+
+	if _, err := accountIDsFromBodyChecked(c); err == nil {
+		t.Fatal("body 读取失败必须返回错误(失败关闭), 实际 nil")
+	}
+
+	c2, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c2.Request = httptest.NewRequest("POST", "/api/alias-tasks", nil)
+	c2.Request.Body = io.NopCloser(errReader{})
+	if _, err := accountScopeTargets(c2); err == nil {
+		t.Fatal("accountScopeTargets 在 body 读取失败时必须返回错误(失败关闭), 实际 nil")
+	}
+}
+
+// 端到端: chunked 超大 body(ContentLength=-1, 绕开预检)触发 MaxBytesReader,
+// 鉴权中间件必须 413 拒绝。
+//
+// 区分度: 失败开放版本放行到 handler, 由 ShouldBindJSON 报 400; 失败关闭
+// 版本在中间件内以 413 拒绝(handler 无法产生 413, 状态码可区分两版行为)。
+func TestScopedKeyChunkedOversizeBodyFailsClosed(t *testing.T) {
+	f := &fakeBackend{}
+	s, ts := newTestServer(t, f)
+	key := createTestKeyScoped(t, s, []string{"acc_1"}, "tasks.write")
+
+	big := `{"account_id":"acc_1","pad":"` + strings.Repeat("x", maxBodyBytes+1024) + `"}`
+	req, err := http.NewRequest("POST", ts.URL+"/api/alias-tasks", strings.NewReader(big))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.ContentLength = -1 // 强制 chunked: 绕过 ContentLength 预检, 只能靠 MaxBytesReader 拦截
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", key.Key)
+
+	code, raw, _ := do(t, req)
+	if code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("chunked 超大 body 应在中间件被 413 拒绝(失败关闭), got %d %s", code, raw)
+	}
+	if !strings.Contains(raw, "请求体过大") {
+		t.Fatalf("错误文案应说明请求体过大: %s", raw)
 	}
 }
