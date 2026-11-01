@@ -94,7 +94,7 @@ func TestPoolKeepaliveReusesConnection(t *testing.T) {
 
 	call := func() {
 		t.Helper()
-		err := pool.DoWithServer("ext:"+srv.Host+":993:u@163.com", "u@163.com", "auth-code", srv.Host, srv.Port, func(c *Client) error {
+		err := pool.DoWithServer("ext:"+srv.Host+":993:u@163.com", "u@163.com", "auth-code", srv.Host, srv.Port, "", func(c *Client) error {
 			_, e := c.InboxCount()
 			return e
 		})
@@ -135,7 +135,7 @@ func TestPoolWithoutKeepaliveRebuildsAfterIdle(t *testing.T) {
 
 	call := func() {
 		t.Helper()
-		err := pool.DoWithServer("ext:"+srv.Host+":993:u@163.com", "u@163.com", "auth-code", srv.Host, srv.Port, func(c *Client) error {
+		err := pool.DoWithServer("ext:"+srv.Host+":993:u@163.com", "u@163.com", "auth-code", srv.Host, srv.Port, "", func(c *Client) error {
 			_, e := c.InboxCount()
 			return e
 		})
@@ -167,7 +167,7 @@ func TestPoolKeepaliveDisabledStopsNoop(t *testing.T) {
 	pool := NewPool()
 	defer pool.Close()
 
-	if err := pool.DoWithServer("ext:"+srv.Host+":993:u@163.com", "u@163.com", "auth-code", srv.Host, srv.Port, func(c *Client) error {
+	if err := pool.DoWithServer("ext:"+srv.Host+":993:u@163.com", "u@163.com", "auth-code", srv.Host, srv.Port, "", func(c *Client) error {
 		_, e := c.InboxCount()
 		return e
 	}); err != nil {

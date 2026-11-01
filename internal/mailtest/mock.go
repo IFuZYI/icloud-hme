@@ -16,6 +16,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -71,6 +72,7 @@ type Server struct {
 	// NOOP 数。
 	// 用于断言「连接复用」(不应反复 TLS+LOGIN) 与「读信缓存」(不应重复扫箱)。
 	connCount     atomic.Int64
+	activeConns   atomic.Int64
 	selCount      atomic.Int64
 	searchCount   atomic.Int64
 	fetchCount    atomic.Int64
@@ -88,6 +90,9 @@ func (s *Server) SetUidValidity(v uint32) { s.validity.Store(v) }
 
 // ConnCount 返回服务器接受过的连接总数。
 func (s *Server) ConnCount() int64 { return s.connCount.Load() }
+
+// ActiveConns 返回当前仍打开的连接数(用于断言旧池连接确实被掐断)。
+func (s *Server) ActiveConns() int64 { return s.activeConns.Load() }
 
 // SelectCount 返回服务器收到的 SELECT/EXAMINE 命令总数(含被拒绝的)。
 func (s *Server) SelectCount() int64 { return s.selCount.Load() }
@@ -276,13 +281,22 @@ func (e *ext) Command(name string) server.HandlerFactory {
 
 func (e *ext) NewConn(c server.Conn) server.Conn {
 	e.srv.connCount.Add(1)
-	return &conn{Conn: c}
+	e.srv.activeConns.Add(1)
+	return &conn{Conn: c, srv: e.srv}
 }
 
 // conn 是连接包装: 记录本连接是否已完成 ID 声明(网易门禁按连接生效)。
 type conn struct {
 	server.Conn
-	idSent bool
+	srv       *Server
+	idSent    bool
+	closeOnce sync.Once
+}
+
+// Close 在底层连接关闭时递减活跃连接数, 供测试断言旧池连接确实被掐断。
+func (c *conn) Close() error {
+	c.closeOnce.Do(func() { c.srv.activeConns.Add(-1) })
+	return c.Conn.Close()
 }
 
 // selectHandler 统计收到的 SELECT/EXAMINE; RequireID 时在未收到 ID 声明前

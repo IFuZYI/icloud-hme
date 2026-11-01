@@ -6,6 +6,7 @@ package mail
 
 import (
 	"bytes"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -64,7 +65,10 @@ type Client struct {
 	password string
 	server   string
 	port     int
-	cli      *client.Client
+	// proxy 是账号代理(HTTP/HTTPS/SOCKS5); 空串表示直连。
+	// 同一账号的 IMAP 出口必须与 HME API 一致, 否则会暴露真实出口 IP, 触发风控。
+	proxy string
+	cli   *client.Client
 
 	// snapMu 保护以下快照/UIDVALIDITY 状态(连接池会跨请求复用本实例)。
 	snapMu sync.Mutex
@@ -89,16 +93,38 @@ func NewClientWithServer(username, password, server string, port int) *Client {
 	return &Client{username: username, password: password, server: server, port: port}
 }
 
+// WithProxy 设置账号代理(HTTP/HTTPS/SOCKS5), 空串表示直连。
+// 返回自身以便链式构造; 必须在 Connect 前调用。
+func (c *Client) WithProxy(proxy string) *Client {
+	c.proxy = strings.TrimSpace(proxy)
+	return c
+}
+
 // dialIMAP 拨号 TLS IMAP 服务器。抽成变量供测试注入进程内服务器
 // (自签证书无法通过默认校验), 生产路径行为不变。
+//
+// proxy 非空时先经代理建立 TCP 隧道(HTTP CONNECT 或 SOCKS5), 再在隧道上
+// 叠加到 IMAP 服务器的 TLS——同一账号的全部出口(HME API / IMAP)必须一致,
+// 否则 IMAP 会暴露服务器真实 IP, 成为账号风控的触发信号。
 //
 // SC-2: 与 DialTLS(addr, nil) 等价, 但拨号/TLS 握手/服务器问候阶段同样受
 // imapSocketTimeout 约束。go-imap v1.2.1 的 DialTLS(addr, tlsConfig) 不接受
 // 自定义 Client, 且问候响应在 DialTLS 返回前读取(无法事后设置 deadline);
 // 带 Timeout 的 dialer 让 go-imap 在问候前设置连接 deadline, 覆盖该阶段。
-var dialIMAP = func(addr string) (*client.Client, error) {
-	return client.DialWithDialerTLS(&net.Dialer{Timeout: imapSocketTimeout}, addr, nil)
+var dialIMAP = func(addr, proxy string) (*client.Client, error) {
+	if proxy != "" {
+		d, err := newProxyDialer(proxy, imapSocketTimeout)
+		if err != nil {
+			return nil, err
+		}
+		return client.DialWithDialerTLS(d, addr, imapTLSConfig)
+	}
+	return client.DialWithDialerTLS(&net.Dialer{Timeout: imapSocketTimeout}, addr, imapTLSConfig)
 }
+
+// imapTLSConfig 仅供测试注入自签证书信任(进程内假服务器); 生产为 nil,
+// 使用系统根证书并校验主机名。
+var imapTLSConfig *tls.Config
 
 // imapSocketTimeout 是单次 IMAP 读写操作的 socket deadline(0=禁用)。
 //
@@ -122,7 +148,16 @@ var dialIMAP = func(addr string) (*client.Client, error) {
 var imapSocketTimeout = 10 * time.Minute
 
 // OverrideDialForTest 替换 IMAP 拨号函数(仅测试使用), 返回恢复函数。
+// 代理参数被忽略——需要断言代理透传的测试用 OverrideDialForTestWithProxy。
 func OverrideDialForTest(fn func(addr string) (*client.Client, error)) func() {
+	prev := dialIMAP
+	dialIMAP = func(addr, _ string) (*client.Client, error) { return fn(addr) }
+	return func() { dialIMAP = prev }
+}
+
+// OverrideDialForTestWithProxy 替换 IMAP 拨号函数并保留 proxy 参数,
+// 供测试断言账号代理确实传到了拨号层(仅测试使用)。
+func OverrideDialForTestWithProxy(fn func(addr, proxy string) (*client.Client, error)) func() {
 	prev := dialIMAP
 	dialIMAP = fn
 	return func() { dialIMAP = prev }
@@ -137,7 +172,7 @@ func (c *Client) Connect() error {
 		c.forceClose()
 	}
 	addr := fmt.Sprintf("%s:%d", c.server, c.port)
-	cli, err := dialIMAP(addr)
+	cli, err := dialIMAP(addr, c.proxy)
 	if err != nil {
 		return fmt.Errorf("IMAP 连接失败: %w", err)
 	}

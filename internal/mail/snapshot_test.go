@@ -416,7 +416,7 @@ func TestDialIMAPBoundsTLSHandshakePhase(t *testing.T) {
 	}()
 
 	start := time.Now()
-	_, err = dialIMAP(ln.Addr().String())
+	_, err = dialIMAP(ln.Addr().String(), "")
 	elapsed := time.Since(start)
 	if err == nil {
 		t.Fatal("对不响应 TLS 握手的服务器, 拨号应报错")

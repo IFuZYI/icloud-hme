@@ -30,11 +30,22 @@ type WebClient struct {
 	host          string // "icloud.com" 或 "icloud.com.cn"
 	// setupBaseURL 覆盖 validate 端点前缀; 空时用生产地址(测试注入用)。
 	setupBaseURL string
-	httpc        tls_client.HttpClient
+	// proxy 是构造时使用的账号代理(空串=直连), 仅用于诊断/测试断言。
+	proxy string
+	httpc tls_client.HttpClient
 }
 
-// NewWebClient 创建一个 Web 邮件客户端。
-func NewWebClient(cookies map[string]string, dsid, host string) *WebClient {
+// NewWebClient 创建一个 Web 邮件客户端(直连)。
+func NewWebClient(cookies map[string]string, dsid, host string) (*WebClient, error) {
+	return NewWebClientWithProxy(cookies, dsid, host, "")
+}
+
+// NewWebClientWithProxy 创建一个经账号代理的 Web 邮件客户端。
+//
+// IMAP 失败后的 Web API 回退与 IMAP 同属「同一账号」的邮件读取出口,
+// 必须共用账号代理, 否则回退路径会暴露服务器真实 IP。
+// 代理地址非法时返回错误(不能让 httpc 为 nil 后在请求期 panic)。
+func NewWebClientWithProxy(cookies map[string]string, dsid, host, proxy string) (*WebClient, error) {
 	jar := tls_client.NewCookieJar()
 	options := []tls_client.HttpClientOption{
 		tls_client.WithTimeoutSeconds(30),
@@ -42,8 +53,21 @@ func NewWebClient(cookies map[string]string, dsid, host string) *WebClient {
 		tls_client.WithCookieJar(jar),
 		tls_client.WithNotFollowRedirects(),
 	}
+	if proxy != "" {
+		normalized, err := normalizeProxyURL(proxy)
+		if err != nil {
+			return nil, err
+		}
+		proxy = normalized
+		options = append(options, tls_client.WithProxyUrl(proxy))
+	}
 
-	httpc, _ := tls_client.NewHttpClient(tls_client.NewNoopLogger(), options...)
+	httpc, err := tls_client.NewHttpClient(tls_client.NewNoopLogger(), options...)
+	if err != nil {
+		// 不包装底层错误: tls-client 的解析错误会回显含 user:pass 的原始代理 URL,
+		// 而错误可能进入日志/API 响应, 必须保持脱敏。
+		return nil, fmt.Errorf("创建 Web 邮件客户端失败: 代理或客户端配置无效")
+	}
 
 	if host == "" {
 		host = "icloud.com"
@@ -54,6 +78,7 @@ func NewWebClient(cookies map[string]string, dsid, host string) *WebClient {
 		dsid:     strings.Trim(dsid, `"`),
 		clientID: uuid.New().String(),
 		host:     host,
+		proxy:    proxy,
 		httpc:    httpc,
 	}
 
@@ -83,8 +108,11 @@ func NewWebClient(cookies map[string]string, dsid, host string) *WebClient {
 		}
 	}
 
-	return c
+	return c, nil
 }
+
+// Proxy 返回构造时使用的账号代理(空串=直连), 供诊断/测试断言。
+func (c *WebClient) Proxy() string { return c.proxy }
 
 // origin 返回当前账号对应的 Web Origin。
 func (c *WebClient) origin() string {

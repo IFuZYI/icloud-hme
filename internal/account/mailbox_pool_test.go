@@ -83,8 +83,11 @@ func TestExternalMailboxPoolKeyedByMailbox(t *testing.T) {
 
 	srv.AddMessage(t, "INBOX", "a@example.com", "same@163.com", "邮件", time.Now())
 	before := srv.ConnCount()
+	m.mu.Lock()
+	pool := m.poolForLocked("test-account")
+	m.mu.Unlock()
 	for i := 0; i < 2; i++ {
-		err := m.imapPool.DoWithServer("same@163.com", "same@163.com", "auth-code", srv.Host, srv.Port, func(mc *mail.Client) error {
+		err := pool.DoWithServer("same@163.com", "same@163.com", "auth-code", srv.Host, srv.Port, "", func(mc *mail.Client) error {
 			_, _, e := mc.ListInboxPageRange(10, 0, mail.DateRange{})
 			return e
 		})

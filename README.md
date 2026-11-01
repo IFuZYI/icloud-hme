@@ -191,7 +191,7 @@ cp .env.example .env      # 然后修改 ICLOUD_HME_ADMIN_PASSWORD
 }
 ```
 
-> **提示:** 也可以通过管理界面的「账号」页面动态添加账号，无需手动编辑 JSON 文件。`cookies`、`app_password`、`proxy` 都是可选的。
+> **提示:** 也可以通过管理界面的「账号」页面动态添加账号，无需手动编辑 JSON 文件。`cookies`、`app_password`、`proxy` 都是可选的。账号代理作用于该账号的**全部上游请求**（HME API、IMAP 收信、Web 邮件回退），保证同一账号只有一个出口 IP——IMAP 直连会暴露服务器真实 IP，是账号风控的触发信号。
 
 ### 4. 启动服务
 

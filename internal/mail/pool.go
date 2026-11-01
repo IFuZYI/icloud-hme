@@ -2,10 +2,15 @@
 package mail
 
 import (
+	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 )
+
+// ErrPoolClosed 表示连接池已关闭, 不再接受新的借出。
+var ErrPoolClosed = errors.New("IMAP 连接池已关闭")
 
 // PoolIdleClose 是池内连接的空闲重建阈值: 空闲超过该时长的连接在下次借用前
 // 直接重建(不再 Ping 一个大概率已被服务端静默断开的连接)。配合保活使用——
@@ -27,12 +32,20 @@ type Pool struct {
 	idleClose time.Duration
 	// keepalive 是空闲连接的 NOOP 保活周期; 0 表示关闭保活。
 	keepalive time.Duration
+	// closed 表示池已关闭; Close 之后不允许再建连。
+	closed bool
 }
 
 type pooledConn struct {
 	mu       sync.Mutex
 	key      string
 	password string
+	// closed 表示该连接已被池关闭; 关闭后即使有 Do 已拿到指针也不得再建连,
+	// 否则会留下一个不在池中、却持续保活旧出口的孤儿连接。
+	closed bool
+	// retired 在池项被摘除时原子置位, 供已排队等 pc.mu 的 Do 在拿到锁后
+	// 立即放弃, 不再通过旧代理发起 TLS+LOGIN。
+	retired atomic.Bool
 	// newClient 惰性建连时使用的工厂(区分 iCloud 默认服务器与外部收件邮箱)。
 	newClient func() *Client
 	client    *Client
@@ -55,28 +68,75 @@ func NewPool() *Pool {
 }
 
 // Do 借出已连接的 Client 执行 fn; 用完不 Logout, 连接留在池中。
-// key 为 iCloud 邮箱(默认服务器 imap.mail.me.com)。
-func (p *Pool) Do(appleID, appPassword string, fn func(*Client) error) error {
+// key 为 iCloud 邮箱(默认服务器 imap.mail.me.com); proxy 为空表示直连。
+// 池键包含代理: 换代理后必须新建连接, 否则流量仍从旧出口出去。
+func (p *Pool) Do(appleID, appPassword, proxy string, fn func(*Client) error) error {
 	if appleID == "" || appPassword == "" {
 		return fmt.Errorf("IMAP 凭据为空")
 	}
-	return p.do(appleID, appPassword, func() *Client { return NewClient(appleID, appPassword) }, fn)
+	return p.do(appleID, appPassword, proxy, func() *Client {
+		return NewClient(appleID, appPassword).WithProxy(proxy)
+	}, fn)
 }
 
 // DoWithServer 与 Do 相同, 但连接指向自定义 IMAP 服务器(外部收件邮箱, 如 163)。
 // key 应包含服务器/端口/邮箱, 保证不同邮箱不共享连接(避免串用凭据)。
-func (p *Pool) DoWithServer(key, username, password, server string, port int, fn func(*Client) error) error {
+func (p *Pool) DoWithServer(key, username, password, server string, port int, proxy string, fn func(*Client) error) error {
 	if key == "" || username == "" || password == "" {
 		return fmt.Errorf("IMAP 凭据为空")
 	}
-	return p.do(key, password, func() *Client { return NewClientWithServer(username, password, server, port) }, fn)
+	return p.do(key, password, proxy, func() *Client {
+		return NewClientWithServer(username, password, server, port).WithProxy(proxy)
+	}, fn)
 }
 
-func (p *Pool) do(key, password string, newClient func() *Client, fn func(*Client) error) error {
-	pc := p.getOrCreate(key, password, newClient)
-	pc.mu.Lock()
-	defer pc.mu.Unlock()
+func (p *Pool) do(key, password, proxy string, newClient func() *Client, fn func(*Client) error) error {
+	// 代理是连接身份的一部分: 同一邮箱换代理不得复用旧连接。
+	if proxy != "" {
+		key += "\x00" + proxy
+	}
+	for {
+		if p.isClosed() {
+			return ErrPoolClosed
+		}
+		pc, err := p.getOrCreate(key, password, newClient)
+		if err != nil {
+			return err
+		}
+		retry := false
+		// 用闭包 + defer 解锁: 调用方 fn 可能 panic(MIME 解析等),
+		// 不能把 pc.mu 永久留在锁定状态, 否则该账号后续读信全部卡死。
+		func() {
+			pc.mu.Lock()
+			defer pc.mu.Unlock()
+			defer func() {
+				if r := recover(); r != nil {
+					// fn panic 时协议状态未知, 不能把连接放回池里复用。
+					pc.stopKeepalive()
+					if pc.client != nil {
+						pc.client.forceClose()
+						pc.client = nil
+					}
+					panic(r)
+				}
+			}()
+			if pc.closed || pc.retired.Load() {
+				// Close 在我们拿到指针后关闭了该连接; 换新池项重试,
+				// 绝不能在这个已脱离池的 pc 上重新建连。
+				retry = true
+				return
+			}
+			err = p.useConn(pc, fn)
+		}()
+		if retry {
+			continue
+		}
+		return err
+	}
+}
 
+// useConn 在已持有 pc.mu 的前提下执行一次借出; 调用方负责解锁。
+func (p *Pool) useConn(pc *pooledConn, fn func(*Client) error) error {
 	if err := pc.ensure(p.idleClose, p.keepalive); err != nil {
 		return err
 	}
@@ -91,27 +151,63 @@ func (p *Pool) do(key, password string, newClient func() *Client, fn func(*Clien
 	return err
 }
 
-// Close 关闭池内全部连接。
-func (p *Pool) Close() {
+// Len 返回池中连接数(诊断/测试用)。
+func (p *Pool) Len() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	for k, pc := range p.items {
-		pc.mu.Lock()
-		pc.stopKeepalive()
-		if pc.client != nil {
-			pc.client.Disconnect()
-			pc.client = nil
-		}
-		pc.mu.Unlock()
-		delete(p.items, k)
+	return len(p.items)
+}
+
+func (p *Pool) isClosed() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.closed
+}
+
+// Close 关闭池内全部连接。先摘除池项并原子标记 retired, 再异步关闭,
+// 避免持池锁做网络收尾; 已排队的 Do 会在拿到 pc.mu 后立即放弃。
+func (p *Pool) Close() {
+	p.mu.Lock()
+	p.closed = true
+	items := p.items
+	p.items = make(map[string]*pooledConn)
+	for _, pc := range items {
+		pc.retired.Store(true)
+	}
+	p.mu.Unlock()
+	for _, pc := range items {
+		go pc.close()
 	}
 }
 
-func (p *Pool) getOrCreate(key, password string, newClient func() *Client) *pooledConn {
+// close 标记连接已关闭并立即断开, 防止已借出指针的 Do 重新建连。
+func (pc *pooledConn) close() {
+	pc.retired.Store(true)
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+	pc.closed = true
+	pc.stopKeepalive()
+	if pc.client != nil {
+		pc.client.forceClose()
+		pc.client = nil
+	}
+}
+
+func (p *Pool) getOrCreate(key, password string, newClient func() *Client) (*pooledConn, error) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
+	if p.closed {
+		p.mu.Unlock()
+		return nil, ErrPoolClosed
+	}
 	if pc, ok := p.items[key]; ok {
+		p.mu.Unlock()
+		// 不在 p.mu 下等待 pc.mu: 在途 IMAP 读可能持有它长达
+		// imapSocketTimeout, 否则 Close/Len 都会被拖住。
 		pc.mu.Lock()
+		if pc.closed {
+			pc.mu.Unlock()
+			return pc, nil
+		}
 		// 密码变更则丢弃旧连接(凭据不再匹配); 工厂始终刷新为最新配置。
 		if pc.password != password {
 			pc.stopKeepalive()
@@ -123,14 +219,18 @@ func (p *Pool) getOrCreate(key, password string, newClient func() *Client) *pool
 		}
 		pc.newClient = newClient
 		pc.mu.Unlock()
-		return pc
+		return pc, nil
 	}
 	pc := &pooledConn{key: key, password: password, newClient: newClient}
 	p.items[key] = pc
-	return pc
+	p.mu.Unlock()
+	return pc, nil
 }
 
 func (pc *pooledConn) ensure(idleClose, keepalive time.Duration) error {
+	if pc.closed || pc.retired.Load() {
+		return ErrPoolClosed
+	}
 	if pc.client != nil {
 		// 空闲太久主动重建, 避免服务端静默断连。
 		// 「空闲」取「最近一次使用」与「最近一次保活成功」中较晚者——
@@ -148,6 +248,12 @@ func (pc *pooledConn) ensure(idleClose, keepalive time.Duration) error {
 	}
 	if pc.client != nil {
 		if err := pc.client.Ping(); err == nil {
+			if pc.retired.Load() {
+				pc.stopKeepalive()
+				pc.client.forceClose()
+				pc.client = nil
+				return ErrPoolClosed
+			}
 			pc.startKeepalive(keepalive)
 			return nil
 		}
@@ -156,8 +262,16 @@ func (pc *pooledConn) ensure(idleClose, keepalive time.Duration) error {
 		pc.client = nil
 	}
 	c := pc.newClient()
+	if pc.retired.Load() {
+		return ErrPoolClosed
+	}
 	if err := c.Connect(); err != nil {
 		return err
+	}
+	if pc.retired.Load() {
+		// 建连期间代理被切换: 立即断开, 不让本次连接承载任何邮件操作。
+		c.forceClose()
+		return ErrPoolClosed
 	}
 	pc.client = c
 	pc.lastUsed = time.Now()

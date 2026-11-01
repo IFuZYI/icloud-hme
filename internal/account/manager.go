@@ -66,7 +66,11 @@ type Manager struct {
 	accounts map[string]*Account
 	dataDir  string
 	dataFile string
-	imapPool *mail.Pool // IMAP 长连接池
+	// imapPools 按账号隔离 IMAP 长连接池: 改代理/改邮箱/删除账号只影响
+	// 该账号, 且池键不会因两个账号共用邮箱而互相污染。
+	imapPools map[string]*mail.Pool
+	// closed 表示 Manager 已关闭; 关闭后不再创建新池。
+	closed bool
 	// tzResolver 解析代理出口 IP 的地理时区;缺省为 geo.NewResolver()。
 	// 惰性解析并按账号缓存(见 TimezoneFor)。测试可在同包内直接替换。
 	tzResolver geo.Resolver
@@ -100,10 +104,10 @@ func NewManager(dataDir string) (*Manager, error) {
 		return nil, err
 	}
 	m := &Manager{
-		accounts: make(map[string]*Account),
-		dataDir:  dataDir,
-		dataFile: filepath.Join(dataDir, "accounts.json"),
-		imapPool: mail.NewPool(),
+		accounts:  make(map[string]*Account),
+		dataDir:   dataDir,
+		dataFile:  filepath.Join(dataDir, "accounts.json"),
+		imapPools: make(map[string]*mail.Pool),
 	}
 	if err := m.load(); err != nil {
 		return nil, err
@@ -113,8 +117,13 @@ func NewManager(dataDir string) (*Manager, error) {
 
 // Close 释放 IMAP 连接池等资源。
 func (m *Manager) Close() {
-	if m.imapPool != nil {
-		m.imapPool.Close()
+	m.mu.Lock()
+	m.closed = true
+	pools := m.imapPools
+	m.imapPools = make(map[string]*mail.Pool)
+	m.mu.Unlock()
+	for _, p := range pools {
+		p.Close()
 	}
 }
 
@@ -126,6 +135,9 @@ func (m *Manager) Reload() error {
 }
 
 func (m *Manager) load() error {
+	if m.closed {
+		return fmt.Errorf("账号管理器已关闭, 不能重载配置")
+	}
 	raw, err := os.ReadFile(m.dataFile)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -142,6 +154,12 @@ func (m *Manager) load() error {
 	m.accounts = wrapper.Accounts
 	if m.accounts == nil {
 		m.accounts = make(map[string]*Account)
+	}
+	// 配置重载可能换了代理/邮箱: 关闭所有旧连接, 后续读信按账号重建池。
+	pools := m.imapPools
+	m.imapPools = make(map[string]*mail.Pool)
+	for _, p := range pools {
+		p.Close()
 	}
 	return nil
 }
@@ -366,40 +384,70 @@ func (m *Manager) UpdateMetadata(id string, input UpdateAccountInput) (Summary, 
 	if !ok {
 		return Summary{}, fmt.Errorf("账号不存在: %s", id)
 	}
+	oldName, oldEmail, oldHost := acc.Name, acc.ICloudEmail, acc.Host
 	if name != nil {
 		acc.Name = *name
 	}
+	emailChanged := false
 	if email != nil {
+		emailChanged = *email != acc.ICloudEmail
 		acc.ICloudEmail = *email
 	}
 	if host != nil {
 		acc.Host = *host
 	}
 	if err := m.save(); err != nil {
+		acc.Name, acc.ICloudEmail, acc.Host = oldName, oldEmail, oldHost
 		return Summary{}, err
+	}
+	if emailChanged {
+		// 邮箱变了, 旧池键失效; 换新池避免旧连接继续保活。
+		m.replacePoolLocked(id)
 	}
 	return acc.Summary(), nil
 }
 
 // UpdateProxy 更新或清除账号代理。空字符串表示清除。
+//
+// 代理变更后只关闭该账号的 IMAP 连接: 旧连接仍会按 5 分钟 NOOP 保活,
+// 从旧出口持续发流量, 既保留旧 IP 上的已认证会话, 也让池随每次改代理增长。
 func (m *Manager) UpdateProxy(id, proxy string) (Summary, error) {
 	proxy, err := validateProxy(proxy)
 	if err != nil {
 		return Summary{}, err
 	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	acc, ok := m.accounts[id]
 	if !ok {
+		m.mu.Unlock()
 		return Summary{}, fmt.Errorf("账号不存在: %s", id)
 	}
+	oldProxy, oldTZ := acc.Proxy, acc.Timezone
 	acc.Proxy = proxy
 	// 代理变更后旧时区不再可信，清除缓存；下一次调度会按新出口 IP 重新解析。
 	acc.Timezone = ""
 	if err := m.save(); err != nil {
+		// 落盘失败则回滚内存, 避免「内存已换代理、池未清理」的不一致状态。
+		acc.Proxy, acc.Timezone = oldProxy, oldTZ
+		m.mu.Unlock()
 		return Summary{}, err
 	}
-	return acc.Summary(), nil
+	if oldProxy != proxy {
+		// 账号专属池整体替换: 旧连接异步关闭, 新读信按新代理重建。
+		m.replacePoolLocked(id)
+	}
+	sum := acc.Summary()
+	m.mu.Unlock()
+
+	return sum, nil
+}
+
+// mailboxPoolPrefix 返回外部收件邮箱在池中的键前缀。
+func mailboxPoolPrefix(cfg *MailboxConfig) string {
+	if cfg == nil || cfg.Email == "" {
+		return ""
+	}
+	return fmt.Sprintf("ext:%s:%d:%s", cfg.IMAPHost, cfg.IMAPPort, cfg.Email)
 }
 
 // TimezoneFor 返回账号调度应使用的 IANA 时区名：优先返回已缓存的解析结果，
@@ -449,6 +497,10 @@ func (m *Manager) RemoveAccount(id string) bool {
 		return false
 	}
 	delete(m.accounts, id)
+	if pool := m.imapPools[id]; pool != nil {
+		delete(m.imapPools, id)
+		go pool.Close()
+	}
 	_ = m.save()
 	return true
 }
@@ -771,34 +823,85 @@ func (m *Manager) HMEClientWithPassword(id, password string, otpProvider hme.OTP
 // WithMailClient 使用连接池中的长连接执行 fn(串行/账号级)。
 // fn 返回后连接保留在池中, 不会 Logout。
 //
-// 外部收件邮箱(如 163)同样走连接池: 池键为「服务器+端口+邮箱」,
-// 同一邮箱跨账号共享一条长连接。修复前每次读信都新建连接(TLS+LOGIN),
+// 外部收件邮箱(如 163)同样走连接池: 池键为「服务器+端口+邮箱+代理」,
+// 同一邮箱复用一条长连接。修复前每次读信都新建连接(TLS+LOGIN),
 // 高频访问会被服务商视为异常, 是触发风控/封禁的典型信号。
+//
+// IMAP 与 HME API 使用同一账号代理: 出口 IP 不一致会让账号在服务商侧
+// 出现「同一账号多出口」画像, 是风控触发信号。
 func (m *Manager) WithMailClient(id string, fn func(*mail.Client) error) error {
-	m.mu.RLock()
-	acc, ok := m.accounts[id]
-	var mailbox *MailboxConfig
-	if ok && acc.Mailbox != nil {
-		copy := *acc.Mailbox
-		mailbox = &copy
-	}
-	m.mu.RUnlock()
-	if mailbox != nil && mailbox.Email != "" && mailbox.Password != "" {
-		if m.imapPool == nil {
-			m.imapPool = mail.NewPool()
+	// 改代理/改邮箱会替换该账号的池(旧池关闭); 重试一次让本次读信落到新池。
+	for attempt := 0; attempt < 2; attempt++ {
+		m.mu.Lock()
+		acc, ok := m.accounts[id]
+		if !ok {
+			m.mu.Unlock()
+			return fmt.Errorf("账号不存在: %s", id)
 		}
-		// 池键含服务器/端口/邮箱: 同一邮箱跨账号共享长连接, 不同邮箱互不串用。
-		key := fmt.Sprintf("ext:%s:%d:%s", mailbox.IMAPHost, mailbox.IMAPPort, mailbox.Email)
-		return m.imapPool.DoWithServer(key, mailbox.Email, mailbox.Password, mailbox.IMAPHost, mailbox.IMAPPort, fn)
-	}
-	imapEmail, appPassword, err := m.imapCreds(id)
-	if err != nil {
+		var mailbox *MailboxConfig
+		if acc.Mailbox != nil {
+			copy := *acc.Mailbox
+			mailbox = &copy
+		}
+		proxy := acc.Proxy
+		pool := m.poolForLocked(id)
+		m.mu.Unlock()
+		if pool == nil {
+			return mail.ErrPoolClosed
+		}
+
+		var err error
+		if mailbox != nil && mailbox.Email != "" && mailbox.Password != "" {
+			// 池键含服务器/端口/邮箱: 同一邮箱复用长连接, 不同邮箱互不串用。
+			key := mailboxPoolPrefix(mailbox)
+			err = pool.DoWithServer(key, mailbox.Email, mailbox.Password, mailbox.IMAPHost, mailbox.IMAPPort, proxy, fn)
+		} else {
+			imapEmail, appPassword, credErr := m.imapCreds(id)
+			if credErr != nil {
+				return credErr
+			}
+			err = pool.Do(imapEmail, appPassword, proxy, fn)
+		}
+		if errors.Is(err, mail.ErrPoolClosed) {
+			continue
+		}
 		return err
 	}
-	if m.imapPool == nil {
-		m.imapPool = mail.NewPool()
+	return mail.ErrPoolClosed
+}
+
+// poolForLocked 返回账号专属 IMAP 池(不存在则创建); 调用方必须持有 m.mu。
+// Manager 已关闭时返回 nil, 调用方应返回 ErrPoolClosed。
+func (m *Manager) poolForLocked(id string) *mail.Pool {
+	if m.closed {
+		return nil
 	}
-	return m.imapPool.Do(imapEmail, appPassword, fn)
+	if m.imapPools == nil {
+		m.imapPools = make(map[string]*mail.Pool)
+	}
+	pool := m.imapPools[id]
+	if pool == nil {
+		pool = mail.NewPool()
+		m.imapPools[id] = pool
+	}
+	return pool
+}
+
+// replacePoolLocked 为账号换一个新池并关闭旧池。
+// 用于改代理、改邮箱、改授权码: 旧连接不会再用新配置, 也不能继续保活。
+// Close 本身非阻塞(摘除池项后异步关闭连接), 因此同步调用即可。
+func (m *Manager) replacePoolLocked(id string) {
+	if m.closed {
+		return
+	}
+	if m.imapPools == nil {
+		m.imapPools = make(map[string]*mail.Pool)
+	}
+	old := m.imapPools[id]
+	m.imapPools[id] = mail.NewPool()
+	if old != nil {
+		old.Close()
+	}
 }
 
 func (m *Manager) imapCreds(id string) (imapEmail, appPassword string, err error) {
@@ -827,7 +930,7 @@ func (m *Manager) imapCreds(id string) (imapEmail, appPassword string, err error
 
 // SetMailbox 设置外部 IMAP 收件邮箱。
 //
-// 同一外部邮箱不允许绑定到多个账号: 邮箱池按 host:port:email 复用连接,
+// 同一外部邮箱不允许绑定到多个账号: 邮箱池按「host:port:email+代理」复用连接,
 // 两个账号共享同一物理邮箱时, 一个账号的秘钥能读到/删除另一个账号别名的
 // 邮件(审计 B1)。账号隔离优先于连接复用, 故在绑定时拒绝重复。
 func (m *Manager) SetMailbox(id string, config MailboxConfig) error {
@@ -841,7 +944,11 @@ func (m *Manager) SetMailbox(id string, config MailboxConfig) error {
 		return fmt.Errorf("IMAP 服务器或端口无效")
 	}
 	m.mu.RLock()
-	_, ok := m.accounts[id]
+	acc0, ok := m.accounts[id]
+	proxy := ""
+	if ok {
+		proxy = acc0.Proxy
+	}
 	// 同一邮箱不得被其它账号占用(不区分大小写; 忽略自身以便重复保存)。
 	for otherID, other := range m.accounts {
 		if otherID == id || other.Mailbox == nil {
@@ -856,7 +963,7 @@ func (m *Manager) SetMailbox(id string, config MailboxConfig) error {
 	if !ok {
 		return fmt.Errorf("账号不存在: %s", id)
 	}
-	mc := mail.NewClientWithServer(config.Email, config.Password, config.IMAPHost, config.IMAPPort)
+	mc := mail.NewClientWithServer(config.Email, config.Password, config.IMAPHost, config.IMAPPort).WithProxy(proxy)
 	if err := mc.Connect(); err != nil {
 		return err
 	}
@@ -871,8 +978,23 @@ func (m *Manager) SetMailbox(id string, config MailboxConfig) error {
 	if !ok {
 		return fmt.Errorf("账号不存在: %s", id)
 	}
+	same := acc.Mailbox != nil &&
+		acc.Mailbox.Provider == config.Provider &&
+		acc.Mailbox.Email == config.Email &&
+		acc.Mailbox.IMAPHost == config.IMAPHost &&
+		acc.Mailbox.IMAPPort == config.IMAPPort &&
+		acc.Mailbox.Password == config.Password
+	oldMailbox := acc.Mailbox
 	acc.Mailbox = &config
-	return m.save()
+	if err := m.save(); err != nil {
+		acc.Mailbox = oldMailbox
+		return err
+	}
+	if !same {
+		// 收件邮箱配置变更: 换新池, 旧连接关闭。
+		m.replacePoolLocked(id)
+	}
+	return nil
 }
 
 // WebMailClient 为指定账号创建 Web 邮件客户端。
@@ -893,7 +1015,11 @@ func (m *Manager) WebMailClient(id string) (*mail.WebClient, error) {
 	}
 	// 从 cookies 中获取 dsid
 	dsid := dsidFromCookies(snap.Cookies)
-	return mail.NewWebClient(snap.Cookies, dsid, snap.Host), nil
+	wmc, err := mail.NewWebClientWithProxy(snap.Cookies, dsid, snap.Host, snap.Proxy)
+	if err != nil {
+		return nil, err
+	}
+	return wmc, nil
 }
 
 // dsidFromCookies 从 X-APPLE-WEBAUTH-USER cookie 解析 dsid。
@@ -929,14 +1055,18 @@ func (m *Manager) SetAppPassword(id, icloudEmail, appPassword string) error {
 	}
 
 	m.mu.RLock()
-	_, ok := m.accounts[id]
+	acc0, ok := m.accounts[id]
+	proxy := ""
+	if ok {
+		proxy = acc0.Proxy
+	}
 	m.mu.RUnlock()
 	if !ok {
 		return fmt.Errorf("账号不存在: %s", id)
 	}
 
-	// 测试连接(锁外)
-	mc := mail.NewClient(icloudEmail, appPassword)
+	// 测试连接(锁外); 与 HME API 同一出口, 避免账号出现多出口 IP。
+	mc := mail.NewClient(icloudEmail, appPassword).WithProxy(proxy)
 	if err := mc.Connect(); err != nil {
 		return err
 	}
@@ -952,10 +1082,16 @@ func (m *Manager) SetAppPassword(id, icloudEmail, appPassword string) error {
 	if !ok {
 		return fmt.Errorf("账号不存在: %s", id)
 	}
+	same := acc.ICloudEmail == icloudEmail && acc.AppPassword == appPassword
+	oldEmail, oldPassword := acc.ICloudEmail, acc.AppPassword
 	acc.ICloudEmail = icloudEmail
 	acc.AppPassword = appPassword
 	if err := m.save(); err != nil {
+		acc.ICloudEmail, acc.AppPassword = oldEmail, oldPassword
 		return err
+	}
+	if !same {
+		m.replacePoolLocked(id)
 	}
 	_ = count
 	return nil
