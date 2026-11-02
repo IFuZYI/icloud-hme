@@ -95,6 +95,12 @@ func (p *Pool) do(key, password, proxy string, newClient func() *Client, fn func
 	if proxy != "" {
 		key += "\x00" + proxy
 	}
+	// 坏连接(代理/NAT 静默断开、服务端断开)最多在新连接上重试一次:
+	// 单次失败直接上抛会表现为「读信失败 → 回退 Web API」, 用户看到收不到邮件。
+	// 读信(list/preview/detail)幂等; 删除路径重试同样安全(缺失 UID 的
+	// STORE 返回 OK, EXPUNGE 无操作, UIDVALIDITY 内 UID 不复用)。
+	const maxConnRetries = 1
+	connRetries := 0
 	for {
 		if p.isClosed() {
 			return ErrPoolClosed
@@ -129,6 +135,11 @@ func (p *Pool) do(key, password, proxy string, newClient func() *Client, fn func
 			err = p.useConn(pc, fn)
 		}()
 		if retry {
+			continue
+		}
+		if err != nil && isLikelyConnErr(err) && connRetries < maxConnRetries {
+			// 连接已坏(useConn 已丢弃该连接); 在新连接上重试一次。
+			connRetries++
 			continue
 		}
 		return err
@@ -350,6 +361,9 @@ func isLikelyConnErr(err error) bool {
 	for _, k := range []string{
 		"connection reset", "broken pipe", "EOF", "i/o timeout",
 		"use of closed", "not connected", "connection refused",
+		// go-imap 在等待命令响应期间连接被关闭(代理/NAT 静默断开)时返回
+		// "imap: connection closed"。漏掉它, 坏连接会留在池里反复失败。
+		"connection closed",
 		"IMAP 连接", "wsarecv", "wsasend",
 	} {
 		if containsFold(s, k) {
