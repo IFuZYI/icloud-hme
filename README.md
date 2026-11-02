@@ -85,7 +85,7 @@ go build -o icloud-hme .
 
 #### 方式四：Docker Compose（推荐，长期运行 / 自建部署）
 
-仓库内置 `docker-compose.yml`，一条命令完成构建与启动（含端口映射、数据卷、时区、日志轮转与健康检查）。
+仓库内置 `docker-compose.yml`，默认拉取已发布镜像启动，也保留本地构建入口（含端口映射、数据卷、时区、日志轮转与健康检查）。
 
 ```bash
 # 1. 进入项目目录并创建 .env（管理员密码必填）
@@ -100,8 +100,12 @@ ICLOUD_HME_PORT=8081
 TZ=Asia/Shanghai
 EOF
 
-# 2. 构建镜像并后台启动
-docker compose up -d --build
+# 2. 拉取已发布镜像并后台启动
+docker compose pull
+docker compose up -d
+
+# 或：本地构建并启动（覆盖同名镜像）
+# docker compose up -d --build
 
 # 3. 查看运行状态（等待 healthy）
 docker compose ps
@@ -121,7 +125,11 @@ docker compose stop
 docker compose start
 docker compose restart
 
-# 升级：重新构建并滚动重启
+# 升级：拉取新镜像并滚动重启
+docker compose pull
+docker compose up -d
+
+# 或：本地重新构建升级
 docker compose up -d --build
 
 # 完全清理（保留 data 卷，只删容器与镜像）
@@ -972,7 +980,10 @@ ICLOUD_HME_PORT=8081
 TZ=Asia/Shanghai
 EOF
 
-docker compose up -d --build
+docker compose pull
+docker compose up -d
+# or build locally instead of pulling:
+# docker compose up -d --build
 docker compose ps
 ```
 
