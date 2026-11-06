@@ -136,6 +136,8 @@ docker compose up -d --build
 docker compose down
 ```
 
+> **镜像标签**：`docker-compose.yml` 默认使用 `ghcr.io/ifuzyi/icloud-hme:latest`，`docker compose pull` 会跟随最新发布。生产环境如需可复现/可回滚，把 `image:` 改成固定版本（如 `:0.2.1`）；`latest` 每次发布都会移动，回滚时需手动指定旧标签。
+
 说明：
 
 - **配置持久化**：`./data` 目录挂载到容器 `/app/data`，`accounts.json`、自动任务配置 `alias_task.json`、运行日志 `alias_task_logs.json` 与应用日志 `logs/app.log` 都保存在宿主机的 `./data` 下，容器重建不丢失。
