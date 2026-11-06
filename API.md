@@ -160,12 +160,18 @@ X-CSRF-Token: <token>
 PUT /api/accounts/:id/proxy
 X-CSRF-Token: <token>
 
-{"proxy": "http://user:pass@host:port"}
+{"proxy": "http://user:pass@host:port", "imap_proxy": "socks5://user:pass@host:1080"}
 ```
 
-空字符串表示清除代理。响应只返回更新后的 `Summary`（代理值从不回显）。
+`proxy` 作用于该账号的 HME API 与 Web 邮件回退；`imap_proxy` 是**IMAP 专用代理**，只作用于 IMAP 收信（含外部收件邮箱与绑定/改密码时的连接测试）。
 
-代理作用于该账号的**全部上游请求**：HME API、IMAP 收信（含外部收件邮箱）与 Web 邮件回退。同一账号必须保持单一出口 IP——漏走代理的请求会暴露服务器真实 IP，是账号风控的触发信号。支持的协议：`http`、`https`、`socks5`。
+- 两个字段都可选；省略（不传该键）表示**不改动**，空字符串表示**清除**。
+- `imap_proxy` 留空即 IMAP 直连，与 `proxy` 互不影响；两个都留空则全部直连。
+- 响应只返回更新后的 `Summary`（代理值从不回显，只暴露 `has_proxy` / `has_imap_proxy`）。
+
+IMAP 出口变化时该账号的 IMAP 连接池会被整体替换（旧连接关闭），避免流量继续从旧 IP 出去。支持的协议：`http`、`https`、`socks5`、`socks5h`（`socks5h` 由代理解析目标域名，适合远端 DNS）。
+
+> 为什么需要单独设置：部分场景下 HME API 与 IMAP 需要的出口不同（例如 API 走住宅代理、IMAP 走另一个地区的静态 IP）。不设置 `imap_proxy` 时 IMAP 直连，会暴露服务器真实 IP；需要单一出口时把同一个代理同时填进两个字段。
 
 ### 8. 更新 Cookie
 

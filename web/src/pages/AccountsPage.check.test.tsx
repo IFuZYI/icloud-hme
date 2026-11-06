@@ -21,6 +21,7 @@ const account: AccountSummary = {
   has_cookies: true,
   has_app_password: false,
   has_proxy: false,
+  has_imap_proxy: false,
   last_validated: '2026-10-01T09:00:00+08:00',
   created_at: '2026-09-01T09:00:00+08:00',
 }

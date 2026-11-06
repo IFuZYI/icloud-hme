@@ -39,6 +39,7 @@ type addAccountReq struct {
 	Cookies     string `json:"cookies"`
 	Host        string `json:"host"`
 	Proxy       string `json:"proxy"`
+	IMAPProxy   string `json:"imap_proxy"`
 }
 
 // addAccountHandler 处理 POST /api/accounts。
@@ -54,6 +55,7 @@ func (s *Server) addAccountHandler(c *gin.Context) {
 		CookieInput: req.Cookies,
 		Host:        req.Host,
 		Proxy:       req.Proxy,
+		IMAPProxy:   req.IMAPProxy,
 	})
 	if err != nil {
 		backendFail(c, err)
@@ -90,8 +92,10 @@ func (s *Server) updateAccountHandler(c *gin.Context) {
 }
 
 // proxyReq 是 PUT /api/accounts/:id/proxy 请求体。
+// 字段为指针: nil 表示不改动该项, 空字符串表示清除该项(IMAP 代理清空后 IMAP 直连)。
 type proxyReq struct {
-	Proxy string `json:"proxy"`
+	Proxy     *string `json:"proxy"`
+	IMAPProxy *string `json:"imap_proxy"`
 }
 
 // updateProxyHandler 处理 PUT /api/accounts/:id/proxy。
@@ -102,7 +106,13 @@ func (s *Server) updateProxyHandler(c *gin.Context) {
 		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "参数错误")
 		return
 	}
-	sum, err := s.be.UpdateProxy(id, req.Proxy)
+	// 输入形状校验放在 HTTP 边界: 两个字段都缺省时直接 400, 不必穿透到 manager
+	// (backendFail 对未知错误返回 500, 不适合表达参数缺失)。
+	if req.Proxy == nil && req.IMAPProxy == nil {
+		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "参数错误: 至少需要提供 proxy 或 imap_proxy")
+		return
+	}
+	sum, err := s.be.UpdateProxies(id, req.Proxy, req.IMAPProxy)
 	if err != nil {
 		backendFail(c, err)
 		return

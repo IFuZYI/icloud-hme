@@ -27,7 +27,8 @@ type fakeBackend struct {
 	updatedID    string
 	updatedInput account.UpdateAccountInput
 	proxyID      string
-	proxyValue   string
+	proxyValue   *string
+	imapProxyVal *string
 	cookiesID    string
 	cookiesValue string
 	appPwdID     string
@@ -80,8 +81,8 @@ func (f *fakeBackend) UpdateAccount(id string, in account.UpdateAccountInput) (a
 	return f.accounts[0], nil
 }
 
-func (f *fakeBackend) UpdateProxy(id, proxy string) (account.Summary, error) {
-	f.proxyID, f.proxyValue = id, proxy
+func (f *fakeBackend) UpdateProxies(id string, proxy, imapProxy *string) (account.Summary, error) {
+	f.proxyID, f.proxyValue, f.imapProxyVal = id, proxy, imapProxy
 	if len(f.accounts) == 0 {
 		return account.Summary{}, fmt.Errorf("fake: 代理更新失败")
 	}

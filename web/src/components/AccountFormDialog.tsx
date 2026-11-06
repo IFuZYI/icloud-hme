@@ -28,6 +28,7 @@ export default function AccountFormDialog({
   const [host, setHost] = useState(editing?.host ?? 'icloud.com')
   const [cookies, setCookies] = useState('')
   const [proxy, setProxy] = useState('')
+  const [imapProxy, setImapProxy] = useState('')
   const [advancedOpen, setAdvancedOpen] = useState(false)
   const [useProxy, setUseProxy] = useState(false)
   const [error, setError] = useState('')
@@ -39,6 +40,7 @@ export default function AccountFormDialog({
     setHost('icloud.com')
     setCookies('')
     setProxy('')
+    setImapProxy('')
     setAdvancedOpen(false)
     setUseProxy(false)
     setError('')
@@ -66,7 +68,7 @@ export default function AccountFormDialog({
       } else {
         await request('/api/accounts', {
           method: 'POST',
-          body: JSON.stringify({ name, icloud_email: icloudEmail, host, proxy: useProxy ? proxy : '', cookies }),
+          body: JSON.stringify({ name, icloud_email: icloudEmail, host, proxy: useProxy ? proxy : '', imap_proxy: imapProxy, cookies }),
         })
       }
       reset()
@@ -154,6 +156,11 @@ export default function AccountFormDialog({
                       <p className="hint">支持 http、https 或 socks5 代理。</p>
                     </div>
                   )}
+                  <div className="form-field proxy-config-input">
+                    <label htmlFor="acc-imap-proxy">IMAP 代理地址</label>
+                    <input id="acc-imap-proxy" type="url" value={imapProxy} onChange={(e) => setImapProxy(e.target.value)} placeholder="socks5://user:pass@host:port" autoComplete="off" />
+                    <p className="hint">可选：单独指定 IMAP 收信出口，与账号代理互不影响；留空则 IMAP 直连。</p>
+                  </div>
                 </fieldset>
               </div>
             )}

@@ -24,6 +24,7 @@ type Summary struct {
 	HasCookies     bool            `json:"has_cookies"`
 	HasAppPassword bool            `json:"has_app_password"`
 	HasProxy       bool            `json:"has_proxy"`
+	HasIMAPProxy   bool            `json:"has_imap_proxy"`
 	Mailbox        *MailboxSummary `json:"mailbox,omitempty"`
 	LastValidated  string          `json:"last_validated"`
 	StatusMessage  string          `json:"status_message,omitempty"`
@@ -44,6 +45,7 @@ func (a *Account) Summary() Summary {
 		HasCookies:     len(a.Cookies) > 0,
 		HasAppPassword: a.AppPassword != "",
 		HasProxy:       a.Proxy != "",
+		HasIMAPProxy:   a.IMAPProxy != "",
 		LastValidated:  a.LastValidated,
 		CreatedAt:      a.CreatedAt,
 	}
@@ -73,6 +75,8 @@ type AddAccountInput struct {
 	CookieInput string
 	Host        string
 	Proxy       string
+	// IMAPProxy 是 IMAP 专用代理; 留空即 IMAP 直连, 与 Proxy 互不影响。
+	IMAPProxy string
 }
 
 // UpdateAccountInput 是编辑账号基本信息的输入,指针字段表示可选。
@@ -162,7 +166,7 @@ func validateProxy(proxy string) (string, error) {
 		return "", fmt.Errorf("代理地址格式无效")
 	}
 	switch u.Scheme {
-	case "http", "https", "socks5":
+	case "http", "https", "socks5", "socks5h":
 	default:
 		return "", fmt.Errorf("代理地址格式无效")
 	}

@@ -73,7 +73,7 @@ Gin Server /api ─────────────────────�
 ### 核心边界
 
 - **HTTP handler 不直接依赖 iCloud/IMAP 客户端**：只调用 `server.Backend`。生产实现是 `managerBackend`，测试使用 fake backend。
-- **`account.Account` 是内部敏感模型**：包含 Cookie、App Password、代理和外部邮箱密码；HTTP 响应只能使用 `account.Summary`。代理作用于该账号全部上游出口（HME API / IMAP / Web 邮件回退），保证单一出口 IP。
+- **`account.Account` 是内部敏感模型**：包含 Cookie、App Password、代理和外部邮箱密码；HTTP 响应只能使用 `account.Summary`。账号代理作用于 HME API 与 Web 邮件回退，`imap_proxy` 只作用于 IMAP 收信——两者互相独立，留空即该通道直连；需要单一出口 IP 时两个字段填同一个代理。
 - **所有 iCloud Cookie 刷新后必须持久化**：HME 业务调用后通过 `Manager.SaveCookies` 保存客户端持有的最新 Cookie。
 - **自动任务状态写入必须原子化**：任务状态和日志分别由 `writeJSONAtomic` 写入，避免中断后产生半个 JSON 文件；任务分自主（每天 1–50 个，按拟人模型分摊：用户画像 + 日/周周期 + 会话自激 + 对数正态间隔，作息时区跟随账号代理出口 IP，配额按作息周期重置）与定时（每 20–1440 分钟创建 1–20 个）两类，同账号任意连续 60 分钟内创建尝试最多 5 次（滚动窗口，人工+自动共享），两次人工创建至少间隔 20 分钟，且每天最多 50 个。
 - **收件箱列表是两阶段加载**：先取 IMAP 信封，再由 `POST /api/inbox/previews` 分批补正文摘要；不要把正文抓取重新放回首屏列表路径。
@@ -135,7 +135,7 @@ Gin Server /api ─────────────────────�
 | GET | `/api/accounts` | 返回脱敏的 `AccountSummary[]` |
 | POST | `/api/accounts` | 新建账号（写） |
 | PATCH | `/api/accounts/:id` | 修改名称、iCloud 邮箱或区域（写） |
-| PUT | `/api/accounts/:id/proxy` | 设置/清除代理（写） |
+| PUT | `/api/accounts/:id/proxy` | 设置/清除账号代理与 IMAP 专用代理（写） |
 | PUT | `/api/accounts/:id/cookies` | 更新并校验 Cookie（写） |
 | POST | `/api/accounts/:id/password` | 设置并验证 iCloud App Password（写） |
 | PUT | `/api/accounts/:id/mailbox` | 设置并验证外部 IMAP 收件邮箱（写） |
@@ -217,6 +217,8 @@ GET /api/inbox
 ```
 
 注意：Web API 的别名筛选依赖主题/发件人等局部匹配，无法可靠按收件人过滤；完整邮件读取和删除只支持 IMAP 路径。
+
+IMAP 路径有硬超时预算，超时即按普通失败降级 Web API：信封阶段下限与正文/预览总预算默认 **30s**，可用 `ICLOUD_HME_IMAP_TIMEOUT`（`5s`–`10m`）调整——磁盘/代理慢或单次邮件多时可调大，避免用户在 IMAP 尚未返回时就被降级。
 
 IMAP 路径同时扫描 INBOX 与垃圾邮件夹（Junk / 网易「垃圾邮件」；iCloud 常把转发邮件判为垃圾），消息 ID 对非 INBOX 文件夹带 `folder:` 前缀消歧（UID 按文件夹生效会撞号）；读取正文/删除/取摘要都经 `mail.ParseMessageID` 解析回 (folder, uid) 定位。外部邮箱为网易 163/126 时，登录后按 RFC 2971 补发 ID 声明（否则所有 SELECT 被拒「Unsafe Login」），缺失文件夹错误措辞（「Folder not exist」）会被静默跳过。
 

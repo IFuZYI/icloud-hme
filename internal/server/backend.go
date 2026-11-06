@@ -63,7 +63,7 @@ type Backend interface {
 	ListAccounts() []account.Summary
 	AddAccount(account.AddAccountInput) (account.Summary, error)
 	UpdateAccount(string, account.UpdateAccountInput) (account.Summary, error)
-	UpdateProxy(string, string) (account.Summary, error)
+	UpdateProxies(string, *string, *string) (account.Summary, error)
 	UpdateCookies(string, string) (account.Summary, error)
 	SetAppPassword(string, string, string) (account.Summary, error)
 	SetMailbox(string, account.MailboxConfig) (account.Summary, error)
@@ -197,9 +197,9 @@ func (b *managerBackend) UpdateAccount(id string, in account.UpdateAccountInput)
 	return sum, nil
 }
 
-// UpdateProxy 更新或清除账号代理。
-func (b *managerBackend) UpdateProxy(id, proxy string) (account.Summary, error) {
-	sum, err := b.mgr.UpdateProxy(id, proxy)
+// UpdateProxy 更新或清除账号代理与 IMAP 专用代理(指针为 nil 表示不改动)。
+func (b *managerBackend) UpdateProxies(id string, proxy, imapProxy *string) (account.Summary, error) {
+	sum, err := b.mgr.UpdateProxies(id, proxy, imapProxy)
 	if err != nil {
 		return account.Summary{}, mapAccountErr(err)
 	}
@@ -502,42 +502,31 @@ func withIMAPTimeout(d time.Duration, fn func() error) error {
 	}
 }
 
-// imapOverallTimeout 是单次收件箱请求里 IMAP 路径的总时间预算。
+// DefaultIMAPTimeout 是 IMAP 超时的内置默认值(可用 ICLOUD_HME_IMAP_TIMEOUT 覆盖)。
+// 导出以便 main 复用同一个默认值, 避免两处各写一个 30s。
+const DefaultIMAPTimeout = 30 * time.Second
+
+// imapOverallTimeout 是单次收件箱请求里 IMAP 路径(正文/预览)的总时间预算。
 //
 // 没有它时, 慢速/卡死的 IMAP 会把请求拖到分钟级(实测 3m30s), 浏览器早已
 // 放弃。超时后按普通失败降级 Web API(秒级), 用户始终有结果可看。
-const imapOverallTimeout = 30 * time.Second
-
-// imapPerMessageBudget 是每封邮件的时间预算(基于实测: iCloud IMAP 单封
-// 16KB partial fetch 约 1.3s, 留 3s 余量覆盖慢请求与解析)。
-const imapPerMessageBudget = 3 * time.Second
+//
+// 默认 30s, 可用 ICLOUD_HME_IMAP_TIMEOUT 覆盖(经 server.Config.IMAPTimeout
+// 注入)。用 var 而非 const: 测试可缩短预算制造确定性超时。
+var imapOverallTimeout = DefaultIMAPTimeout
 
 // imapEnvelopePerMessageBudget 是信封阶段(无正文, 单封 ~500B)每封的预算。
 const imapEnvelopePerMessageBudget = 300 * time.Millisecond
 
-// imapEnvelopeBudgetFloor 是信封阶段总预算的下限: 生产为 15s。
+// imapEnvelopeBudgetFloor 是信封阶段总预算的下限: 生产为 30s(与默认
+// imapOverallTimeout 一致), 可用 ICLOUD_HME_IMAP_TIMEOUT 覆盖。
 // 用 var 而非 const(对齐 ListSnapshotTTL / inboxCacheTTL 等可覆盖配置):
 // 测试可缩短下限, 制造「预算 < 上游延迟」的确定性超时, 覆盖超时弃等路径
 // (外层已返回、后台读取仍完成并观测 UIDVALIDITY, 见 uidvalidity_timeout_test.go)。
-var imapEnvelopeBudgetFloor = 15 * time.Second
+var imapEnvelopeBudgetFloor = DefaultIMAPTimeout
 
-// imapBudget 返回正文阶段的总时间预算: 每封 3s, 下限 30s, 上限 60s。
-func imapBudget(limit int) time.Duration {
-	if limit <= 0 {
-		return imapOverallTimeout
-	}
-	d := time.Duration(limit) * imapPerMessageBudget
-	if d < imapOverallTimeout {
-		d = imapOverallTimeout
-	}
-	if d > 60*time.Second {
-		d = 60 * time.Second
-	}
-	return d
-}
-
-// imapEnvelopeBudget 返回信封阶段的总时间预算: 每封 0.3s, 下限 15s(生产,
-// 可覆盖: imapEnvelopeBudgetFloor), 上限 45s。
+// imapEnvelopeBudget 返回信封阶段的总时间预算: 每封 0.3s, 下限 30s(生产,
+// 可覆盖: imapEnvelopeBudgetFloor), 上限 max(45s, 下限×2)。
 // 信封小而快, 预算比正文阶段紧, 快速失败尽快降级。
 func imapEnvelopeBudget(limit int) time.Duration {
 	if limit <= 0 {
@@ -547,8 +536,9 @@ func imapEnvelopeBudget(limit int) time.Duration {
 	if d < imapEnvelopeBudgetFloor {
 		d = imapEnvelopeBudgetFloor
 	}
-	if d > 45*time.Second {
-		d = 45 * time.Second
+	// 上限取 max(45s, 下限×2): 配置了更大的超时时上限跟着放大, 不压回用户值。
+	if limit := max(45*time.Second, imapEnvelopeBudgetFloor*2); d > limit {
+		d = limit
 	}
 	return d
 }
@@ -687,7 +677,7 @@ func (b *managerBackend) cachedInbox(key string) (InboxResult, bool) {
 func (b *managerBackend) listInboxUncached(q InboxQuery) (InboxResult, error) {
 	// 优先使用 IMAP 连接池 (App Password 认证,复用长连接);
 	// 整体加超时: 卡住的 IMAP 不该让请求无限等待。
-	// 信封阶段单封 ~500B, 预算按信封量级收紧(每封 0.3s, 仍保底 15s)。
+	// 信封阶段单封 ~500B, 预算按信封量级收紧(每封 0.3s, 仍保底 imapEnvelopeBudgetFloor)。
 	var imapMessages []mail.Message
 	imapTotal := 0
 	poolErr := withIMAPTimeout(imapEnvelopeBudget(q.Limit), func() error {

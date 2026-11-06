@@ -157,7 +157,8 @@ func TestUpdateProxyClearsProxy(t *testing.T) {
 	if !sum.HasProxy {
 		t.Fatalf("期望 HasProxy=true: %+v", sum)
 	}
-	got, err := m.UpdateProxy(sum.ID, "")
+	clear := ""
+	got, err := m.UpdateProxies(sum.ID, &clear, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,7 +224,8 @@ func TestUpdateProxyInvalid(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = m.UpdateProxy(sum.ID, "ftp://user:proxy-secret@host:21")
+	bad := "ftp://user:proxy-secret@host:21"
+	_, err = m.UpdateProxies(sum.ID, &bad, nil)
 	if err == nil {
 		t.Fatal("非法代理应当报错")
 	}

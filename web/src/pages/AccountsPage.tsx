@@ -52,6 +52,12 @@ function credChips(acc: AccountSummary): { key: string; label: string; title: st
   if (acc.has_app_password) chips.push({ key: 'apppwd', label: 'App密码', title: '已配置 App 专用密码' })
   if (acc.mailbox) chips.push({ key: 'mailbox', label: '收件箱', title: acc.mailbox.email })
   if (acc.has_proxy) chips.push({ key: 'proxy', label: '代理', title: '已配置网络代理' })
+  if (acc.has_imap_proxy) {
+    chips.push({ key: 'imap-proxy', label: 'IMAP代理', title: '已配置 IMAP 专用代理' })
+  } else if (acc.has_proxy) {
+    // 只配了账号代理时 IMAP 实际是直连, 显式标出来, 避免误以为只有一个出口。
+    chips.push({ key: 'imap-direct', label: 'IMAP直连', title: '未配置 IMAP 代理：IMAP 收信直连，会暴露服务器真实 IP' })
+  }
   return chips
 }
 
@@ -327,6 +333,8 @@ export default function AccountsPage() {
       {proxyFor && (
         <ProxyDialog
           accountId={proxyFor.id}
+          hasProxy={proxyFor.has_proxy}
+          hasIMAPProxy={proxyFor.has_imap_proxy}
           open
           onClose={() => setProxyFor(null)}
           onSaved={() => {

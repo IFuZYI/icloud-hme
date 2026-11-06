@@ -616,6 +616,16 @@ textarea {
   margin-top: var(--space-1);
 }
 
+.checkbox-inline {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+
 .log-message-error {
   color: var(--color-danger);
   font-weight: 500;

@@ -17,6 +17,7 @@
 //	ICLOUD_HME_ADMIN_PASSWORD      管理员密码,至少 8 字符(进程启动后从环境清除)
 //	ICLOUD_HME_SESSION_TTL         会话有效期,默认 12h,范围 15m-168h
 //	ICLOUD_HME_SECURE_COOKIE       TLS 反向代理部署时设为 true
+//	ICLOUD_HME_IMAP_TIMEOUT        IMAP 单次读取超时,默认 30s,范围 5s-10m
 //
 // 日志配置(可选):
 //
@@ -32,6 +33,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"icloud-hme/internal/account"
@@ -83,7 +85,12 @@ func main() {
 	}
 	secureCookie := os.Getenv("ICLOUD_HME_SECURE_COOKIE") == "true"
 
-	slog.Info("服务启动中", "addr", *addr, "session_ttl", sessionTTL.String(), "secure_cookie", secureCookie)
+	imapTimeout, err := imapTimeoutFromEnv()
+	if err != nil {
+		log.Fatalf("ICLOUD_HME_IMAP_TIMEOUT 无效: %v", err)
+	}
+
+	slog.Info("服务启动中", "addr", *addr, "session_ttl", sessionTTL.String(), "secure_cookie", secureCookie, "imap_timeout", imapTimeout.String())
 
 	mgr, err := account.NewManager(abs)
 	if err != nil {
@@ -100,6 +107,7 @@ func main() {
 		SecureCookie:  secureCookie,
 		AutoTaskFile:  filepath.Join(abs, "alias_task.json"),
 		APIKeyFile:    filepath.Join(abs, "api_keys.json"),
+		IMAPTimeout:   imapTimeout,
 	})
 	if err != nil {
 		log.Fatalf("初始化服务失败: %v", err)
@@ -112,6 +120,33 @@ func main() {
 	if err := srv.Run(*addr); err != nil {
 		log.Fatalf("服务启动失败: %v", err)
 	}
+}
+
+// imapTimeoutFromEnv 读取 ICLOUD_HME_IMAP_TIMEOUT 并解析为超时值。
+func imapTimeoutFromEnv() (time.Duration, error) {
+	return parseIMAPTimeout(os.Getenv("ICLOUD_HME_IMAP_TIMEOUT"))
+}
+
+// parseIMAPTimeout 解析 ICLOUD_HME_IMAP_TIMEOUT: IMAP 单次读取的总预算。
+// 未配置时为 30s; 允许范围 5s~10m, 越界或格式错误直接报错(不静默回退)。
+func parseIMAPTimeout(raw string) (time.Duration, error) {
+	const (
+		defaultTimeout = server.DefaultIMAPTimeout
+		minTimeout     = 5 * time.Second
+		maxTimeout     = 10 * time.Minute
+	)
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return defaultTimeout, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("需要 duration 格式(如 30s、1m): %w", err)
+	}
+	if d < minTimeout || d > maxTimeout {
+		return 0, fmt.Errorf("需在 %s ~ %s 之间, 实际 %s", minTimeout, maxTimeout, d)
+	}
+	return d, nil
 }
 
 // parseSessionTTL 解析会话有效期,默认 12h,范围 15m-168h。

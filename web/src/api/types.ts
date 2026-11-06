@@ -23,6 +23,7 @@ export interface AccountSummary {
   has_cookies: boolean
   has_app_password: boolean
   has_proxy: boolean
+  has_imap_proxy: boolean
   mailbox?: MailboxSummary
   last_validated: string
   status_message?: string

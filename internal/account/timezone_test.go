@@ -106,7 +106,8 @@ func TestTimezoneCacheClearedOnProxyChange(t *testing.T) {
 
 	// 换代理: 缓存必须失效, 新解析用新代理。
 	resolver.tz = "Europe/Berlin"
-	if _, err := m.UpdateProxy(acc.ID, "http://user:pass@proxy-b.example:8080"); err != nil {
+	newProxy := "http://user:pass@proxy-b.example:8080"
+	if _, err := m.UpdateProxies(acc.ID, &newProxy, nil); err != nil {
 		t.Fatal(err)
 	}
 	tz, err := m.TimezoneFor(acc.ID)

@@ -22,6 +22,7 @@ const accounts: AccountSummary[] = [
     has_cookies: true,
     has_app_password: true,
     has_proxy: false,
+    has_imap_proxy: false,
     last_validated: '2026-08-04T09:00:00+08:00',
     created_at: '2026-08-01T09:00:00+08:00',
   },
@@ -37,6 +38,7 @@ const accounts: AccountSummary[] = [
     has_cookies: false,
     has_app_password: false,
     has_proxy: false,
+    has_imap_proxy: false,
     last_validated: '',
     created_at: '2026-08-02T09:00:00+08:00',
   },
@@ -52,6 +54,7 @@ const accounts: AccountSummary[] = [
     has_cookies: true,
     has_app_password: false,
     has_proxy: true,
+    has_imap_proxy: false,
     last_validated: '',
     created_at: '2026-08-03T09:00:00+08:00',
   },
@@ -232,11 +235,20 @@ describe('AccountsPage', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
   })
 
+  it('只配账号代理时显示「IMAP直连」警示标签', async () => {
+    server.use(http.get('/api/accounts', () => HttpResponse.json({ success: true, data: accounts })))
+    renderPage()
+    await screen.findByText('活跃号')
+    expect(screen.getByText('IMAP直连')).toBeInTheDocument()
+  })
+
   it('代理从不回显:保存后输入清空,关闭再打开仍为空', async () => {
+    let proxyBody: { proxy: string; imap_proxy?: string } | null = null
     server.use(
       http.get('/api/accounts', () => HttpResponse.json({ success: true, data: accounts })),
       http.put('/api/accounts/:id/proxy', async ({ request }) => {
-        const body = (await request.json()) as { proxy: string }
+        const body = (await request.json()) as { proxy: string; imap_proxy?: string }
+        proxyBody = body
         return HttpResponse.json({
           success: true,
           data: { ...accounts[0], has_proxy: body.proxy !== '' },
@@ -248,17 +260,20 @@ describe('AccountsPage', () => {
     const user = userEvent.setup()
     await user.click(screen.getAllByRole('button', { name: /更多操作/ })[0])
     await user.click(screen.getByRole('menuitem', { name: '网络代理' }))
-    const input = screen.getByLabelText(/代理地址/) as HTMLInputElement
+    const input = screen.getByLabelText('代理地址') as HTMLInputElement
     expect(input.value).toBe('')
     await user.type(input, 'http://u:p@proxy.example.com:8080')
     await user.click(screen.getByRole('button', { name: /保存/ }))
     // 保存后输入清空
     await waitFor(() => expect(input.value).toBe(''))
+    // 只提交编辑过的字段: 未动 IMAP 代理时不得顺手清空它
+    expect(proxyBody).toEqual({ proxy: 'http://u:p@proxy.example.com:8080' })
     // 关闭后重新打开:仍为空(从不回显)
     await user.click(screen.getByRole('button', { name: /取消/ }))
     await user.click(screen.getAllByRole('button', { name: /更多操作/ })[0])
     await user.click(screen.getByRole('menuitem', { name: '网络代理' }))
-    expect((screen.getByLabelText(/代理地址/) as HTMLInputElement).value).toBe('')
+    expect((screen.getByLabelText('代理地址') as HTMLInputElement).value).toBe('')
+    expect((screen.getByLabelText('IMAP 代理地址') as HTMLInputElement).value).toBe('')
   })
 
   it('删除要求输入账号名称精确匹配,取消不发请求', async () => {

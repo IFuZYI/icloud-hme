@@ -22,6 +22,7 @@ const accounts: AccountSummary[] = [
     has_cookies: true,
     has_app_password: true,
     has_proxy: false,
+    has_imap_proxy: false,
     last_validated: '2026-08-04T09:00:00+08:00',
     created_at: '2026-08-01T09:00:00+08:00',
   },

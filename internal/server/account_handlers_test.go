@@ -135,7 +135,7 @@ func TestAccountLoginResponseNoSecrets(t *testing.T) {
 	for key := range out.Data {
 		switch key {
 		case "id", "name", "real_email", "icloud_email", "host", "status", "alias_total",
-			"alias_active", "has_cookies", "has_app_password", "has_proxy",
+			"alias_active", "has_cookies", "has_app_password", "has_proxy", "has_imap_proxy",
 			"last_validated", "status_message", "created_at":
 		default:
 			t.Fatalf("登录响应包含意外字段 %q", key)
@@ -173,6 +173,8 @@ func TestAccountHandlerValidation(t *testing.T) {
 		{"非法代理", "POST", "/api/accounts", `{"name":"主号","icloud_email":"a@icloud.com","proxy":"ftp://x"}`, 400, "VALIDATION_ERROR"},
 		{"PATCH 空更新", "PATCH", "/api/accounts/acc_1", `{}`, 400, "VALIDATION_ERROR"},
 		{"PUT 非法代理", "PUT", "/api/accounts/acc_1/proxy", `{"proxy":"ftp://x"}`, 400, "VALIDATION_ERROR"},
+		{"PUT 非法 IMAP 代理", "PUT", "/api/accounts/acc_1/proxy", `{"imap_proxy":"ftp://x"}`, 400, "VALIDATION_ERROR"},
+		{"PUT 空代理体", "PUT", "/api/accounts/acc_1/proxy", `{}`, 400, "VALIDATION_ERROR"},
 	}
 	for _, tc := range cases {
 		req := authedReq(t, ts, tc.method, tc.path, tc.body)

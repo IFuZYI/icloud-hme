@@ -20,7 +20,7 @@ import (
 //
 // 同一账号的 IMAP 出口必须与 HME API 一致; 漏传代理会让 IMAP 从服务器
 // 真实 IP 直连, 账号在服务商侧出现「多出口」画像, 是风控触发信号。
-func TestMailPathsUseAccountProxy(t *testing.T) {
+func TestIMAPPathsUseIMAPProxy(t *testing.T) {
 	srv := mailtest.NewServer(t, mailtest.Options{})
 	target := net.JoinHostPort(srv.Host, strconv.Itoa(srv.Port))
 
@@ -42,11 +42,15 @@ func TestMailPathsUseAccountProxy(t *testing.T) {
 	}
 	defer m.Close()
 
-	const proxy = "socks5://user:pass@127.0.0.1:1080"
+	const (
+		webProxy  = "http://user:pass@127.0.0.1:8080"
+		imapProxy = "socks5://user:pass@127.0.0.1:1080"
+	)
 	sum, err := m.AddAccountWithInput(AddAccountInput{
 		Name:        "主号",
 		ICloudEmail: "a@icloud.com",
-		Proxy:       proxy,
+		Proxy:       webProxy,
+		IMAPProxy:   imapProxy,
 	})
 	if err != nil {
 		t.Fatalf("AddAccountWithInput: %v", err)
@@ -89,8 +93,64 @@ func TestMailPathsUseAccountProxy(t *testing.T) {
 		t.Fatalf("应有 4 条 IMAP 建连路径, 实际拨号 %d 次: %v", len(got), got)
 	}
 	for i, p := range got {
-		if p != proxy {
-			t.Fatalf("第 %d 条路径未传账号代理: got %q, want %q", i+1, p, proxy)
+		if p != imapProxy {
+			t.Fatalf("第 %d 条路径未传 IMAP 代理: got %q, want %q", i+1, p, imapProxy)
+		}
+	}
+}
+
+// TestIMAPPathsWithoutIMAPProxyGoDirect 验证只配置账号代理(Web)时, IMAP 仍然
+// 直连: 两个代理互不关联, 留空即直连。
+func TestIMAPPathsWithoutIMAPProxyGoDirect(t *testing.T) {
+	srv := mailtest.NewServer(t, mailtest.Options{})
+	target := net.JoinHostPort(srv.Host, strconv.Itoa(srv.Port))
+
+	var (
+		mu   sync.Mutex
+		seen []string
+	)
+	restore := mail.OverrideDialForTestWithProxy(func(addr, proxy string) (*client.Client, error) {
+		mu.Lock()
+		seen = append(seen, proxy)
+		mu.Unlock()
+		return mailtest.DialInsecure(target)
+	})
+	t.Cleanup(restore)
+
+	m, err := NewManager(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+
+	sum, err := m.AddAccountWithInput(AddAccountInput{
+		Name:        "主号",
+		ICloudEmail: "a@icloud.com",
+		Proxy:       "http://user:pass@127.0.0.1:8080",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	m.accounts[sum.ID].AppPassword = "app-password"
+	m.mu.Unlock()
+
+	if err := m.WithMailClient(sum.ID, func(*mail.Client) error { return nil }); err != nil {
+		t.Fatalf("WithMailClient: %v", err)
+	}
+	if err := m.SetAppPassword(sum.ID, "a@icloud.com", "app-password"); err != nil {
+		t.Fatalf("SetAppPassword: %v", err)
+	}
+
+	mu.Lock()
+	got := append([]string(nil), seen...)
+	mu.Unlock()
+	if len(got) == 0 {
+		t.Fatal("应至少拨号一次")
+	}
+	for i, p := range got {
+		if p != "" {
+			t.Fatalf("第 %d 条 IMAP 路径应直连(代理为空), 实际 %q", i+1, p)
 		}
 	}
 }
@@ -126,7 +186,7 @@ func TestWebMailClientUsesAccountProxy(t *testing.T) {
 // TestUpdateProxyClosesPooledConnections 验证改代理后旧 IMAP 连接被关闭:
 // 旧连接会继续按 NOOP 保活, 从旧出口发流量并保留旧 IP 上的已认证会话,
 // 与「同一账号单一出口」的风控要求冲突。
-func TestUpdateProxyClosesPooledConnections(t *testing.T) {
+func TestUpdateIMAPProxyClosesPooledConnections(t *testing.T) {
 	srv := mailtest.NewServer(t, mailtest.Options{})
 	t.Cleanup(mail.OverrideDialForTest(mailtest.DialInsecure))
 
@@ -156,8 +216,9 @@ func TestUpdateProxyClosesPooledConnections(t *testing.T) {
 	oldPool := m.imapPools[id]
 	m.mu.Unlock()
 
-	if _, err := m.UpdateProxy(id, "socks5://127.0.0.1:1080"); err != nil {
-		t.Fatalf("UpdateProxy: %v", err)
+	newIMAPProxy := "socks5://127.0.0.1:1080"
+	if _, err := m.UpdateProxies(id, nil, &newIMAPProxy); err != nil {
+		t.Fatalf("UpdateProxies: %v", err)
 	}
 	// 必须观察旧池本身, 不能只看新池: 新池天然为空, 断言 0 是恒真的。
 	deadline := time.Now().Add(2 * time.Second)
@@ -275,7 +336,7 @@ func TestRemoveAndReAddAccountProxyAllowed(t *testing.T) {
 
 // TestUpdateProxyClosesOnlyTargetAccount 验证改 A 的代理不会断开 B 的 IMAP
 // 会话: 全池关闭会让其它账号被迫重连(TLS+LOGIN), 本身就是风控信号。
-func TestUpdateProxyClosesOnlyTargetAccount(t *testing.T) {
+func TestUpdateIMAPProxyClosesOnlyTargetAccount(t *testing.T) {
 	srv := mailtest.NewServer(t, mailtest.Options{})
 
 	var (
@@ -318,8 +379,9 @@ func TestUpdateProxyClosesOnlyTargetAccount(t *testing.T) {
 	oldA := m.imapPools[idA]
 	m.mu.Unlock()
 
-	if _, err := m.UpdateProxy(idA, "socks5://127.0.0.1:1080"); err != nil {
-		t.Fatalf("UpdateProxy: %v", err)
+	newIMAPProxy := "socks5://127.0.0.1:1080"
+	if _, err := m.UpdateProxies(idA, nil, &newIMAPProxy); err != nil {
+		t.Fatalf("UpdateProxies: %v", err)
 	}
 	deadline := time.Now().Add(2 * time.Second)
 	for oldA.Len() != 0 && time.Now().Before(deadline) {

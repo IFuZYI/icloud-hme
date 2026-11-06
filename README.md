@@ -166,6 +166,7 @@ cp .env.example .env      # 然后修改 ICLOUD_HME_ADMIN_PASSWORD
 | `ICLOUD_HME_ADMIN_PASSWORD` | 管理员密码，**必填**，至少 8 字符 | 无（缺失时拒绝启动） |
 | `ICLOUD_HME_SESSION_TTL` | 会话有效期 | `12h`（范围 `15m`–`168h`） |
 | `ICLOUD_HME_SECURE_COOKIE` | 通过 TLS 反向代理部署时设为 `true` | `false` |
+| `ICLOUD_HME_IMAP_TIMEOUT` | IMAP 单次读取超时（信封阶段下限与正文/预览总预算），网络慢或邮件多时可调大 | `30s`（范围 `5s`–`10m`） |
 | `ICLOUD_HME_LOG_LEVEL` | 日志级别 `debug`/`info`/`warn`/`error`；排查问题时设为 `debug` 可看到每个请求与每次认证失败的详细日志 | `info` |
 | `ICLOUD_HME_LOG_FORMAT` | 日志格式 `text`（易读）或 `json`（便于日志系统采集） | `text` |
 | `ICLOUD_HME_LOG_DIR` | 应用日志持久化目录，按大小滚动（10MB×5）；设为空串则只输出到容器日志、不落盘 | `<数据目录>/logs`（Docker 下为 `/app/data/logs`） |
@@ -192,6 +193,7 @@ cp .env.example .env      # 然后修改 ICLOUD_HME_ADMIN_PASSWORD
       },
       "host": "icloud.com",
       "proxy": "http://user:pass@host:port",
+      "imap_proxy": "socks5://user:pass@host:1080",
       "app_password": "xxxx-xxxx-xxxx-xxxx",
       "status": "active"
     }
@@ -199,7 +201,9 @@ cp .env.example .env      # 然后修改 ICLOUD_HME_ADMIN_PASSWORD
 }
 ```
 
-> **提示:** 也可以通过管理界面的「账号」页面动态添加账号，无需手动编辑 JSON 文件。`cookies`、`app_password`、`proxy` 都是可选的。账号代理作用于该账号的**全部上游请求**（HME API、IMAP 收信、Web 邮件回退），保证同一账号只有一个出口 IP——IMAP 直连会暴露服务器真实 IP，是账号风控的触发信号。
+> **提示:** 也可以通过管理界面的「账号」页面动态添加账号，无需手动编辑 JSON 文件。`cookies`、`app_password`、`proxy` 都是可选的。账号代理作用于该账号的 HME API 与 Web 邮件回退；如需让 IMAP 收信走另一个出口，可在「网络代理」里单独填写 `imap_proxy`（留空则 IMAP 直连，与 `proxy` 互不影响；需要单一出口时两个字段填同一个代理）。IMAP 直连会暴露服务器真实 IP，是账号风控的触发信号。
+
+> **升级提示（v0.2.0）**：`proxy` 与 `imap_proxy` 是两条独立通道，留空即该通道直连。存量账号如果只配了 `proxy`，升级后 IMAP 会直连——账号列表会显示 `IMAP直连` 警示标签；需要保持单一出口 IP 时，请在「网络代理」里把同一个代理同时填入两项。
 
 ### 4. 启动服务
 
@@ -378,7 +382,8 @@ POST /api/accounts
 {
   "name": "新账号",
   "host": "icloud.com",           # 可选
-  "proxy": "http://..."           # 可选
+  "proxy": "http://...",          # 可选
+  "imap_proxy": "socks5://..."    # 可选, 留空则 IMAP 直连
 }
 
 # 响应 - 状态为 pending,需登录
@@ -402,7 +407,8 @@ POST /api/accounts
   "name": "新账号",
   "cookies": "{\"x-apple-session-token\":\"token_value\"}",  # JSON 或 Header 格式
   "host": "icloud.com",           # 可选
-  "proxy": "http://..."           # 可选
+  "proxy": "http://...",          # 可选
+  "imap_proxy": "socks5://..."    # 可选, 留空则 IMAP 直连
 }
 
 # 响应

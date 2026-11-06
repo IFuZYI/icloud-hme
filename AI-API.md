@@ -101,6 +101,7 @@ curl -s http://hme.internal:8081/api/accounts -H "X-API-Key: $HME_KEY"
       "has_cookies": true,
       "has_app_password": true,
       "has_proxy": false,
+      "has_imap_proxy": false,
       "last_validated": "2026-10-15T15:56:00+08:00",
       "created_at": "2026-09-01T10:00:00+08:00"
     }
@@ -114,6 +115,7 @@ curl -s http://hme.internal:8081/api/accounts -H "X-API-Key: $HME_KEY"
 | `status` | `active` / `pending` / `error`（`pending` 通常表示还没配置 Cookie，读信会失败） |
 | `alias_total` / `alias_active` | 别名总数 / 已启用数 |
 | `has_cookies` / `has_app_password` | 是否具备两条读信通道（IMAP 优先，Web API 回退） |
+| `has_proxy` / `has_imap_proxy` | 是否配置了账号代理 / IMAP 专用代理（代理地址本身永不回显） |
 | `mailbox` | 绑定了外部收件邮箱时出现（`{provider,email,imap_host,imap_port}`） |
 
 > 响应里**永远不含** Cookie、App Password、代理凭据。

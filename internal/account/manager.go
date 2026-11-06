@@ -37,7 +37,8 @@ type Account struct {
 	ICloudEmail   string            `json:"icloud_email"`
 	Cookies       map[string]string `json:"cookies"`
 	Host          string            `json:"host"`
-	Proxy         string            `json:"proxy,omitempty"` // HTTP/SOCKS5 代理
+	Proxy         string            `json:"proxy,omitempty"`      // HTTP/SOCKS5 代理
+	IMAPProxy     string            `json:"imap_proxy,omitempty"` // IMAP 专用代理(留空即 IMAP 直连, 与 Proxy 互不影响)
 	AppPassword   string            `json:"app_password,omitempty"`
 	Mailbox       *MailboxConfig    `json:"mailbox,omitempty"`
 	Status        string            `json:"status"` // active / error
@@ -96,6 +97,15 @@ func copyAccount(acc *Account) *Account {
 	cp := *acc
 	cp.Cookies = cloneCookies(acc.Cookies)
 	return &cp
+}
+
+// EffectiveIMAPProxy 返回 IMAP 建连应使用的代理。
+// IMAP 代理与账号代理相互独立: IMAPProxy 为空即 IMAP 直连, 不回退账号代理。
+func (a *Account) EffectiveIMAPProxy() string {
+	if a == nil {
+		return ""
+	}
+	return a.IMAPProxy
 }
 
 // NewManager 创建管理器。dataDir 用于存放 accounts.json。
@@ -236,7 +246,7 @@ func (m *Manager) AddAccount(name, cookieInput, host, proxy string) (*Account, e
 	if host == "" {
 		host = "icloud.com"
 	}
-	acc, err := m.newAccount(name, "", cookieInput, host, proxy)
+	acc, err := m.newAccount(name, "", cookieInput, host, proxy, "")
 	if err != nil {
 		return nil, err
 	}
@@ -270,7 +280,11 @@ func (m *Manager) AddAccountWithInput(input AddAccountInput) (Summary, error) {
 	if err != nil {
 		return Summary{}, err
 	}
-	acc, err := m.newAccount(name, email, input.CookieInput, host, proxy)
+	imapProxy, err := validateProxy(input.IMAPProxy)
+	if err != nil {
+		return Summary{}, err
+	}
+	acc, err := m.newAccount(name, email, input.CookieInput, host, proxy, imapProxy)
 	if err != nil {
 		return Summary{}, err
 	}
@@ -285,7 +299,7 @@ func (m *Manager) AddAccountWithInput(input AddAccountInput) (Summary, error) {
 }
 
 // newAccount 构造账号;cookieInput 非空时在锁外对快照执行会话校验。
-func (m *Manager) newAccount(name, icloudEmail, cookieInput, host, proxy string) (*Account, error) {
+func (m *Manager) newAccount(name, icloudEmail, cookieInput, host, proxy, imapProxy string) (*Account, error) {
 	var cookies map[string]string
 	if cookieInput != "" {
 		var err error
@@ -305,6 +319,7 @@ func (m *Manager) newAccount(name, icloudEmail, cookieInput, host, proxy string)
 		Cookies:     cookies,
 		Host:        host,
 		Proxy:       proxy,
+		IMAPProxy:   imapProxy,
 		Status:      "pending", // 无 Cookie 时为 pending
 		CreatedAt:   time.Now().Format(time.RFC3339),
 	}
@@ -407,32 +422,62 @@ func (m *Manager) UpdateMetadata(id string, input UpdateAccountInput) (Summary, 
 	return acc.Summary(), nil
 }
 
-// UpdateProxy 更新或清除账号代理。空字符串表示清除。
+// UpdateProxies 更新账号代理与/或 IMAP 专用代理。指针为 nil 表示不改动该字段,
+// 空字符串表示清除。IMAP 专用代理与账号代理互相独立, 留空即 IMAP 直连。
 //
-// 代理变更后只关闭该账号的 IMAP 连接: 旧连接仍会按 5 分钟 NOOP 保活,
-// 从旧出口持续发流量, 既保留旧 IP 上的已认证会话, 也让池随每次改代理增长。
-func (m *Manager) UpdateProxy(id, proxy string) (Summary, error) {
-	proxy, err := validateProxy(proxy)
-	if err != nil {
-		return Summary{}, err
+// 代理变更后只关闭该账号的 IMAP 连接(且仅在 IMAP 出口真的变化时):
+// 旧连接仍会按 5 分钟 NOOP 保活, 从旧出口持续发流量, 既保留旧 IP 上的
+// 已认证会话, 也让池随每次改代理增长。
+func (m *Manager) UpdateProxies(id string, proxy, imapProxy *string) (Summary, error) {
+	if proxy == nil && imapProxy == nil {
+		return Summary{}, fmt.Errorf("至少需要提供 proxy 或 imap_proxy")
 	}
+	var newProxy, newIMAPProxy string
+	if proxy != nil {
+		v, err := validateProxy(*proxy)
+		if err != nil {
+			return Summary{}, err
+		}
+		newProxy = v
+	}
+	if imapProxy != nil {
+		v, err := validateProxy(*imapProxy)
+		if err != nil {
+			return Summary{}, err
+		}
+		newIMAPProxy = v
+	}
+
 	m.mu.Lock()
 	acc, ok := m.accounts[id]
 	if !ok {
 		m.mu.Unlock()
 		return Summary{}, fmt.Errorf("账号不存在: %s", id)
 	}
-	oldProxy, oldTZ := acc.Proxy, acc.Timezone
-	acc.Proxy = proxy
-	// 代理变更后旧时区不再可信，清除缓存；下一次调度会按新出口 IP 重新解析。
-	acc.Timezone = ""
+	oldProxy, oldIMAPProxy, oldTZ := acc.Proxy, acc.IMAPProxy, acc.Timezone
+	if proxy != nil {
+		acc.Proxy = newProxy
+	}
+	if imapProxy != nil {
+		acc.IMAPProxy = newIMAPProxy
+	}
+	if acc.Proxy == oldProxy && acc.IMAPProxy == oldIMAPProxy {
+		// 值未变: 不清时区缓存、不写盘、不换池(用户原样再保存一次不应有副作用)。
+		sum := acc.Summary()
+		m.mu.Unlock()
+		return sum, nil
+	}
+	if proxy != nil {
+		// 账号代理变更后旧时区不再可信，清除缓存；下一次调度会按新出口 IP 重新解析。
+		acc.Timezone = ""
+	}
 	if err := m.save(); err != nil {
 		// 落盘失败则回滚内存, 避免「内存已换代理、池未清理」的不一致状态。
-		acc.Proxy, acc.Timezone = oldProxy, oldTZ
+		acc.Proxy, acc.IMAPProxy, acc.Timezone = oldProxy, oldIMAPProxy, oldTZ
 		m.mu.Unlock()
 		return Summary{}, err
 	}
-	if oldProxy != proxy {
+	if oldIMAPProxy != acc.IMAPProxy {
 		// 账号专属池整体替换: 旧连接异步关闭, 新读信按新代理重建。
 		m.replacePoolLocked(id)
 	}
@@ -827,8 +872,8 @@ func (m *Manager) HMEClientWithPassword(id, password string, otpProvider hme.OTP
 // 同一邮箱复用一条长连接。修复前每次读信都新建连接(TLS+LOGIN),
 // 高频访问会被服务商视为异常, 是触发风控/封禁的典型信号。
 //
-// IMAP 与 HME API 使用同一账号代理: 出口 IP 不一致会让账号在服务商侧
-// 出现「同一账号多出口」画像, 是风控触发信号。
+// IMAP 只使用账号的 IMAP 专用代理(imap_proxy), 为空即直连; 账号代理只作用于
+// HME API 与 Web 邮件回退, 两者互不影响。需要单一出口时把同一代理填进两个字段。
 func (m *Manager) WithMailClient(id string, fn func(*mail.Client) error) error {
 	// 改代理/改邮箱会替换该账号的池(旧池关闭); 重试一次让本次读信落到新池。
 	for attempt := 0; attempt < 2; attempt++ {
@@ -843,8 +888,12 @@ func (m *Manager) WithMailClient(id string, fn func(*mail.Client) error) error {
 			copy := *acc.Mailbox
 			mailbox = &copy
 		}
-		proxy := acc.Proxy
+		proxy := acc.EffectiveIMAPProxy()
 		pool := m.poolForLocked(id)
+		imapEmail, appPassword := acc.ICloudEmail, acc.AppPassword
+		if imapEmail == "" {
+			imapEmail = acc.RealEmail
+		}
 		m.mu.Unlock()
 		if pool == nil {
 			return mail.ErrPoolClosed
@@ -856,9 +905,12 @@ func (m *Manager) WithMailClient(id string, fn func(*mail.Client) error) error {
 			key := mailboxPoolPrefix(mailbox)
 			err = pool.DoWithServer(key, mailbox.Email, mailbox.Password, mailbox.IMAPHost, mailbox.IMAPPort, proxy, fn)
 		} else {
-			imapEmail, appPassword, credErr := m.imapCreds(id)
-			if credErr != nil {
-				return credErr
+			// 凭据在同一临界区已取出, 不再二次加锁/深拷贝整个账号。
+			if !isICloudDomain(imapEmail) {
+				return fmt.Errorf("账号未设置 iCloud 邮箱 (当前: %s)", imapEmail)
+			}
+			if appPassword == "" {
+				return fmt.Errorf("账号未设置 App 专用密码")
 			}
 			err = pool.Do(imapEmail, appPassword, proxy, fn)
 		}
@@ -904,30 +956,6 @@ func (m *Manager) replacePoolLocked(id string) {
 	}
 }
 
-func (m *Manager) imapCreds(id string) (imapEmail, appPassword string, err error) {
-	m.mu.RLock()
-	acc, ok := m.accounts[id]
-	var snap *Account
-	if ok {
-		snap = copyAccount(acc)
-	}
-	m.mu.RUnlock()
-	if !ok {
-		return "", "", fmt.Errorf("账号不存在: %s", id)
-	}
-	imapEmail = snap.ICloudEmail
-	if imapEmail == "" {
-		imapEmail = snap.RealEmail
-	}
-	if !isICloudDomain(imapEmail) {
-		return "", "", fmt.Errorf("账号未设置 iCloud 邮箱 (当前: %s)", imapEmail)
-	}
-	if snap.AppPassword == "" {
-		return "", "", fmt.Errorf("账号未设置 App 专用密码")
-	}
-	return imapEmail, snap.AppPassword, nil
-}
-
 // SetMailbox 设置外部 IMAP 收件邮箱。
 //
 // 同一外部邮箱不允许绑定到多个账号: 邮箱池按「host:port:email+代理」复用连接,
@@ -947,7 +975,7 @@ func (m *Manager) SetMailbox(id string, config MailboxConfig) error {
 	acc0, ok := m.accounts[id]
 	proxy := ""
 	if ok {
-		proxy = acc0.Proxy
+		proxy = acc0.EffectiveIMAPProxy()
 	}
 	// 同一邮箱不得被其它账号占用(不区分大小写; 忽略自身以便重复保存)。
 	for otherID, other := range m.accounts {
@@ -1058,7 +1086,7 @@ func (m *Manager) SetAppPassword(id, icloudEmail, appPassword string) error {
 	acc0, ok := m.accounts[id]
 	proxy := ""
 	if ok {
-		proxy = acc0.Proxy
+		proxy = acc0.EffectiveIMAPProxy()
 	}
 	m.mu.RUnlock()
 	if !ok {

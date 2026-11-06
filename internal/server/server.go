@@ -43,6 +43,8 @@ type Config struct {
 	// APIKeyFile 是秘钥持久化路径; 空则用 AutoTaskFile 同目录的
 	// api_keys.json(测试显式传空串时用纯内存模式)。
 	APIKeyFile string
+	// IMAPTimeout 是 IMAP 单次读取的超时预算; 零值表示用内置默认值(30s)。
+	IMAPTimeout time.Duration
 }
 
 // Server 封装 Gin 引擎、账号后端与认证。
@@ -101,6 +103,14 @@ func newWithBackendE(be Backend, cfg Config) (*Server, error) {
 	if !cfg.Debug {
 		gin.SetMode(gin.ReleaseMode)
 	}
+	// IMAP 超时预算: 显式配置(ICLOUD_HME_IMAP_TIMEOUT)时同时作用于正文/预览
+	// 总预算与信封阶段下限; 未配置时显式写回默认 30s, 避免上一个 Server
+	// (测试里常见)配置过的值泄漏到本次实例。
+	timeout := cfg.IMAPTimeout
+	if timeout <= 0 {
+		timeout = DefaultIMAPTimeout
+	}
+	imapOverallTimeout, imapEnvelopeBudgetFloor = timeout, timeout
 	s := &Server{
 		be:      be,
 		limiter: auth.NewLimiter(nil, 15*time.Minute, 5, 10000),
