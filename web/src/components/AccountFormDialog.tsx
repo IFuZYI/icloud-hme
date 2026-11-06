@@ -153,7 +153,7 @@ export default function AccountFormDialog({
                     <div className="form-field proxy-config-input">
                       <label htmlFor="acc-proxy">代理地址</label>
                       <input id="acc-proxy" type="url" value={proxy} onChange={(e) => setProxy(e.target.value)} placeholder="http://user:pass@host:port" autoComplete="off" />
-                      <p className="hint">支持 http、https 或 socks5 代理。</p>
+                      <p className="hint">支持 http、https、socks5 或 socks5h 代理。</p>
                     </div>
                   )}
                   <div className="form-field proxy-config-input">

@@ -5,17 +5,22 @@ import (
 	"time"
 )
 
-// TestIMAPTimeoutDefaultsTo30s 验证未经配置时 IMAP 预算的默认值是 30s
-// (旧默认 15s)。
+// TestIMAPTimeoutDefaultsTo30s 验证默认值是 30s(旧默认 15s)。
+// 不依赖其它用例留下的全局状态: 显式把预算变量重置为 DefaultIMAPTimeout。
 func TestIMAPTimeoutDefaultsTo30s(t *testing.T) {
-	if imapOverallTimeout != 30*time.Second {
-		t.Fatalf("imapOverallTimeout 默认应为 30s, 实际 %v", imapOverallTimeout)
+	prevOverall := imapOverallTimeout
+	prevFloor := imapEnvelopeBudgetFloor
+	t.Cleanup(func() {
+		imapOverallTimeout = prevOverall
+		imapEnvelopeBudgetFloor = prevFloor
+	})
+	imapOverallTimeout, imapEnvelopeBudgetFloor = DefaultIMAPTimeout, DefaultIMAPTimeout
+
+	if DefaultIMAPTimeout != 30*time.Second {
+		t.Fatalf("DefaultIMAPTimeout 应为 30s, 实际 %v", DefaultIMAPTimeout)
 	}
-	if imapEnvelopeBudgetFloor != 30*time.Second {
-		t.Fatalf("imapEnvelopeBudgetFloor 默认应为 30s, 实际 %v", imapEnvelopeBudgetFloor)
-	}
-	if got := imapEnvelopeBudget(1); got != 30*time.Second {
-		t.Fatalf("小 limit 时信封预算应取下限 30s, 实际 %v", got)
+	if got := imapEnvelopeBudget(1); got != DefaultIMAPTimeout {
+		t.Fatalf("小 limit 时信封预算应取下限 %v, 实际 %v", DefaultIMAPTimeout, got)
 	}
 }
 

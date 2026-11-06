@@ -12,6 +12,7 @@
       },
       "host": "icloud.com",
       "proxy": "",
+      "imap_proxy": "",
       "app_password": "xxxx-xxxx-xxxx-xxxx",
       "status": "active",
       "alias_total": 0,

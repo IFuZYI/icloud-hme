@@ -264,12 +264,10 @@ describe('AccountsPage', () => {
     expect(input.value).toBe('')
     await user.type(input, 'http://u:p@proxy.example.com:8080')
     await user.click(screen.getByRole('button', { name: /保存/ }))
-    // 保存后输入清空
-    await waitFor(() => expect(input.value).toBe(''))
+    // 保存后对话框关闭, 重新打开仍为空(从不回显)
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
     // 只提交编辑过的字段: 未动 IMAP 代理时不得顺手清空它
     expect(proxyBody).toEqual({ proxy: 'http://u:p@proxy.example.com:8080' })
-    // 关闭后重新打开:仍为空(从不回显)
-    await user.click(screen.getByRole('button', { name: /取消/ }))
     await user.click(screen.getAllByRole('button', { name: /更多操作/ })[0])
     await user.click(screen.getByRole('menuitem', { name: '网络代理' }))
     expect((screen.getByLabelText('代理地址') as HTMLInputElement).value).toBe('')

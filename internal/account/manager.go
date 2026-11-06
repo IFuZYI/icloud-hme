@@ -467,8 +467,8 @@ func (m *Manager) UpdateProxies(id string, proxy, imapProxy *string) (Summary, e
 		m.mu.Unlock()
 		return sum, nil
 	}
-	if proxy != nil {
-		// 账号代理变更后旧时区不再可信，清除缓存；下一次调度会按新出口 IP 重新解析。
+	if acc.Proxy != oldProxy {
+		// 账号代理真的变了才清时区缓存；传原值(只改 IMAP 代理)不应触发重新解析。
 		acc.Timezone = ""
 	}
 	if err := m.save(); err != nil {

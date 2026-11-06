@@ -82,7 +82,7 @@ func TestAccountResponseNoSecrets(t *testing.T) {
 		t.Fatalf("期望 1 个账号,得到 %d", len(out.Data))
 	}
 	acc := out.Data[0]
-	for _, forbidden := range []string{"cookies", "app_password", "proxy"} {
+	for _, forbidden := range []string{"cookies", "app_password", "proxy", "imap_proxy"} {
 		if _, exists := acc[forbidden]; exists {
 			t.Fatalf("响应包含禁止键 %q", forbidden)
 		}

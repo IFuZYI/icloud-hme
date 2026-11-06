@@ -84,6 +84,22 @@ describe('ProxyDialog', () => {
     })
   })
 
+  it('先输入地址再勾选清除时以清除为准', async () => {
+    const user = userEvent.setup()
+    render(<ProxyDialog accountId="acc_1" open hasProxy hasIMAPProxy onClose={vi.fn()} onSaved={vi.fn()} />)
+
+    await user.type(screen.getByLabelText('代理地址'), 'http://u:p@127.0.0.1:8080')
+    await user.type(screen.getByLabelText('IMAP 代理地址'), 'socks5://u:p@127.0.0.1:1080')
+    await user.click(screen.getByLabelText('清除已配置的账号代理'))
+    await user.click(screen.getByLabelText('清除已配置的 IMAP 代理'))
+    await user.click(screen.getByRole('button', { name: '保存' }))
+
+    expect(mockedRequest).toHaveBeenCalledWith('/api/accounts/acc_1/proxy', {
+      method: 'PUT',
+      body: JSON.stringify({ proxy: '', imap_proxy: '' }),
+    })
+  })
+
   it('未配置代理时不显示清除勾选框', () => {
     render(<ProxyDialog accountId="acc_1" open onClose={vi.fn()} onSaved={vi.fn()} />)
     expect(screen.queryByLabelText(/清除已配置/)).not.toBeInTheDocument()

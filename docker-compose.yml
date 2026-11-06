@@ -20,7 +20,7 @@ services:
       dockerfile: Dockerfile
     # 默认使用已发布镜像: `docker compose pull && docker compose up -d`。
     # 仍保留 build 段: `docker compose up -d --build` 会本地构建并覆盖同名镜像。
-    image: ghcr.io/ifuzyi/icloud-hme:0.2.0
+    image: ghcr.io/ifuzyi/icloud-hme:0.2.1
     container_name: icloud-hme
     restart: unless-stopped
     init: true

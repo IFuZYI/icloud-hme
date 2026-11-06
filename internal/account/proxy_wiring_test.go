@@ -14,12 +14,12 @@ import (
 	"icloud-hme/internal/mailtest"
 )
 
-// TestMailPathsUseAccountProxy 验证账号代理被传给所有 IMAP 建连路径:
+// TestIMAPPathsUseIMAPProxy 验证 IMAP 专用代理被传给所有 IMAP 建连路径:
 // iCloud 读信(连接池 Do)、外部收件邮箱读信(DoWithServer)、
 // 绑定收件邮箱(测连接)、设置 App 专用密码(测连接)。
 //
-// 同一账号的 IMAP 出口必须与 HME API 一致; 漏传代理会让 IMAP 从服务器
-// 真实 IP 直连, 账号在服务商侧出现「多出口」画像, 是风控触发信号。
+// IMAP 与账号代理互相独立: IMAP 只认 imap_proxy, 留空即直连(见
+// TestIMAPPathsWithoutIMAPProxyGoDirect)。
 func TestIMAPPathsUseIMAPProxy(t *testing.T) {
 	srv := mailtest.NewServer(t, mailtest.Options{})
 	target := net.JoinHostPort(srv.Host, strconv.Itoa(srv.Port))

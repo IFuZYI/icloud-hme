@@ -55,6 +55,29 @@ func TestUpdateProxyHandlerForwardsBoth(t *testing.T) {
 	}
 }
 
+// TestCreateAccountForwardsIMAPProxy 验证创建账号时 imap_proxy 被转发到
+// account.AddAccountInput(否则创建后 IMAP 会直连)。
+func TestCreateAccountForwardsIMAPProxy(t *testing.T) {
+	f := &fakeBackend{}
+	_, ts := newTestServer(t, f)
+
+	sess, csrf := login(t, ts, "admin-pass-2026-strong")
+	req := authedReq(t, ts, "POST", "/api/accounts",
+		`{"name":"主号","icloud_email":"a@icloud.com","proxy":"http://u:p@127.0.0.1:8080","imap_proxy":"socks5://u:p@127.0.0.1:1080"}`)
+	req.AddCookie(&http.Cookie{Name: "hme_session", Value: sess})
+	req.Header.Set("X-CSRF-Token", csrf)
+	status, body, _ := do(t, req)
+	if status != http.StatusOK && status != http.StatusCreated {
+		t.Fatalf("期望创建成功, 得到 %d: %s", status, body)
+	}
+	if f.addedInput.Proxy != "http://u:p@127.0.0.1:8080" {
+		t.Fatalf("proxy 未转发: %q", f.addedInput.Proxy)
+	}
+	if f.addedInput.IMAPProxy != "socks5://u:p@127.0.0.1:1080" {
+		t.Fatalf("imap_proxy 未转发: %q", f.addedInput.IMAPProxy)
+	}
+}
+
 // TestUpdateProxyHandlerNeverEchoesProxy 验证响应体只暴露布尔, 不回显代理
 // 地址或凭据(代理串含 user:pass, 泄漏即凭据泄漏)。
 func TestUpdateProxyHandlerNeverEchoesProxy(t *testing.T) {

@@ -338,6 +338,9 @@ export default function AccountsPage() {
           open
           onClose={() => setProxyFor(null)}
           onSaved={() => {
+            // 关闭对话框: has_proxy/has_imap_proxy 来自账号快照, 关闭后重开才能
+            // 拿到最新值(否则「清除」勾选项仍是保存前的状态)。
+            setProxyFor(null)
             show('代理已更新')
             void load()
           }}

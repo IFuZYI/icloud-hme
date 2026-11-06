@@ -31,10 +31,11 @@ export default function ProxyDialog({ accountId, open, hasProxy = false, hasIMAP
   async function handleSubmit() {
     if (submitting) return
     const body: { proxy?: string; imap_proxy?: string } = {}
-    if (proxy.trim() !== '') body.proxy = proxy.trim()
-    else if (clearProxy) body.proxy = ''
-    if (imapProxy.trim() !== '') body.imap_proxy = imapProxy.trim()
-    else if (clearIMAPProxy) body.imap_proxy = ''
+    // 清除优先于输入: 勾选清除后输入框已禁用, 其残留值不得覆盖清除意图。
+    if (clearProxy) body.proxy = ''
+    else if (proxy.trim() !== '') body.proxy = proxy.trim()
+    if (clearIMAPProxy) body.imap_proxy = ''
+    else if (imapProxy.trim() !== '') body.imap_proxy = imapProxy.trim()
 
     if (Object.keys(body).length === 0) {
       setError('请填写代理地址，或勾选「清除」以移除已配置的代理')
@@ -92,7 +93,14 @@ export default function ProxyDialog({ accountId, open, hasProxy = false, hasIMAP
         />
         {hasProxy && (
           <label className="checkbox-inline">
-            <input type="checkbox" checked={clearProxy} onChange={(e) => setClearProxy(e.target.checked)} />
+            <input
+              type="checkbox"
+              checked={clearProxy}
+              onChange={(e) => {
+                setClearProxy(e.target.checked)
+                if (e.target.checked) setProxy('')
+              }}
+            />
             清除已配置的账号代理
           </label>
         )}
@@ -110,16 +118,30 @@ export default function ProxyDialog({ accountId, open, hasProxy = false, hasIMAP
         />
         {hasIMAPProxy && (
           <label className="checkbox-inline">
-            <input type="checkbox" checked={clearIMAPProxy} onChange={(e) => setClearIMAPProxy(e.target.checked)} />
+            <input
+              type="checkbox"
+              checked={clearIMAPProxy}
+              onChange={(e) => {
+                setClearIMAPProxy(e.target.checked)
+                if (e.target.checked) setImapProxy('')
+              }}
+            />
             清除已配置的 IMAP 代理
           </label>
         )}
         <p className="hint">
-          两个代理互不影响：上面的代理只管 iCloud Web/账号，IMAP 代理只管收信。输入框留空表示不改动该项；要移除已配置的代理，请勾选对应「清除」。出于安全考虑不回显当前值。
+          两个代理互不影响：上面的代理只管 iCloud Web/账号，IMAP 代理只管收信。输入框留空表示不改动该项；要移除已配置的代理，请勾选对应「清除」（清除后该通道直连，IMAP 直连会暴露服务器真实 IP）。出于安全考虑不回显当前值。
         </p>
       </div>
       <div className="form-actions">
-        <button onClick={onClose}>取消</button>
+        <button
+          onClick={() => {
+            reset()
+            onClose()
+          }}
+        >
+          取消
+        </button>
         <button className="primary" onClick={() => void handleSubmit()} disabled={submitting}>
           {submitting ? '保存中…' : '保存'}
         </button>

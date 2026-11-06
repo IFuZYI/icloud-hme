@@ -556,6 +556,98 @@ func TestUpdateProxiesSameValueKeepsTimezone(t *testing.T) {
 	}
 }
 
+// TestUpdateProxiesIMAPOnlyChangeKeepsTimezone 验证只改 IMAP 代理(账号代理传原值)
+// 不应清掉账号代理的时区缓存。
+func TestUpdateProxiesIMAPOnlyChangeKeepsTimezone(t *testing.T) {
+	m, err := NewManager(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+
+	const proxy = "http://u:p@127.0.0.1:8080"
+	sum, err := m.AddAccountWithInput(AddAccountInput{Name: "主号", ICloudEmail: "a@icloud.com", Proxy: proxy})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	m.accounts[sum.ID].Timezone = "Europe/Berlin"
+	m.mu.Unlock()
+
+	sameProxy := proxy
+	newIMAP := "socks5://u:p@127.0.0.1:1080"
+	if _, err := m.UpdateProxies(sum.ID, &sameProxy, &newIMAP); err != nil {
+		t.Fatalf("UpdateProxies: %v", err)
+	}
+	if got := accountByID(t, m, sum.ID).Timezone; got != "Europe/Berlin" {
+		t.Fatalf("账号代理未变时不应清时区缓存, 实际 %q", got)
+	}
+}
+
+// TestIMAPProxyPersistsAcrossReload 验证 imap_proxy 能落盘并在重启后加载
+// (JSON tag 写错会在这里暴露)。
+func TestIMAPProxyPersistsAcrossReload(t *testing.T) {
+	dir := t.TempDir()
+	m, err := NewManager(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const imapProxy = "socks5://u:p@127.0.0.1:1080"
+	sum, err := m.AddAccountWithInput(AddAccountInput{Name: "主号", ICloudEmail: "a@icloud.com", IMAPProxy: imapProxy})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Close()
+
+	reloaded, err := NewManager(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reloaded.Close()
+	if got := accountByID(t, reloaded, sum.ID).IMAPProxy; got != imapProxy {
+		t.Fatalf("重启后 IMAP 代理应为 %q, 实际 %q", imapProxy, got)
+	}
+}
+
+// TestUpdateProxiesSaveFailureRollsBack 验证落盘失败时 Proxy/IMAPProxy/Timezone
+// 全部回滚, 不留「内存已换、磁盘未换」的不一致。
+func TestUpdateProxiesSaveFailureRollsBack(t *testing.T) {
+	dir := t.TempDir()
+	m, err := NewManager(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+
+	const oldProxy = "http://u:p@127.0.0.1:8080"
+	sum, err := m.AddAccountWithInput(AddAccountInput{Name: "主号", ICloudEmail: "a@icloud.com", Proxy: oldProxy})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	m.accounts[sum.ID].Timezone = "Europe/Berlin"
+	m.mu.Unlock()
+
+	// 让 save() 必然失败: accounts.json 变成目录。
+	dataFile := filepath.Join(dir, "accounts.json")
+	if err := os.Remove(dataFile); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(dataFile, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	newProxy := "http://u:p@127.0.0.1:8081"
+	newIMAP := "socks5://u:p@127.0.0.1:1080"
+	if _, err := m.UpdateProxies(sum.ID, &newProxy, &newIMAP); err == nil {
+		t.Fatal("落盘失败应返回错误")
+	}
+	acc := accountByID(t, m, sum.ID)
+	if acc.Proxy != oldProxy || acc.IMAPProxy != "" || acc.Timezone != "Europe/Berlin" {
+		t.Fatalf("落盘失败应全字段回滚, 实际 proxy=%q imap=%q tz=%q", acc.Proxy, acc.IMAPProxy, acc.Timezone)
+	}
+}
+
 // TestUpdateProxiesUnknownAccount 验证账号不存在时返回错误。
 func TestUpdateProxiesUnknownAccount(t *testing.T) {
 	m, err := NewManager(t.TempDir())
