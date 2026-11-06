@@ -211,39 +211,39 @@ export default function AccountsPage() {
                 <th>邮箱</th>
                 <th>状态</th>
                 <th>别名</th>
-                <th>凭据</th>
+                <th>配置</th>
                 <th>最近验证</th>
                 <th>操作</th>
               </tr>
             </thead>
             <tbody>
               {accounts.map((acc) => (
-                <tr key={acc.id}>
-                  <td data-label="名称">
+                <tr key={acc.id} className="account-row">
+                  <td data-label="名称" className="account-name">
                     <span className="cell-truncate" title={acc.name}>
                       {acc.name}
                     </span>
                     {acc.status_message && (
-                      <span className="hint" style={{ display: 'block' }}>
-                        {acc.status_message}
-                      </span>
+                      <span className="hint account-status-message">{acc.status_message}</span>
                     )}
                   </td>
-                  <td data-label="邮箱">
+                  <td data-label="邮箱" className="account-email">
                     <span className="cell-truncate" title={acc.icloud_email || acc.real_email || ''}>
                       {acc.icloud_email || acc.real_email || '—'}
                     </span>
                     <span className="cell-secondary">{acc.id}</span>
                   </td>
-                  <td data-label="状态">
-                    <StatusBadge status={acc.status} />
+                  <td data-label="状态" className="account-status">
+                    <span title={acc.status_message || undefined}>
+                      <StatusBadge status={acc.status} />
+                    </span>
                   </td>
-                  <td data-label="别名">
+                  <td data-label="别名" className="account-alias">
                     <span className="cell-strong alias-count">
                       {acc.alias_active} / {acc.alias_total}
                     </span>
                   </td>
-                  <td data-label="凭据">
+                  <td data-label="配置" className="account-creds">
                     <span className="cred-chips">
                       {(() => {
                         const chips = credChips(acc)
@@ -257,8 +257,8 @@ export default function AccountsPage() {
                       })()}
                     </span>
                   </td>
-                  <td data-label="最近验证"><span className="cell-nowrap">{formatValidated(acc.last_validated)}</span></td>
-                  <td data-label="操作" className="cell-actions">
+                  <td data-label="最近验证" className="account-validated"><span className="cell-nowrap">{formatValidated(acc.last_validated)}</span></td>
+                  <td data-label="操作" className="cell-actions account-actions">
                     <div className="account-row-actions">
                       <button className="account-edit-button" onClick={() => { setEditing(acc); setFormSession((session) => session + 1); setFormOpen(true) }}>
                         <IconEdit size={14} />
@@ -271,6 +271,8 @@ export default function AccountsPage() {
                       <MoreActionsDropdown
                         accountName={acc.name}
                         onAction={(action) => handleMoreAction(acc, action)}
+                        onEdit={() => { setEditing(acc); setFormSession((session) => session + 1); setFormOpen(true) }}
+                        onDelete={() => setDeleteFor(acc)}
                         checkDisabled={!acc.has_cookies}
                       />
                     </div>

@@ -253,9 +253,9 @@ export default function KeysPage() {
             </thead>
             <tbody>
               {keys.map((k) => (
-                <tr key={k.id}>
-                  <td data-label="名称">{k.name}</td>
-                  <td data-label="秘钥" className="key-cell">
+                <tr key={k.id} className="key-row">
+                  <td data-label="名称" className="key-name">{k.name}</td>
+                  <td data-label="秘钥" className="key-cell key-secret">
                     <code className={revealed.has(k.id) ? 'key-value' : 'key-value masked'}>
                       {revealed.has(k.id) ? k.key : maskKey(k.key)}
                     </code>
@@ -276,18 +276,18 @@ export default function KeysPage() {
                       复制
                     </button>
                   </td>
-                  <td data-label="权限">{k.permissions.length > 0 ? `${k.permissions.length} 项` : '无权限'}</td>
-                  <td data-label="账号范围">
+                  <td data-label="权限" className="key-perm">{k.permissions.length > 0 ? `${k.permissions.length} 项` : '无权限'}</td>
+                  <td data-label="账号范围" className="key-scope">
                     {!k.account_ids || k.account_ids.length === 0
                       ? '全部账号'
                       : `${k.account_ids.length} 个账号`}
                   </td>
-                  <td data-label="状态">
+                  <td data-label="状态" className="key-status">
                     <span className={k.enabled ? 'badge badge-active' : 'badge badge-neutral'}>
                       {k.enabled ? '已启用' : '已停用'}
                     </span>
                   </td>
-                  <td data-label="最近使用">
+                  <td data-label="最近使用" className="key-used">
                     {k.last_used_at ? (
                       <span title={k.last_used_ip ?? ''}>{formatKeyTime(k.last_used_at)}</span>
                     ) : (

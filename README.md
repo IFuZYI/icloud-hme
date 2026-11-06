@@ -67,10 +67,10 @@ docker run -d \
 
 镜像支持 `linux/amd64` 和 `linux/arm64` 双架构，自动适配。
 
-#### 方式三：源码编译（需要 Go 1.26+ 与 Node.js 22.12+ 双工具链）
+#### 方式三：源码编译（需要 Go 1.26.10+ 与 Node.js 22.12+ 双工具链）
 
 ```bash
-# 前置要求: Go 1.26+、Node.js 22.12+
+# 前置要求: Go 1.26.10+、Node.js 22.12+
 git clone https://github.com/IFuZYI/icloud-hme.git
 cd icloud-hme
 
@@ -136,7 +136,7 @@ docker compose up -d --build
 docker compose down
 ```
 
-> **镜像标签**：`docker-compose.yml` 默认使用 `ghcr.io/ifuzyi/icloud-hme:latest`，`docker compose pull` 会跟随最新发布。生产环境如需可复现/可回滚，把 `image:` 改成固定版本（如 `:0.2.1`）；`latest` 每次发布都会移动，回滚时需手动指定旧标签。
+> **镜像标签**：`docker-compose.yml` 默认使用 `ghcr.io/ifuzyi/icloud-hme:latest`，`docker compose pull` 会跟随最新发布。生产环境如需可复现/可回滚，把 `image:` 改成固定版本（如 `:0.2.2`）；`latest` 每次发布都会移动，回滚时需手动指定旧标签。
 
 说明：
 
@@ -173,7 +173,7 @@ cp .env.example .env      # 然后修改 ICLOUD_HME_ADMIN_PASSWORD
 | `ICLOUD_HME_LOG_FORMAT` | 日志格式 `text`（易读）或 `json`（便于日志系统采集） | `text` |
 | `ICLOUD_HME_LOG_DIR` | 应用日志持久化目录，按大小滚动（10MB×5）；设为空串则只输出到容器日志、不落盘 | `<数据目录>/logs`（Docker 下为 `/app/data/logs`） |
 
-> **Breaking Change（v0.3+）**：升级后未设置 `ICLOUD_HME_ADMIN_PASSWORD` 将拒绝启动；
+> **Breaking Change（v0.2+）**：升级后未设置 `ICLOUD_HME_ADMIN_PASSWORD` 将拒绝启动；
 > 原有匿名 API 调用将收到 `401 AUTH_REQUIRED`。管理员会话只存内存，进程重启即失效。
 
 ### 3. 配置账号
@@ -843,7 +843,7 @@ icloud-hme/
 
 ## 技术栈
 
-- **Go 1.26+** / **Gin** — HTTP 框架
+- **Go 1.26.10+** / **Gin** — HTTP 框架
 - **React 19 + TypeScript + Vite 8** — 管理界面
 - **go-imap** — IMAP 协议实现
 - **tls-client** — TLS 指纹模拟 (绕过 iCloud 反爬)
@@ -892,10 +892,12 @@ GOOS=windows GOARCH=amd64 go build -o icloud-hme.exe .
 
 ### 发布
 
+发布前更新 [CHANGELOG.md](CHANGELOG.md)，构建需要 Go `1.26.10` 或更高补丁版本（标准库漏洞修复）。
+
 推送 `v*` tag 到 GitHub 自动触发 CI：
 
 ```bash
-git tag v0.2.0 && git push origin --tags
+git tag v0.2.2 && git push origin --tags
 ```
 
 Actions 会自动构建多平台二进制、Docker 镜像（`ghcr.io/ifuzyi/icloud-hme`）并创建 Release。
@@ -995,7 +997,7 @@ docker compose up -d
 docker compose ps
 ```
 
-#### Option 4: Build from source (Go 1.26+ and Node.js 22.12+)
+#### Option 4: Build from source (Go 1.26.10+ and Node.js 22.12+)
 
 ```bash
 git clone https://github.com/IFuZYI/icloud-hme.git
@@ -1019,8 +1021,9 @@ go build -o icloud-hme .
 | `ICLOUD_HME_SECURE_COOKIE` | Set `true` when deployed behind TLS | `false` |
 | `ICLOUD_HME_LOG_LEVEL` | Log level `debug`/`info`/`warn`/`error`; set `debug` to trace every request and auth failure | `info` |
 | `ICLOUD_HME_LOG_FORMAT` | Log format `text` (human-readable) or `json` (for log pipelines) | `text` |
+| `ICLOUD_HME_IMAP_TIMEOUT` | IMAP overall budget (envelope floor + body/preview budget), raise it on slow networks | `30s` (range `5s`–`10m`) |
 | `ICLOUD_HME_LOG_DIR` | Directory for persisted app logs, size-rotated (10MB×5); empty string disables file output (container logs only) | `<data dir>/logs` (`/app/data/logs` in Docker) |
 
-> **Breaking change (v0.3+)**: without `ICLOUD_HME_ADMIN_PASSWORD` the server refuses to start; all API endpoints now require login (`401 AUTH_REQUIRED`). Admin sessions are in-memory only and are lost on restart.
+> **Breaking change (v0.2+)**: without `ICLOUD_HME_ADMIN_PASSWORD` the server refuses to start; all API endpoints now require login (`401 AUTH_REQUIRED`). Admin sessions are in-memory only and are lost on restart.
 
 Create `data/accounts.json` (see `accounts.json.template`) and start the server (default port `:8081`). Open `http://localhost:8081` to use the management UI. Full API contract: [API.md](API.md).

@@ -36,11 +36,15 @@ interface MoreActionsDropdownProps {
   accountName: string
   onAction: (action: AccountAction) => void
   disabled?: boolean
+  /** 编辑账号(移动端行内只保留一个「更多」入口时仍可触达)。 */
+  onEdit?: () => void
+  /** 删除账号(同上, 危险项单独成组)。 */
+  onDelete?: () => void
   /** 禁用「检测状态」项(账号无 Cookie 时无意义)。 */
   checkDisabled?: boolean
 }
 
-export default function MoreActionsDropdown({ accountName, onAction, disabled = false, checkDisabled = false }: MoreActionsDropdownProps) {
+export default function MoreActionsDropdown({ accountName, onAction, disabled = false, onEdit, onDelete, checkDisabled = false }: MoreActionsDropdownProps) {
   const [open, setOpen] = useState(false)
   const [position, setPosition] = useState({ top: 0, left: 0 })
   const buttonRef = useRef<HTMLButtonElement>(null)
@@ -118,9 +122,24 @@ export default function MoreActionsDropdown({ accountName, onAction, disabled = 
           style={{ top: position.top, left: position.left }}
           onKeyDown={handleKeyDown}
         >
+          {(onEdit || onDelete) && (
+            <div className="account-action-group">
+              <p>账号</p>
+              {onEdit && (
+                <button type="button" role="menuitem" onClick={() => { setOpen(false); onEdit() }}>
+                  <span>编辑账号</span>
+                </button>
+              )}
+              {onDelete && (
+                <button type="button" role="menuitem" className="danger" onClick={() => { setOpen(false); onDelete() }}>
+                  <span>删除账号</span>
+                </button>
+              )}
+            </div>
+          )}
           {groups.map((group, index) => (
             <div className="account-action-group" key={group.title}>
-              {index > 0 && <div className="account-action-divider" role="separator" />}
+              {(index > 0 || onEdit || onDelete) && <div className="account-action-divider" role="separator" />}
               <p>{group.title}</p>
               {group.items.map((item) => {
                 const itemDisabled = item.key === 'check' && checkDisabled

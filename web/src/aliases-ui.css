@@ -124,3 +124,147 @@
   .aliases-page .aliases-batch-actions { justify-content: flex-start; }
   .aliases-page .aliases-batch-actions button { min-height: 44px; }
 }
+
+/* 移动端别名卡片: 原表格 min-width 720px 被 overflow:hidden 裁掉右侧列,
+   手机上根本看不到「状态/创建时间/操作」。这里改为紧凑卡片:
+   复选框左上、邮箱一行、标签/状态/时间一行、操作一行。 */
+@media (max-width: 1023px) {
+  .aliases-page .aliases-table-card {
+    overflow: visible;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+  }
+
+  .aliases-page .aliases-table {
+    display: block;
+    min-width: 0;
+  }
+
+  .aliases-page .aliases-table thead {
+    display: none;
+  }
+
+  .aliases-page .aliases-table tbody {
+    display: block;
+  }
+
+  .aliases-page .aliases-table tbody tr {
+    position: relative;
+    display: grid;
+    grid-template-columns: auto auto minmax(0, 1fr);
+    grid-template-areas:
+      'aemail aemail aemail'
+      'alabel astatus adate'
+      'aactions aactions aactions';
+    gap: 4px 10px;
+    margin-bottom: 10px;
+    padding: 12px 14px 12px 46px;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    background: var(--color-bg-raised);
+    box-shadow: var(--shadow-xs);
+  }
+
+  .aliases-page .aliases-table tbody tr:hover {
+    background: var(--color-bg-raised);
+  }
+
+  .aliases-page .aliases-table tbody td {
+    display: block;
+    padding: 0;
+    border: 0;
+    min-width: 0;
+  }
+
+  .aliases-page .aliases-table tbody td::before {
+    content: none;
+  }
+
+  .aliases-page .aliases-table tbody td.aliases-select-column {
+    position: absolute;
+    top: 12px;
+    left: 14px;
+    width: auto;
+  }
+
+  .aliases-page .aliases-table tbody td.aliases-select-column input {
+    width: 20px;
+    height: 20px;
+  }
+
+  .aliases-page .aliases-table tbody td[data-label='邮箱'] {
+    grid-area: aemail;
+  }
+
+  .aliases-page .aliases-email-cell {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  .aliases-page .aliases-email {
+    overflow: hidden;
+    font-size: 14px;
+    font-weight: 600;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .aliases-page .aliases-copy-btn {
+    flex: none;
+    width: 44px;
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .aliases-page .aliases-table tbody td[data-label='标签'] {
+    grid-area: alabel;
+    align-self: center;
+    font-size: 12px;
+    color: var(--color-text-tertiary);
+  }
+
+  .aliases-page .aliases-table tbody td[data-label='状态'] {
+    grid-area: astatus;
+    align-self: center;
+  }
+
+  .aliases-page .aliases-table tbody td[data-label='创建时间'] {
+    grid-area: adate;
+    align-self: center;
+    justify-self: end;
+    font-size: 12px;
+    color: var(--color-text-tertiary);
+  }
+
+  .aliases-page .aliases-table tbody td[data-label='操作'] {
+    grid-area: aactions;
+    margin-top: 4px;
+    padding-top: 6px;
+    border-top: 1px solid color-mix(in srgb, var(--color-border) 60%, transparent);
+  }
+
+  .aliases-page .aliases-actions {
+    justify-content: flex-end;
+    width: 100%;
+  }
+
+  .aliases-page .aliases-actions .aliases-ghost-icon-btn {
+    min-height: 44px;
+    padding-inline: 12px;
+  }
+
+  .aliases-page .aliases-actions .row-action-button {
+    width: 44px;
+    min-width: 44px;
+    min-height: 44px;
+  }
+}
+
+/* 触屏没有 hover: 复制按钮必须常显, 否则 44px 热区不可见。 */
+@media (hover: none), (pointer: coarse) {
+  .aliases-page .aliases-copy-btn { opacity: 1; }
+}

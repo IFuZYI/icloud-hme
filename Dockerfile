@@ -13,7 +13,7 @@ COPY web/ ./
 RUN npm run build
 
 # ── 第二阶段:编译 Go 二进制(含内嵌前端) ──
-FROM golang:1.27-alpine AS builder
+FROM golang:1.26.10-alpine AS builder
 RUN apk add --no-cache git ca-certificates
 WORKDIR /build
 COPY go.mod go.sum ./

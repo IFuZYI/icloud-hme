@@ -235,6 +235,41 @@ describe('AccountsPage', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
   })
 
+  it('「更多」菜单的编辑/删除入口可用(移动端唯一入口)', async () => {
+    let deletedId = ''
+    server.use(
+      http.get('/api/accounts', () => HttpResponse.json({ success: true, data: accounts })),
+      http.delete('/api/accounts/:id', ({ params }) => {
+        deletedId = String(params.id)
+        return HttpResponse.json({ success: true, data: { id: deletedId } })
+      }),
+    )
+    renderPage()
+    await screen.findByText('活跃号')
+    const user = userEvent.setup()
+
+    await user.click(screen.getAllByRole('button', { name: /更多操作/ })[0])
+    await user.click(screen.getByRole('menuitem', { name: '编辑账号' }))
+    let dialog = await screen.findByRole('dialog')
+    expect(within(dialog).getByText('编辑账号')).toBeInTheDocument()
+    expect(within(dialog).getByLabelText('名称')).toHaveValue('活跃号')
+    await user.click(within(dialog).getByRole('button', { name: /取消/ }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+
+    await user.click(screen.getAllByRole('button', { name: /更多操作/ })[0])
+    await user.click(screen.getByRole('menuitem', { name: '删除账号' }))
+    dialog = await screen.findByRole('dialog')
+    expect(within(dialog).getByText('删除账号')).toBeInTheDocument()
+    // 绑定的是被点击的那一行, 而不是列表里的第一个账号。
+    expect(within(dialog).getByText(/活跃号/)).toBeInTheDocument()
+    const confirm = within(dialog).getByRole('button', { name: '确认删除' })
+    expect(confirm).toBeDisabled()
+    await user.type(within(dialog).getByLabelText('输入账号名称'), '活跃号')
+    expect(confirm).toBeEnabled()
+    await user.click(confirm)
+    await waitFor(() => expect(deletedId).toBe('acc_active'))
+  })
+
   it('只配账号代理时显示「IMAP直连」警示标签', async () => {
     server.use(http.get('/api/accounts', () => HttpResponse.json({ success: true, data: accounts })))
     renderPage()
@@ -260,7 +295,7 @@ describe('AccountsPage', () => {
     const user = userEvent.setup()
     await user.click(screen.getAllByRole('button', { name: /更多操作/ })[0])
     await user.click(screen.getByRole('menuitem', { name: '网络代理' }))
-    const input = screen.getByLabelText('代理地址') as HTMLInputElement
+    const input = screen.getByLabelText('账号代理地址') as HTMLInputElement
     expect(input.value).toBe('')
     await user.type(input, 'http://u:p@proxy.example.com:8080')
     await user.click(screen.getByRole('button', { name: /保存/ }))
@@ -270,7 +305,7 @@ describe('AccountsPage', () => {
     expect(proxyBody).toEqual({ proxy: 'http://u:p@proxy.example.com:8080' })
     await user.click(screen.getAllByRole('button', { name: /更多操作/ })[0])
     await user.click(screen.getByRole('menuitem', { name: '网络代理' }))
-    expect((screen.getByLabelText('代理地址') as HTMLInputElement).value).toBe('')
+    expect((screen.getByLabelText('账号代理地址') as HTMLInputElement).value).toBe('')
     expect((screen.getByLabelText('IMAP 代理地址') as HTMLInputElement).value).toBe('')
   })
 

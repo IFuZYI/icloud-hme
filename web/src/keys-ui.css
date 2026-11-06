@@ -8,6 +8,7 @@
   flex-wrap: wrap;
 }
 
+/* 秘钥是「复制」而不是「阅读」的内容: 永远单行, 超长省略, 完整值靠复制按钮。 */
 .key-value {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: var(--text-sm);
@@ -15,7 +16,10 @@
   border-radius: 6px;
   background: var(--color-bg-subtle);
   border: 1px solid var(--color-border);
-  word-break: break-all;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .key-value.masked {
@@ -110,5 +114,117 @@
   .permission-item {
     min-height: 44px;
     padding: 0;
+  }
+}
+
+
+/* 移动端秘钥卡片: 名称/状态 → 秘钥 → 权限/范围/最近使用 → 操作, 约 150px 高。
+   通用「标签 + 值」两栏会让每张卡到 ~440px。 */
+@media (max-width: 1023px) {
+  .table-wrap tbody tr.key-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-areas:
+      'kname kname kstatus'
+      'ksecret ksecret ksecret'
+      'kperm kscope kused'
+      'kactions kactions kactions';
+    gap: 3px 10px;
+    padding: 12px 14px;
+  }
+
+  .table-wrap tbody tr.key-row td {
+    display: block;
+    padding: 0;
+    border: 0;
+    text-align: left;
+    min-width: 0;
+  }
+
+  .table-wrap tbody tr.key-row td::before {
+    content: none;
+  }
+
+  .table-wrap tbody tr.key-row td.key-name {
+    grid-area: kname;
+    font-size: 15px;
+    font-weight: 600;
+  }
+
+  .table-wrap tbody tr.key-row td.key-status {
+    grid-area: kstatus;
+    justify-self: end;
+  }
+
+  .table-wrap tbody tr.key-row td.key-secret {
+    grid-area: ksecret;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 6px;
+    margin-top: 2px;
+  }
+
+  .table-wrap tbody tr.key-row td.key-secret .key-value {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .table-wrap tbody tr.key-row td.key-secret .link-button {
+    flex: none;
+    min-height: 44px;
+    padding-inline: 8px;
+  }
+
+  .table-wrap tbody tr.key-row td.key-perm,
+  .table-wrap tbody tr.key-row td.key-scope,
+  .table-wrap tbody tr.key-row td.key-used {
+    font-size: 12px;
+    color: var(--color-text-tertiary);
+  }
+
+  /* 显式指定网格区域: 不依赖 <td> 的 DOM 顺序。 */
+  .table-wrap tbody tr.key-row td.key-perm { grid-area: kperm; }
+  .table-wrap tbody tr.key-row td.key-scope { grid-area: kscope; }
+  .table-wrap tbody tr.key-row td.key-used { grid-area: kused; }
+
+  .table-wrap tbody tr.key-row td.key-perm::before {
+    content: '权限 ';
+  }
+
+  .table-wrap tbody tr.key-row td.key-scope::before {
+    content: '范围 ';
+  }
+
+  .table-wrap tbody tr.key-row td.key-used {
+    justify-self: end;
+  }
+
+  .table-wrap tbody tr.key-row td.key-used::before {
+    content: '最近 ';
+  }
+
+  .table-wrap tbody tr.key-row td.key-row-actions {
+    grid-area: kactions;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 2px;
+    margin-top: 4px;
+    padding-top: 6px;
+    border-top: 1px solid color-mix(in srgb, var(--color-border) 60%, transparent);
+  }
+
+  .table-wrap tbody tr.key-row td.key-row-actions .link-button {
+    min-height: 44px;
+    padding-inline: 10px;
+  }
+}
+
+/* 桌面表格: 128 字符的明文秘钥不撑宽整张表(移动端卡片已单行省略)。 */
+@media (min-width: 1024px) {
+  .table-wrap tbody tr.key-row td.key-secret .key-value {
+    max-width: 360px;
   }
 }

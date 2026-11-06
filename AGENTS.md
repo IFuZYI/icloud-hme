@@ -4,8 +4,8 @@ iCloud Hide My Email (HME) 多账号管理平台：单个 Go 二进制（Gin API
 
 ## 工具链
 
-- Go 1.26+（`go.mod` 声明 `go 1.26`）、Node.js 22+（CI 用 22；本机 Node 26 已验证可构建）。
-- 当前开发机**未安装 Go**（`go` 不在 PATH）：Go 测试/构建前需先装 Go 1.26+，或改用容器构建（见下）。
+- Go 1.26.10+（`go.mod` 声明 `go 1.26.0` 并带 `toolchain go1.26.10`，低版本会自动切换；标准库漏洞在 1.26.10 修复）、Node.js 22.12+（CI 用 22；本机 Node 26 已验证可构建）。
+- 若 `go` 不在 PATH：先安装 Go 1.26.10+，或改用容器构建（见下）。
 - 前端依赖未装时先 `npm --prefix web ci`（锁定版本，勿用 `npm install`）。
 
 ## 命令（均已从仓库配置中核实）

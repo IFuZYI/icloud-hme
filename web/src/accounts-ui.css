@@ -8,7 +8,7 @@
 .account-more-button::before { content: '⋯'; font-size: 20px; line-height: 1; letter-spacing: 1px; }
 .account-more-button:hover:not(:disabled) { background: var(--color-bg-subtle); color: var(--color-text); }
 .account-more-button:focus-visible, .account-more-popover button:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
-.account-more-popover { position: fixed; z-index: var(--z-dialog); width: 208px; max-width: calc(100vw - 24px); padding: 6px; border: 1px solid var(--color-border); border-radius: var(--radius-lg); background: color-mix(in srgb, var(--color-bg-raised) 94%, transparent); box-shadow: var(--shadow-md); backdrop-filter: saturate(180%) blur(20px); -webkit-backdrop-filter: saturate(180%) blur(20px); animation: popover-enter 180ms var(--ease-apple) both; }
+.account-more-popover { position: fixed; z-index: var(--z-dialog); width: 208px; max-width: calc(100vw - 24px); max-height: calc(100dvh - 16px); overflow-y: auto; overscroll-behavior: contain; padding: 6px; border: 1px solid var(--color-border); border-radius: var(--radius-lg); background: color-mix(in srgb, var(--color-bg-raised) 94%, transparent); box-shadow: var(--shadow-md); backdrop-filter: saturate(180%) blur(20px); -webkit-backdrop-filter: saturate(180%) blur(20px); animation: popover-enter 180ms var(--ease-apple) both; }
 .account-action-group > p { margin: 5px 10px 4px; color: var(--color-text-tertiary); font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
 .account-action-group button { display: flex; align-items: center; gap: 9px; width: 100%; min-height: 34px; padding: 8px 10px; border: 0; border-radius: 8px; background: transparent; color: var(--color-text); font: inherit; font-size: var(--text-sm); text-align: left; cursor: pointer; }
 .account-action-group button:hover { background: var(--color-bg-subtle); }
@@ -45,4 +45,153 @@
   .account-row-actions { gap: 2px; }
   .account-edit-button, .account-delete-button { padding: 5px 7px; }
   .account-more-popover { width: min(208px, calc(100vw - 16px)); }
+}
+
+/* 移动端账号卡片: 通用「标签 + 值」两栏会把 7 个字段堆成 ~292px 高。
+   这里改成信息块布局: 名称/状态一行、邮箱一行、别名/验证一行、配置一行、
+   操作一行; 行内「编辑/删除」收进「更多」菜单, 只留一个 44px 触控入口。 */
+@media (max-width: 1023px) {
+  .table-wrap tbody tr.account-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      'name status'
+      'email email'
+      'alias validated'
+      'creds creds'
+      'actions actions';
+    gap: 3px 10px;
+    padding: 12px 14px;
+  }
+
+  .table-wrap tbody tr.account-row td {
+    display: block;
+    padding: 0;
+    border: 0;
+    text-align: left;
+    min-width: 0;
+  }
+
+  .table-wrap tbody tr.account-row td::before {
+    content: none;
+  }
+
+  .table-wrap tbody tr.account-row td.account-name {
+    grid-area: name;
+    font-size: 15px;
+    font-weight: 600;
+    line-height: 1.4;
+  }
+
+  /* 状态说明与徽章重复, 手机上用徽章的 title 承载详情 */
+  .table-wrap tbody tr.account-row td.account-name .account-status-message {
+    display: none;
+  }
+
+  .table-wrap tbody tr.account-row td.account-status {
+    grid-area: status;
+    justify-self: end;
+  }
+
+  .table-wrap tbody tr.account-row td.account-email {
+    grid-area: email;
+  }
+
+  .table-wrap tbody tr.account-row td.account-email .cell-truncate {
+    display: block;
+    overflow: hidden;
+    font-size: 13px;
+    color: var(--color-text-secondary);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* 账号 ID 只在桌面显示: 手机上一行放不下, 也不常读 */
+  .table-wrap tbody tr.account-row td.account-email .cell-secondary {
+    display: none;
+  }
+
+  .table-wrap tbody tr.account-row td.account-alias {
+    grid-area: alias;
+    font-size: 12px;
+    color: var(--color-text-tertiary);
+  }
+
+  .table-wrap tbody tr.account-row td.account-alias::before {
+    content: '别名 ';
+  }
+
+  .table-wrap tbody tr.account-row td.account-alias .cell-strong {
+    color: var(--color-text-secondary);
+    font-weight: 500;
+  }
+
+  .table-wrap tbody tr.account-row td.account-validated {
+    grid-area: validated;
+    justify-self: end;
+    font-size: 12px;
+    color: var(--color-text-tertiary);
+  }
+
+  .table-wrap tbody tr.account-row td.account-validated::before {
+    content: '验证 ';
+  }
+
+  .table-wrap tbody tr.account-row td.account-creds {
+    grid-area: creds;
+    margin-top: 2px;
+  }
+
+  .table-wrap tbody tr.account-row td.account-creds .cred-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+
+  .table-wrap tbody tr.account-row td.account-creds .cred-chip {
+    padding: 1px 7px;
+    font-size: 11px;
+  }
+
+  .table-wrap tbody tr.account-row td.account-actions {
+    grid-area: actions;
+    margin-top: 4px;
+    padding-top: 6px;
+    border-top: 1px solid color-mix(in srgb, var(--color-border) 60%, transparent);
+  }
+
+  .table-wrap tbody tr.account-row td.account-actions .account-edit-button,
+  .table-wrap tbody tr.account-row td.account-actions .account-delete-button {
+    display: none;
+  }
+
+  .table-wrap tbody tr.account-row td.account-actions .account-row-actions {
+    width: 100%;
+    justify-content: flex-end;
+  }
+
+  .table-wrap tbody tr.account-row td.account-actions .account-more-button {
+    width: 44px;
+    min-width: 44px;
+    min-height: 44px;
+  }
+}
+
+.account-action-group button.danger {
+  color: var(--color-danger);
+}
+
+.account-action-group button.danger:hover {
+  background: var(--color-danger-soft);
+}
+
+.account-status-message {
+  display: block;
+}
+
+/* 触控设备菜单项 44px: ≤1023px 行内编辑/删除被隐藏, 弹层是唯一入口。 */
+@media (max-width: 1023px) {
+  .account-action-group button {
+    min-height: 44px;
+  }
 }

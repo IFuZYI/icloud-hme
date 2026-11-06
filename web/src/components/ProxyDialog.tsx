@@ -28,19 +28,16 @@ export default function ProxyDialog({ accountId, open, hasProxy = false, hasIMAP
   const [error, setError] = useState('')
   const [submitting, setSubmitting] = useState(false)
 
+  const dirty = proxy.trim() !== '' || imapProxy.trim() !== '' || clearProxy || clearIMAPProxy
+
   async function handleSubmit() {
-    if (submitting) return
+    if (submitting || !dirty) return
     const body: { proxy?: string; imap_proxy?: string } = {}
     // 清除优先于输入: 勾选清除后输入框已禁用, 其残留值不得覆盖清除意图。
     if (clearProxy) body.proxy = ''
     else if (proxy.trim() !== '') body.proxy = proxy.trim()
     if (clearIMAPProxy) body.imap_proxy = ''
     else if (imapProxy.trim() !== '') body.imap_proxy = imapProxy.trim()
-
-    if (Object.keys(body).length === 0) {
-      setError('请填写代理地址，或勾选「清除」以移除已配置的代理')
-      return
-    }
 
     setSubmitting(true)
     setError('')
@@ -81,15 +78,19 @@ export default function ProxyDialog({ accountId, open, hasProxy = false, hasIMAP
         </div>
       )}
       <div className="form-field">
-        <label htmlFor="proxy-input">代理地址</label>
+        <div className="field-label-row">
+          <label htmlFor="proxy-input">账号代理地址</label>
+          {hasProxy && <span className="field-status">已配置</span>}
+        </div>
         <input
           id="proxy-input"
           type="text"
           value={proxy}
           onChange={(e) => setProxy(e.target.value)}
-          placeholder="http://user:pass@host:port"
+          placeholder="例如 http://user:pass@host:port"
           autoComplete="off"
           disabled={clearProxy}
+          aria-describedby="proxy-dialog-hint"
         />
         {hasProxy && (
           <label className="checkbox-inline">
@@ -106,15 +107,19 @@ export default function ProxyDialog({ accountId, open, hasProxy = false, hasIMAP
         )}
       </div>
       <div className="form-field">
-        <label htmlFor="imap-proxy-input">IMAP 代理地址</label>
+        <div className="field-label-row">
+          <label htmlFor="imap-proxy-input">IMAP 代理地址</label>
+          {hasIMAPProxy && <span className="field-status">已配置</span>}
+        </div>
         <input
           id="imap-proxy-input"
           type="text"
           value={imapProxy}
           onChange={(e) => setImapProxy(e.target.value)}
-          placeholder="socks5://user:pass@host:port"
+          placeholder="例如 socks5://user:pass@host:port"
           autoComplete="off"
           disabled={clearIMAPProxy}
+          aria-describedby="proxy-dialog-hint"
         />
         {hasIMAPProxy && (
           <label className="checkbox-inline">
@@ -129,9 +134,12 @@ export default function ProxyDialog({ accountId, open, hasProxy = false, hasIMAP
             清除已配置的 IMAP 代理
           </label>
         )}
-        <p className="hint">
-          两个代理互不影响：上面的代理只管 iCloud Web/账号，IMAP 代理只管收信。输入框留空表示不改动该项；要移除已配置的代理，请勾选对应「清除」（清除后该通道直连，IMAP 直连会暴露服务器真实 IP）。出于安全考虑不回显当前值。
-        </p>
+      </div>
+      <div className="hint proxy-dialog-hint" id="proxy-dialog-hint">
+        <p>两个代理互不影响：账号代理只管 iCloud Web 与账号请求，IMAP 代理只管收信。</p>
+        <p>输入框留空表示不改动；要移除已保存的代理，勾选对应的「清除」。</p>
+        <p className="hint-risk">注意：清除后该通道直连，IMAP 直连会暴露服务器真实 IP。</p>
+        <p className="hint-muted">出于安全考虑，已保存的代理不会回显。</p>
       </div>
       <div className="form-actions">
         <button
@@ -142,7 +150,7 @@ export default function ProxyDialog({ accountId, open, hasProxy = false, hasIMAP
         >
           取消
         </button>
-        <button className="primary" onClick={() => void handleSubmit()} disabled={submitting}>
+        <button className="primary" onClick={() => void handleSubmit()} disabled={submitting || !dirty}>
           {submitting ? '保存中…' : '保存'}
         </button>
       </div>
