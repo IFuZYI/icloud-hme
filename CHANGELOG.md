@@ -2,6 +2,29 @@
 
 本项目遵循语义化版本。破坏性变更会在条目标题标注 **BREAKING**。
 
+## 未发布
+
+账号状态新增 `expired`：HME 业务接口判定会话失效时自动回写，前端徽章显示「Cookie 失效」。
+
+### 后端
+
+- 新增 `Account.Status = "expired"` 与 `Manager.MarkInvalid`：`/v2/hme/list`、创建/停用/删除别名返回 401/421 时把状态落库为 `expired` 并记录 `last_error`，同时清空该账号的别名/收件箱缓存。此前业务 401 只回给当次请求，账号会长期显示「正常」。
+- `CheckAccount`（`POST /api/accounts/:id/check`）在 `/validate` 之后追加一次 HME 业务探活（`ListAliases`）：会话级失败（401/421）判 `expired`，超时/5xx 等上游故障判 `error`；并用同一次响应刷新别名计数，去掉二次回源。
+- `Summary` 新增 `status_detail`（仅 `expired` 填充）：脱敏后的失效原因，URL 内嵌凭据替换为 `***@`，截断 200 字符；`last_error` 原文仍不出网。
+
+### 前端
+
+- 账号状态徽章新增「Cookie 失效」（`expired`），悬停显示 `status_detail`。
+
+### 邮件正文
+
+- 修复 HTML-only 邮件丢链接：纯文本化时把 `<a href="X">Y</a>` 展开为 `Y <X>`（仅保留 http/https，`mailto:`/`javascript:`/`data:` 丢弃），验证/重置密码等「按钮即链接」的邮件可直接看到并复制地址。
+- 收件箱正文把 `锚文本 <URL>` 折叠成「锚文本」超链接（URL 只进 `href`/`title`，正文不再出现长链接），裸 URL 显示为 `域名/路径` 短标签；新增 `web/src/utils/linkify.ts` 与 16 个单测；`.mail-body a` 增加链接样式与长 URL 折行。
+
+### 文档
+
+- API.md 补充 `status` 四态与 `status_detail` 字段说明。
+
 ## v0.2.2
 
 移动端可用性、代理配置体验与依赖安全修复。无 API 破坏性变更。

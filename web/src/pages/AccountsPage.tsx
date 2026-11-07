@@ -27,6 +27,7 @@ const statusMeta: Record<string, { text: string; badge: string; icon: typeof Ico
   active: { text: '正常', badge: 'badge badge-active', icon: IconCheck },
   pending: { text: '待配置', badge: 'badge badge-pending', icon: IconClock },
   error: { text: '异常', badge: 'badge badge-error', icon: IconAlert },
+  expired: { text: 'Cookie 失效', badge: 'badge badge-error', icon: IconAlert },
 }
 
 function StatusBadge({ status }: { status: string }) {
@@ -234,7 +235,7 @@ export default function AccountsPage() {
                     <span className="cell-secondary">{acc.id}</span>
                   </td>
                   <td data-label="状态" className="account-status">
-                    <span title={acc.status_message || undefined}>
+                    <span title={acc.status_detail || acc.status_message || undefined}>
                       <StatusBadge status={acc.status} />
                     </span>
                   </td>

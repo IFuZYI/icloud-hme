@@ -17,7 +17,7 @@ export interface AccountSummary {
   real_email: string
   icloud_email: string
   host: string
-  status: 'active' | 'pending' | 'error' | string
+  status: 'active' | 'pending' | 'error' | 'expired' | string
   alias_total: number
   alias_active: number
   has_cookies: boolean
@@ -27,6 +27,8 @@ export interface AccountSummary {
   mailbox?: MailboxSummary
   last_validated: string
   status_message?: string
+  /** 脱敏后的失效原因(仅 expired 填充), 如 "业务接口会话失效: HTTP 401" */
+  status_detail?: string
   created_at: string
 }
 

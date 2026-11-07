@@ -11,7 +11,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -29,24 +31,39 @@ import (
 // 因此绑定阶段即拒绝重复, 由 handler 映射为 409 MAILBOX_IN_USE。
 var ErrMailboxInUse = errors.New("该收件邮箱已被其他账号使用")
 
+// 账号状态取值。Status 语义是「上一次凭据校验的结果」, 不是实时可用性:
+//   - active  : 最近一次 /validate 通过
+//   - expired : HME 业务接口判定会话/服务令牌失效(比 validate 更强的信号)
+//   - error   : /validate 失败或其它校验错误
+//   - pending : 从未配置 Cookie, 未校验
+const (
+	StatusActive  = "active"
+	StatusExpired = "expired"
+	StatusError   = "error"
+	StatusPending = "pending"
+)
+
 // Account 描述一个 iCloud 账号。
 type Account struct {
-	ID            string            `json:"id"`
-	Name          string            `json:"name"`
-	RealEmail     string            `json:"real_email"`
-	ICloudEmail   string            `json:"icloud_email"`
-	Cookies       map[string]string `json:"cookies"`
-	Host          string            `json:"host"`
-	Proxy         string            `json:"proxy,omitempty"`      // HTTP/SOCKS5 代理
-	IMAPProxy     string            `json:"imap_proxy,omitempty"` // IMAP 专用代理(留空即 IMAP 直连, 与 Proxy 互不影响)
-	AppPassword   string            `json:"app_password,omitempty"`
-	Mailbox       *MailboxConfig    `json:"mailbox,omitempty"`
-	Status        string            `json:"status"` // active / error
-	AliasTotal    int               `json:"alias_total"`
-	AliasActive   int               `json:"alias_active"`
-	LastValidated string            `json:"last_validated"`
-	LastError     string            `json:"last_error,omitempty"`
-	CreatedAt     string            `json:"created_at"`
+	ID          string            `json:"id"`
+	Name        string            `json:"name"`
+	RealEmail   string            `json:"real_email"`
+	ICloudEmail string            `json:"icloud_email"`
+	Cookies     map[string]string `json:"cookies"`
+	Host        string            `json:"host"`
+	Proxy       string            `json:"proxy,omitempty"`      // HTTP/SOCKS5 代理
+	IMAPProxy   string            `json:"imap_proxy,omitempty"` // IMAP 专用代理(留空即 IMAP 直连, 与 Proxy 互不影响)
+	AppPassword string            `json:"app_password,omitempty"`
+	Mailbox     *MailboxConfig    `json:"mailbox,omitempty"`
+	Status      string            `json:"status"` // active / expired / error / pending
+	// invalidPersisted 表示当前 expired 状态已成功落盘(内存态标记, 不序列化)。
+	// 落盘失败时保持 false, 下一次 MarkInvalid 会重试写入而不是被幂等守卫跳过。
+	invalidPersisted bool   `json:"-"`
+	AliasTotal       int    `json:"alias_total"`
+	AliasActive      int    `json:"alias_active"`
+	LastValidated    string `json:"last_validated"`
+	LastError        string `json:"last_error,omitempty"`
+	CreatedAt        string `json:"created_at"`
 	// Timezone 为代理出口 IP 的地理时区（IANA 名称，如 America/Denver），
 	// 由 TimezoneFor 解析并缓存；代理变更时清除。空串表示尚未解析或使用本地时区。
 	Timezone string `json:"timezone,omitempty"`
@@ -164,6 +181,12 @@ func (m *Manager) load() error {
 	m.accounts = wrapper.Accounts
 	if m.accounts == nil {
 		m.accounts = make(map[string]*Account)
+	}
+	// 从磁盘加载的 expired 状态视为已落盘, 避免启动后首次 MarkInvalid 重复写。
+	for _, acc := range m.accounts {
+		if acc != nil && acc.Status == StatusExpired {
+			acc.invalidPersisted = true
+		}
 	}
 	// 配置重载可能换了代理/邮箱: 关闭所有旧连接, 后续读信按账号重建池。
 	pools := m.imapPools
@@ -606,10 +629,12 @@ func (m *Manager) ListSummaries() []Summary {
 // statusRank 返回状态的排序权重。
 func statusRank(status string) int {
 	switch status {
-	case "active":
+	case StatusActive:
 		return 0
-	case "pending":
+	case StatusPending:
 		return 1
+	case StatusExpired, StatusError:
+		return 2
 	default:
 		return 2
 	}
@@ -698,7 +723,7 @@ func (m *Manager) persistLogin(id string, client *hme.Client) (Summary, error) {
 		return Summary{}, fmt.Errorf("账号不存在: %s", id)
 	}
 	cur.Cookies = cloneCookies(client.Cookies)
-	cur.Status = "active"
+	cur.Status = StatusActive
 	cur.LastValidated = time.Now().Format(time.RFC3339)
 	cur.LastError = ""
 	if info := client.AccountInfo(); info != nil {
@@ -733,7 +758,9 @@ func (m *Manager) persistLogin(id string, client *hme.Client) (Summary, error) {
 // 语义对齐参考项目 hme-manager 的 check(): 对现有 Cookie 做一次低风险的
 // validate 探活(不创建/不修改任何远端资源), 并把结果落库——
 //   - 有效: status=active、last_validated 刷新、last_error 清空
-//   - 失效: status=error、last_error 记录可读原因(绝不写 Cookie 值)
+//   - 会话级失效(401/421): status=expired、last_error 记录可读原因
+//   - 其他上游故障(超时/5xx): status=error、last_error 记录原因
+//   - 任何情况下都不写 Cookie 值
 //
 // 与 UpdateCookies 的区别: 不接收新 Cookie, 纯粹探测当前凭据;
 // 与 HME 业务调用的区别: 不触发创建冷却, 可随时手动执行。
@@ -757,10 +784,24 @@ func (m *Manager) CheckAccount(id string) (Summary, error) {
 
 	client, err := hme.NewClient(snap.Cookies, snap.Host, snap.Proxy, false)
 	var checkErr error
+	var probeErr error // HME 业务探活失败(会话/服务令牌级)
+	var aliases []hme.Alias
+	var aliasesOK bool
 	if err != nil {
 		checkErr = fmt.Errorf("创建客户端失败: %w", err)
 	} else if err := client.ValidateSession(); err != nil {
 		checkErr = err
+	} else if list, listErr := client.ListAliases(); listErr != nil {
+		// validate 只证明「会话可解析」, 不证明 HME 业务可用:
+		// maildomainws 的服务令牌过期时 /validate 仍返回 200, 而
+		// /v2/hme/list 返回 401。只有会话级失败才判 expired;
+		// 超时/5xx 属于上游故障, 记 error, 不能误导用户去换 Cookie。
+		if isSessionFailure(listErr) {
+			probeErr = listErr
+		}
+		checkErr = fmt.Errorf("HME 业务接口不可用: %w", listErr)
+	} else {
+		aliases, aliasesOK = list, true
 	}
 
 	m.mu.Lock()
@@ -772,7 +813,7 @@ func (m *Manager) CheckAccount(id string) (Summary, error) {
 	if checkErr == nil {
 		// validate 成功响应可能刷新 Cookie, 保存最新值。
 		cur.Cookies = cloneCookies(client.Cookies)
-		cur.Status = "active"
+		cur.Status = StatusActive
 		cur.LastValidated = time.Now().Format(time.RFC3339)
 		cur.LastError = ""
 		if info := client.AccountInfo(); info != nil {
@@ -786,7 +827,13 @@ func (m *Manager) CheckAccount(id string) (Summary, error) {
 		if client != nil {
 			cur.Cookies = cloneCookies(client.Cookies)
 		}
-		cur.Status = "error"
+		if probeErr != nil {
+			// 业务接口已明确判定会话失效: 用 expired 表达「Cookie 失效」,
+			// 与 /validate 失败(error)区分, 前端据此提示更新 Cookie。
+			cur.Status = StatusExpired
+		} else {
+			cur.Status = StatusError
+		}
 		cur.LastError = truncate("登录态检测失败: "+checkErr.Error(), 300)
 	}
 	saveErr := m.save()
@@ -799,14 +846,75 @@ func (m *Manager) CheckAccount(id string) (Summary, error) {
 		return result, checkErr
 	}
 
-	// 检测通过后顺带刷新别名计数(失败不影响检测结果)。
-	if aliases, listErr := client.ListAliases(); listErr == nil {
+	// 检测通过: 用本次探活拿到的列表刷新别名计数(不再二次回源)。
+	if aliasesOK {
 		_ = m.UpdateAliasCounts(id, aliases)
 		if updated, ok := m.GetAccount(id); ok {
 			result = updated.Summary()
 		}
 	}
 	return result, nil
+}
+
+// MarkInvalid 在业务调用确认会话失效时回写账号状态。
+//
+// HME 业务接口返回的 401/421 是比 /validate 更强的失效信号: validate 只校验
+// 「会话可解析」, maildomainws 的服务令牌过期时它仍然 200。若不在业务侧回写,
+// 账号会长期显示「正常」, 而每次操作都报 Cookie 失效。
+//
+// 只更新状态与原因, 不覆盖 Cookie 值(失败的 Set-Cookie 仍可能刷新部分会话)。
+func (m *Manager) MarkInvalid(id, reason string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	acc, ok := m.accounts[id]
+	if !ok {
+		return nil
+	}
+	// 已是 expired 且原因已落盘时不重复写; 上次落盘失败(invalidPersisted=false)
+	// 时继续走写入, 避免一次瞬时写错误永久丢失状态。
+	if acc.Status == StatusExpired && acc.LastError != "" && acc.invalidPersisted {
+		return nil
+	}
+	acc.Status = StatusExpired
+	acc.LastError = truncate("业务接口会话失效: "+reason, 300)
+	acc.invalidPersisted = false
+	if err := m.save(); err != nil {
+		return err
+	}
+	acc.invalidPersisted = true
+	return nil
+}
+
+// httpStatusRE 从上游错误里取 HTTP 状态码。hme 客户端的错误格式是
+// "HTTP %d: <body 片段>", 必须只认这个前缀里的码, 不能在整段文本里找子串:
+// 5xx 响应体里出现 "401" / "session" / "cookie" 时会被误判为会话失效。
+var httpStatusRE = regexp.MustCompile(`(?i)\bHTTP (\d{3})\b`)
+
+// httpStatusOf 返回错误里第一个 HTTP 状态码; 无状态码返回 0。
+func httpStatusOf(err error) int {
+	if err == nil {
+		return 0
+	}
+	m := httpStatusRE.FindStringSubmatch(err.Error())
+	if m == nil {
+		return 0
+	}
+	code, convErr := strconv.Atoi(m[1])
+	if convErr != nil {
+		return 0
+	}
+	return code
+}
+
+// isSessionFailure 判断业务接口错误是否属于会话/令牌失效。
+// 只认 401/421: 403 可能是 CDN/WAF 拦截, 5xx 与超时属于上游故障,
+// 都不能把账号判为 expired(否则会误导用户更换有效 Cookie)。
+func isSessionFailure(err error) bool {
+	switch httpStatusOf(err) {
+	case 401, 421:
+		return true
+	}
+	return false
 }
 
 // HMELoginSession 把 *hme.Client 的两段式登录与账号持久化绑在一起。

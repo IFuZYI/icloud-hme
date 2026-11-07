@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -366,7 +368,15 @@ func (b *managerBackend) CheckAccount(id string) (account.Summary, error) {
 		if strings.Contains(msg, "未配置 Cookie") {
 			return account.Summary{}, &BackendError{Status: http.StatusBadRequest, Code: "VALIDATION_ERROR", Message: "账号未配置 Cookie，无法检测登录状态"}
 		}
-		// 检测失败时账号状态已置 error, 返回摘要与稳定错误码。
+		// 检测失败时账号状态已置 error 或 expired, 返回摘要与稳定错误码。
+		// 有 HTTP 状态码时只看状态码: 5xx 响应体里出现 "session"/"cookie"
+		// 不能被当成会话失效(否则会提示用户去换一个有效的 Cookie)。
+		if code := upstreamHTTPStatus(err); code != 0 {
+			if code == http.StatusUnauthorized || code == 421 {
+				return sum, &BackendError{Status: http.StatusUnauthorized, Code: "UPSTREAM_UNAUTHORIZED", Message: "iCloud 会话已失效，请重新登录或更新 Cookie"}
+			}
+			return sum, &BackendError{Status: http.StatusBadGateway, Code: "UPSTREAM_FAILURE", Message: "登录态检测失败，请稍后重试"}
+		}
 		if hasExplicitSessionSignal(msg) || isSessionError(msg) {
 			return sum, &BackendError{Status: http.StatusUnauthorized, Code: "UPSTREAM_UNAUTHORIZED", Message: "iCloud 会话已失效，请重新登录或更新 Cookie"}
 		}
@@ -392,7 +402,7 @@ func (b *managerBackend) CreateAlias(accountID, label string) (*hme.CreateResult
 	result, err := client.CreateAlias(label, 1)
 	_ = b.mgr.SaveCookies(accountID, client.Cookies)
 	if err != nil {
-		return nil, classifyUpstreamErr("创建邮箱失败", err)
+		return nil, b.markSessionLoss(accountID, classifyUpstreamErr("创建邮箱失败", err), err)
 	}
 	// 新别名已产生: 别名列表缓存立即失效, 下一次读取拿最新列表。
 	b.invalidateAliases(accountID)
@@ -420,7 +430,7 @@ func (b *managerBackend) ListAliases(accountID string) ([]hme.Alias, error) {
 	aliases, err := client.ListAliases()
 	_ = b.mgr.SaveCookies(accountID, client.Cookies)
 	if err != nil {
-		return nil, classifyUpstreamErr("获取别名列表失败", err)
+		return nil, b.markSessionLoss(accountID, classifyUpstreamErr("获取别名列表失败", err), err)
 	}
 	_ = b.mgr.UpdateAliasCounts(accountID, aliases)
 	b.respCache().set(key, aliases, aliasesCacheTTL)
@@ -438,6 +448,51 @@ func (b *managerBackend) invalidateAccountReads(accountID string) {
 	cache := b.respCache()
 	cache.invalidate("inbox:" + accountID + ":")
 	cache.invalidate("preview:" + accountID + ":")
+}
+
+// markSessionLoss 在业务调用判定会话失效时把账号状态落库为 expired。
+//
+// 业务接口的 401/421 是比 /validate 更强的信号(validate 只校验会话可解析),
+// 因此必须回写状态, 否则账号会长期显示「正常」而每次操作都报 Cookie 失效。
+// 同时清掉该账号的读缓存, 避免前端继续展示过期的别名/邮件列表。
+func (b *managerBackend) markSessionLoss(accountID string, be *BackendError, cause error) *BackendError {
+	if be == nil || be.Code != "UPSTREAM_UNAUTHORIZED" || accountID == "" {
+		return be
+	}
+	// 只有真正的 401/421 才回写 expired: 403 可能是 CDN/WAF 拦截,
+	// 5xx/超时属于上游故障, 都不能把账号判为 Cookie 失效。
+	if code := upstreamHTTPStatus(cause); code != 401 && code != 421 {
+		return be
+	}
+	reason := ""
+	if cause != nil {
+		reason = cause.Error()
+	}
+	if err := b.mgr.MarkInvalid(accountID, reason); err != nil {
+		slog.Warn("回写账号失效状态失败", "account", accountID, "err", err.Error())
+	}
+	b.invalidateAliases(accountID)
+	b.invalidateAccountReads(accountID)
+	return be
+}
+
+// upstreamStatusRE 从上游错误里取 HTTP 状态码(hme 错误格式 "HTTP %d: ...")。
+var upstreamStatusRE = regexp.MustCompile(`(?i)\bHTTP (\d{3})\b`)
+
+// upstreamHTTPStatus 返回错误里第一个 HTTP 状态码; 无状态码返回 0。
+func upstreamHTTPStatus(err error) int {
+	if err == nil {
+		return 0
+	}
+	m := upstreamStatusRE.FindStringSubmatch(err.Error())
+	if m == nil {
+		return 0
+	}
+	code, convErr := strconv.Atoi(m[1])
+	if convErr != nil {
+		return 0
+	}
+	return code
 }
 
 // SetAliasActive 停用或激活别名。
@@ -460,7 +515,7 @@ func (b *managerBackend) SetAliasActive(accountID, anonymousID string, active bo
 		} else {
 			msg = "激活失败"
 		}
-		return false, classifyUpstreamErr(msg, err)
+		return false, b.markSessionLoss(accountID, classifyUpstreamErr(msg, err), err)
 	}
 	// 别名状态已变化: 列表缓存失效, 下一次读取拿最新状态。
 	b.invalidateAliases(accountID)
@@ -476,7 +531,7 @@ func (b *managerBackend) DeleteAlias(accountID, anonymousID string) error {
 	err = client.Delete(anonymousID)
 	_ = b.mgr.SaveCookies(accountID, client.Cookies)
 	if err != nil {
-		return classifyUpstreamErr("删除失败", err)
+		return b.markSessionLoss(accountID, classifyUpstreamErr("删除失败", err), err)
 	}
 	// 别名已删除: 列表缓存失效, 下一次读取拿最新列表。
 	b.invalidateAliases(accountID)

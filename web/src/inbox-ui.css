@@ -383,6 +383,17 @@
   font-style: italic;
 }
 
+.mail-body a {
+  color: var(--color-primary);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  overflow-wrap: anywhere;
+}
+
+.mail-body a:hover {
+  text-decoration-thickness: 2px;
+}
+
 .mail-detail-actions {
   display: flex;
   justify-content: flex-end;

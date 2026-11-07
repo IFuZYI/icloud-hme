@@ -19,6 +19,15 @@ var (
 
 	cssSignalRE      = regexp.MustCompile(`(?i)(@font-face|@media|@import|@supports|@keyframes|(^|[\s;{])(-webkit-|-moz-|-ms-|mso-)[\w-]*|(^|[\s;{])(font-family|text-size-adjust|border-collapse|mso-table-[\w-]+)\s*:)`)
 	cssDeclarationRE = regexp.MustCompile(`(?i)(^|[;{])\s*[-a-z_][\w-]*\s*:\s*[^;{}]+`)
+
+	// anchorTagRE / hrefAttrRE 用于把 <a href="X">Y</a> 展开成 "Y <X>"。
+	// 纯文本正文若直接删标签, 按钮式链接(验证/重置密码)的 URL 会彻底消失。
+	anchorTagRE = regexp.MustCompile(`(?is)<a\b([^>]*)>(.*?)</a\s*>`)
+	// href 前必须是行首或空白: 否则 data-href / x-href 会被误当成真链接。
+	hrefAttrRE = regexp.MustCompile(`(?is)(?:^|\s)href\s*=\s*["']([^"']*)["']`)
+	// 只解码 href 里的 & 实体: 全局 UnescapeString 会把 &not= / &copy= 这类
+	// 无分号写法也解码, 破坏查询串。
+	ampEntityRE = regexp.MustCompile(`(?i)&(amp|#0*38|#x0*26);`)
 )
 
 // sanitizePreview converts an email preview to readable text and removes
@@ -54,11 +63,59 @@ func stripHTML(raw string) string {
 	// 未闭合时只删掉开标签本身, 让后续内容按普通文本处理;
 	// 漏进来的 CSS 由 sanitizePlainPreview 的 looksLikeCSS 兜底清理。
 	raw = unclosedNoiseBlockRE.ReplaceAllString(raw, " ")
+	// 先展开锚点: 纯文本化后 <a href> 会连同 URL 一起被删掉, 验证/重置
+	// 密码这类「按钮即链接」的邮件就再也拿不到地址。
+	raw = preserveLinks(raw)
 	raw = htmlBreakRE.ReplaceAllString(raw, "\n")
 	raw = htmlBlockEndRE.ReplaceAllString(raw, "\n")
 	raw = htmlListItemRE.ReplaceAllString(raw, "\n- ")
 	raw = htmlTagRE.ReplaceAllString(raw, "")
 	return normalizePreview(stdhtml.UnescapeString(raw))
+}
+
+// preserveLinks 把 <a href="X">Y</a> 展开为 "Y <X>", 让纯文本正文保留链接地址。
+//
+// 纯文本化会删除所有标签, 按钮式链接(验证邮箱/重置密码/查看账单)只存在于
+// href 中, 删掉标签后用户就再也拿不到地址。只保留 http/https:
+// mailto:/javascript:/data: 既不能安全打开, 也没有复制价值。
+func preserveLinks(raw string) string {
+	return anchorTagRE.ReplaceAllStringFunc(raw, func(tag string) string {
+		sub := anchorTagRE.FindStringSubmatch(tag)
+		if sub == nil {
+			return tag
+		}
+		attrs, inner := sub[1], sub[2]
+		m := hrefAttrRE.FindStringSubmatch(attrs)
+		if m == nil {
+			return inner
+		}
+		href := strings.TrimSpace(decodeHrefEntities(m[1]))
+		if !isHTTPURL(href) {
+			return inner
+		}
+		text := strings.TrimSpace(htmlTagRE.ReplaceAllString(inner, ""))
+		// href 只解码 & 实体; 锚文本按 HTML 文本语义解码一次。随后统一
+		// EscapeString 再插入, 由 stripHTML 末尾的 UnescapeString 还原,
+		// 既避免双重解码, 也避免解码出的 '<' 被后续标签剥离吞掉。
+		text = stdhtml.UnescapeString(text)
+		safeHref := stdhtml.EscapeString(href)
+		if text == "" || text == href {
+			return safeHref
+		}
+		return stdhtml.EscapeString(text) + " &lt;" + safeHref + "&gt;"
+	})
+}
+
+// isHTTPURL 判断是否为 http/https 链接(scheme 大小写不敏感, RFC 3986)。
+func isHTTPURL(raw string) bool {
+	lower := strings.ToLower(raw)
+	return strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://")
+}
+
+// decodeHrefEntities 只把 &amp; / &#38; / &#x26; 还原为 &, 其余实体保持原样,
+// 避免全局 UnescapeString 把 &not=2 这类查询串解成 ¬=2。
+func decodeHrefEntities(raw string) string {
+	return ampEntityRE.ReplaceAllString(raw, "&")
 }
 
 func normalizePreview(raw string) string {

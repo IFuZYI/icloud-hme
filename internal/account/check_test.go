@@ -1,6 +1,8 @@
 package account
 
 import (
+	"errors"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -115,5 +117,88 @@ func TestCheckAccountRequiresCookies(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "未配置 Cookie") {
 		t.Fatalf("错误 = %v, 期望提示未配置 Cookie", err)
+	}
+}
+
+// TestCheckAccountMarksExpiredOnBusinessUnauthorized 验证 /validate 通过但
+// HME 业务接口 401 时状态为 expired(而不是 error 或 active)。
+func TestCheckAccountMarksExpiredOnBusinessUnauthorized(t *testing.T) {
+	mock := hmetest.New(t)
+	mock.HMEListStatus = http.StatusUnauthorized
+	restore := overrideEndpointsForAccountTest(mock)
+	defer restore()
+
+	dir := t.TempDir()
+	m, err := NewManager(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum, err := m.AddAccountWithInput(AddAccountInput{Name: "主号", ICloudEmail: "a@icloud.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	m.accounts[sum.ID].Cookies = map[string]string{"X-APPLE-WEBAUTH-TOKEN": "v=1:t=x"}
+	m.mu.Unlock()
+
+	got, err := m.CheckAccount(sum.ID)
+	if err == nil {
+		t.Fatal("业务 401 应返回错误")
+	}
+	if got.Status != StatusExpired {
+		t.Fatalf("状态 = %q, 期望 %q", got.Status, StatusExpired)
+	}
+}
+
+// TestCheckAccountMarksErrorOnBusinessOutage 验证上游 5xx 不会被误判为
+// Cookie 失效: 只记 error, 不写 expired。
+func TestCheckAccountMarksErrorOnBusinessOutage(t *testing.T) {
+	mock := hmetest.New(t)
+	mock.HMEListStatus = http.StatusInternalServerError
+	restore := overrideEndpointsForAccountTest(mock)
+	defer restore()
+
+	dir := t.TempDir()
+	m, err := NewManager(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum, err := m.AddAccountWithInput(AddAccountInput{Name: "主号", ICloudEmail: "a@icloud.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	m.accounts[sum.ID].Cookies = map[string]string{"X-APPLE-WEBAUTH-TOKEN": "v=1:t=x"}
+	m.mu.Unlock()
+
+	got, err := m.CheckAccount(sum.ID)
+	if err == nil {
+		t.Fatal("上游 500 应返回错误")
+	}
+	if got.Status != StatusError {
+		t.Fatalf("状态 = %q, 期望 %q(上游故障不应判 Cookie 失效)", got.Status, StatusError)
+	}
+}
+
+// TestIsSessionFailureUsesHTTPStatusOnly 验证只认错误前缀里的 HTTP 状态码:
+// 5xx 响应体里出现 "401"/"session"/"cookie" 不能被当成会话失效。
+func TestIsSessionFailureUsesHTTPStatusOnly(t *testing.T) {
+	cases := []struct {
+		msg  string
+		want bool
+	}{
+		{"HTTP 401: ", true},
+		{"HTTP 421: misdirected request", true},
+		{"HTTP 403: forbidden", false},
+		{"HTTP 500: {\"error\":\"session store unavailable\"}", false},
+		{"HTTP 502: <html>please enable cookies</html>", false},
+		{"HTTP 500: {\"error\":\"request 0x401abc failed\"}", false},
+		{"dial tcp 10.0.0.1:443: i/o timeout", false},
+		{"HTTP 4010: weird", false},
+	}
+	for _, tc := range cases {
+		if got := isSessionFailure(errors.New(tc.msg)); got != tc.want {
+			t.Errorf("isSessionFailure(%q) = %v, 期望 %v", tc.msg, got, tc.want)
+		}
 	}
 }

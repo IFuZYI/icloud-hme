@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { DatePicker } from 'antd'
 import type { Dayjs } from 'dayjs'
@@ -14,6 +14,7 @@ import SelectMenu from '../components/SelectMenu'
 import { useToast } from '../components/ToastProvider'
 import { copyText } from '../utils/clipboard'
 import { formatDateTime } from '../utils/datetime'
+import { splitBodyLinks, displayLabelForUrl } from '../utils/linkify'
 import { IconAlert, IconCopy, IconKey, IconMail, IconRefresh, IconTrash } from '../components/icons'
 
 dayjs.locale('zh-cn')
@@ -102,6 +103,8 @@ export default function InboxPage() {
   const [retryKey, setRetryKey] = useState(0)
   const [detail, setDetail] = useState<FullMessage | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
+  // 正文可能很大（详情路径不设上限），切片结果按正文缓存，避免每次渲染重算。
+  const bodySegments = useMemo(() => splitBodyLinks(detail?.body ?? ''), [detail?.body])
   const [deleteFor, setDeleteFor] = useState<InboxMessage | null>(null)
   const [deleting, setDeleting] = useState(false)
   // 批量清理: 对话框状态。
@@ -647,7 +650,25 @@ export default function InboxPage() {
               <dt>日期</dt>
               <dd>{formatDate(detail.date)}</dd>
             </dl>
-            <pre className={`mail-body${detail.body ? '' : ' is-empty'}`}>{detail.body || '无正文'}</pre>
+            <pre className={`mail-body${detail.body ? '' : ' is-empty'}`}>
+              {detail.body
+                ? bodySegments.map((segment, index) =>
+                    segment.type === 'link' ? (
+                      <a
+                        key={index}
+                        href={segment.value}
+                        title={segment.value}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >
+                        {segment.label ?? displayLabelForUrl(segment.value)}
+                      </a>
+                    ) : (
+                      <span key={index}>{segment.value}</span>
+                    ),
+                  )
+                : '无正文'}
+            </pre>
             <div className="mail-detail-actions">
               <button className="inbox-action" onClick={() => void copyBody()} disabled={!detail.body}>
                 <IconCopy size={15} />

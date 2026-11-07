@@ -112,7 +112,8 @@ curl -s http://hme.internal:8081/api/accounts -H "X-API-Key: $HME_KEY"
 | 字段 | 说明 |
 |---|---|
 | `id` | 账号 ID，后续所有接口的 `account_id` 都用它 |
-| `status` | `active` / `pending` / `error`（`pending` 通常表示还没配置 Cookie，读信会失败） |
+| `status` | `active` / `pending` / `error` / `expired`（`pending` 通常表示还没配置 Cookie，读信会失败；`expired` 表示 HME 业务接口判定 Cookie 失效，需重新登录或更新 Cookie） |
+| `status_detail` | 仅 `expired` 返回：脱敏后的失效原因（如 `业务接口会话失效: HTTP 401:`），URL 内嵌凭据替换为 `***@`，最多 200 字符 |
 | `alias_total` / `alias_active` | 别名总数 / 已启用数 |
 | `has_cookies` / `has_app_password` | 是否具备两条读信通道（IMAP 优先，Web API 回退） |
 | `has_proxy` / `has_imap_proxy` | 是否配置了账号代理 / IMAP 专用代理（代理地址本身永不回显） |

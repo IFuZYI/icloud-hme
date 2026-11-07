@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/mail"
 	"net/url"
+	"regexp"
 	"strings"
 )
 
@@ -28,7 +29,10 @@ type Summary struct {
 	Mailbox        *MailboxSummary `json:"mailbox,omitempty"`
 	LastValidated  string          `json:"last_validated"`
 	StatusMessage  string          `json:"status_message,omitempty"`
-	CreatedAt      string          `json:"created_at"`
+	// StatusDetail 是脱敏后的失效原因(仅 expired 状态填充), 供前端展示
+	// 「Cookie 失效: HTTP 401」这类可操作信息。LastError 本身永不出网。
+	StatusDetail string `json:"status_detail,omitempty"`
+	CreatedAt    string `json:"created_at"`
 }
 
 // Summary 返回账号的安全快照,忽略内部 LastError。
@@ -57,8 +61,27 @@ func (a *Account) Summary() Summary {
 		s.StatusMessage = "等待配置或验证凭据"
 	case "error":
 		s.StatusMessage = "凭据验证失败"
+	case StatusExpired:
+		s.StatusMessage = "Cookie 已失效，请重新登录或更新 Cookie"
+		s.StatusDetail = sanitizeStatusDetail(a.LastError)
 	}
 	return s
+}
+
+// credentialInURL 匹配 URL 中的 user:pass@ 段, 用于状态详情脱敏。
+var credentialInURL = regexp.MustCompile(`://[^\s/]*@`)
+
+// sanitizeStatusDetail 生成可对外展示的失效原因: 去掉 URL 内嵌凭据并截断。
+func sanitizeStatusDetail(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	cleaned := credentialInURL.ReplaceAllString(raw, "://***@")
+	const limit = 200
+	if runes := []rune(cleaned); len(runes) > limit {
+		cleaned = string(runes[:limit-1]) + "…"
+	}
+	return cleaned
 }
 
 type MailboxSummary struct {

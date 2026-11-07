@@ -91,7 +91,7 @@ X-CSRF-Token: <token>
 GET /api/accounts
 ```
 
-**响应：** `Summary[]`，排序为 active → pending → error，同状态按 name、id。
+**响应：** `Summary[]`，排序为 active → pending → error/expired（后两者同级），同状态按 name、id。
 
 ```json
 {
@@ -117,7 +117,18 @@ GET /api/accounts
 }
 ```
 
-**禁止出现的字段：** `cookies`、`app_password`、`proxy`。`status_message` 只映射固定文案（pending → "等待配置或验证凭据"，error → "凭据验证失败"），不返回内部错误原文。
+**禁止出现的字段：** `cookies`、`app_password`、`proxy`。
+
+**`status` 取值与 `status_message`：**
+
+| status | status_message | 含义 |
+|---|---|---|
+| `active` | 空 | 最近一次 `/validate` 通过（仅代表会话可解析，不代表 HME 可用） |
+| `pending` | 等待配置或验证凭据 | 从未配置 Cookie，未校验 |
+| `error` | 凭据验证失败 | `/validate` 失败，或检测时上游超时/5xx/403 |
+| `expired` | Cookie 已失效，请重新登录或更新 Cookie | **HME 业务接口返回 401/421**（`/v2/hme/list`、创建/停用/删除别名，或 `/check` 的业务探活）时自动回写 |
+
+`expired` 额外返回 `status_detail`（脱敏后的失效原因，如 `业务接口会话失效: HTTP 401:`），URL 内嵌的 `user:pass@` 会被替换为 `***@`，最多 200 字符。`last_error` 原文仍然不出网。
 
 ### 5. 添加账号
 
@@ -272,7 +283,9 @@ X-CSRF-Token: <token>
 对账号现有 Cookie 做一次低风险 validate 探活（不创建/修改任何远端资源，不触发创建冷却），并把结果落库后返回脱敏 `Summary`。
 
 - 有效：`200`，`status=active`、`last_validated` 刷新、`last_error` 清空；顺带刷新别名计数
-- 失效：`401 UPSTREAM_UNAUTHORIZED`（会话已失效）或 `502 UPSTREAM_FAILURE`（其他上游故障）；`status=error`、`last_error` 记录原因（脱敏，不含 Cookie 值）
+- `/validate` 失败（Cookie 无效/过期）：`401 UPSTREAM_UNAUTHORIZED`；`status=error`、`last_error` 记录原因（脱敏，不含 Cookie 值）
+- HME 业务探活（`ListAliases`）返回 401/421：`401 UPSTREAM_UNAUTHORIZED`；`status=expired`
+- 其他上游故障（超时/5xx/403）：`502 UPSTREAM_FAILURE`；`status=error`、`last_error` 记录原因
 - 无 Cookie：`400 VALIDATION_ERROR`（账号未配置 Cookie，无法检测）
 - 账号不存在：`404 ACCOUNT_NOT_FOUND`
 
@@ -401,7 +414,7 @@ IMAP 不可用而回退到 Web API 时，响应会额外带 `warning` 字段说�
 }
 ```
 
-`preview` 由服务端解析 MIME 正文得到：支持 `multipart/*` 递归、`message/rfc822` 转发邮件、base64 / quoted-printable 解码与非 UTF-8 字符集转换，优先 `text/plain`，仅有 HTML 时转为纯文本。摘要最多保留 2000 个字符（按字符计），完整正文通过 `GET /api/inbox/:message_id` 获取，不受此限制。
+`preview` 由服务端解析 MIME 正文得到：支持 `multipart/*` 递归、`message/rfc822` 转发邮件、base64 / quoted-printable 解码与非 UTF-8 字符集转换，优先 `text/plain`，仅有 HTML 时转为纯文本。**纯文本化会把锚点展开为 `锚文本 <URL>`**（仅保留 `http/https`，`mailto:`/`javascript:`/`data:` 丢弃），因此 HTML-only 邮件里的按钮式验证链接仍可见。前端会把 `锚文本 <URL>` 折叠成「锚文本」超链接（URL 只放在 `title` 与 `href` 中，不在正文显示），裸 URL 则显示为 `域名/路径` 的短标签，均为 `target="_blank" rel="noopener noreferrer"`。摘要最多保留 2000 个字符（按字符计），完整正文通过 `GET /api/inbox/:message_id` 获取，不受此限制。
 
 附件判定：`Content-Disposition: attachment` 的部分一律跳过（含 filename 未加引号导致解析失败的情况）；多部分邮件中只带 `name=` 参数而无 `Content-Disposition` 的部分同样按附件处理（单部分邮件的 `name=` 仍视为正文）。另：为省去对超大 HTML 部分的解析开销，有 `text/plain` 部分时不再解析 HTML。
 

@@ -72,6 +72,9 @@ type Server struct {
 	HMEListHits int
 	// HMEDeleteHits 是 /v1/hme/delete 的命中次数。
 	HMEDeleteHits int
+	// HMEListStatus 非零时 /v2/hme/list 返回该状态码(默认 200)。
+	// 用于区分「会话失效(401/421)」与「上游故障(500)」两条检测分支。
+	HMEListStatus int
 	// HMEListBody 覆盖 /v2/hme/list 的响应体(默认空列表)。
 	HMEListBody string
 }
@@ -331,7 +334,14 @@ func New(t testing.TB) *Server {
 		m.mu.Lock()
 		m.HMEListHits++
 		body := m.HMEListBody
+		status := m.HMEListStatus
 		m.mu.Unlock()
+		if status != 0 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte(`{"error":"mock upstream failure"}`))
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		if body == "" {
 			body = `{"success":true,"result":{"hmeEmails":[]}}`
