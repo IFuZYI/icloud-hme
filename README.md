@@ -136,7 +136,7 @@ docker compose up -d --build
 docker compose down
 ```
 
-> **镜像标签**：`docker-compose.yml` 默认使用 `ghcr.io/ifuzyi/icloud-hme:latest`，`docker compose pull` 会跟随最新发布。生产环境如需可复现/可回滚，把 `image:` 改成固定版本（如 `:0.2.3`）；`latest` 每次发布都会移动，回滚时需手动指定旧标签。
+> **镜像标签**：`docker-compose.yml` 默认使用 `ghcr.io/ifuzyi/icloud-hme:latest`，并设置 `pull_policy: always`——每次 `docker compose up -d` 都会先检查并拉取最新发布，无需手动 `pull`。生产环境如需可复现/可回滚，把 `image:` 改成固定版本（如 `:0.2.3`）；`latest` 每次发布都会移动，回滚时需手动指定旧标签。
 
 说明：
 
