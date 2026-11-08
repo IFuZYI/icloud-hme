@@ -19,7 +19,7 @@ services:
       context: .
       dockerfile: Dockerfile
     # 默认跟随 latest: `docker compose pull && docker compose up -d` 即升级到最新发布。
-    # 需要可复现/可回滚时把标签改成固定版本(如 :0.2.2), 升级前先看 Release Notes。
+    # 需要可复现/可回滚时把标签改成固定版本(如 :0.2.3), 升级前先看 Release Notes。
     # 仍保留 build 段: `docker compose up -d --build` 会本地构建并覆盖同名镜像。
     image: ghcr.io/ifuzyi/icloud-hme:latest
     container_name: icloud-hme

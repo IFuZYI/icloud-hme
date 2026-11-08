@@ -136,7 +136,7 @@ docker compose up -d --build
 docker compose down
 ```
 
-> **镜像标签**：`docker-compose.yml` 默认使用 `ghcr.io/ifuzyi/icloud-hme:latest`，`docker compose pull` 会跟随最新发布。生产环境如需可复现/可回滚，把 `image:` 改成固定版本（如 `:0.2.2`）；`latest` 每次发布都会移动，回滚时需手动指定旧标签。
+> **镜像标签**：`docker-compose.yml` 默认使用 `ghcr.io/ifuzyi/icloud-hme:latest`，`docker compose pull` 会跟随最新发布。生产环境如需可复现/可回滚，把 `image:` 改成固定版本（如 `:0.2.3`）；`latest` 每次发布都会移动，回滚时需手动指定旧标签。
 
 说明：
 
@@ -897,7 +897,7 @@ GOOS=windows GOARCH=amd64 go build -o icloud-hme.exe .
 推送 `v*` tag 到 GitHub 自动触发 CI：
 
 ```bash
-git tag v0.2.2 && git push origin --tags
+git tag v0.2.3 && git push origin --tags
 ```
 
 Actions 会自动构建多平台二进制、Docker 镜像（`ghcr.io/ifuzyi/icloud-hme`）并创建 Release。
